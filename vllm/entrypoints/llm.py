@@ -2073,6 +2073,73 @@ class LLM:
             "update_weights", kwargs={"update_info": update_info_dict}
         )
 
+    def get_routing_data(self) -> dict[int, list[dict]]:
+        """
+        Retrieve MoE routing data from the worker process.
+        
+        This method retrieves token-to-expert routing information captured
+        during inference when VLLM_TRACK_ROUTING=1 is set.
+        
+        Returns:
+            A dictionary mapping layer_id to list of routing captures.
+            Each capture contains: topk_ids, topk_weights, router_logits, num_tokens.
+            Returns empty dict if tracking is not enabled or no data captured.
+        """
+        results = self.llm_engine.collective_rpc("get_routing_data")
+        # Return the first result (should be the same across all workers in DP)
+        if results:
+            return results[0]
+        return {}
+
+    def get_routing_data_distributed(self) -> dict[int, list[dict]]:
+        """
+        Retrieve MoE routing data from all DP ranks as proper PyTorch CPU tensors.
+        
+        Tensors are serialized to bytes inside workers (avoiding RPC corruption),
+        then deserialized and concatenated across all DP ranks here.
+        
+        Returns:
+            Dictionary mapping layer_id to list with one consolidated capture.
+            Each capture contains: topk_ids (CPU tensor), topk_weights (CPU tensor), num_tokens.
+        """
+        import io
+        import torch
+        
+        results = self.llm_engine.collective_rpc("get_routing_data_serialized")
+        
+        # Deserialize and concatenate across all DP ranks
+        all_data: dict[int, dict[str, list]] = {}
+        for rank_data in results:
+            if not rank_data:
+                continue
+            for layer_id, captures in rank_data.items():
+                if layer_id not in all_data:
+                    all_data[layer_id] = {'topk_ids': [], 'topk_weights': [], 'num_tokens': 0}
+                for capture in captures:
+                    buf = io.BytesIO(capture['tensor_bytes'])
+                    tensors = torch.load(buf, weights_only=True)
+                    all_data[layer_id]['topk_ids'].append(tensors['topk_ids'])
+                    all_data[layer_id]['topk_weights'].append(tensors['topk_weights'])
+                    all_data[layer_id]['num_tokens'] += capture['num_tokens']
+        
+        # Concatenate into single tensors per layer
+        consolidated = {}
+        for layer_id, data in all_data.items():
+            consolidated[layer_id] = [{
+                'topk_ids': torch.cat(data['topk_ids'], dim=0),
+                'topk_weights': torch.cat(data['topk_weights'], dim=0),
+                'num_tokens': data['num_tokens'],
+            }]
+        return consolidated
+
+    def clear_routing_data(self) -> None:
+        """
+        Clear captured MoE routing data from the worker process.
+        
+        This is useful for resetting the tracking state between inference runs.
+        """
+        self.llm_engine.collective_rpc("clear_routing_data")
+
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""
         # Cache the result to avoid repeated collective_rpc calls

@@ -172,6 +172,7 @@ if TYPE_CHECKING:
     )
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+    VLLM_TRACK_ROUTING: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -1346,6 +1347,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOE_ROUTING_SIMULATION_STRATEGY": lambda: os.environ.get(
         "VLLM_MOE_ROUTING_SIMULATION_STRATEGY", ""
     ).lower(),
+    # Enable in-memory tracking of MoE routing decisions (expert selections and weights)
+    # for debugging and analysis. Data can be accessed via get_routing_data() from
+    # vllm.model_executor.layers.fused_moe.layer
+    "VLLM_TRACK_ROUTING": lambda: bool(int(os.getenv("VLLM_TRACK_ROUTING", "0"))),
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")

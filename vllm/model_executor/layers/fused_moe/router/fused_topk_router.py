@@ -13,6 +13,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
+# Import routing tracking globals from layer module
+from vllm.model_executor.layers.fused_moe.layer import _ROUTING_DATA, _is_tracking_enabled
+
+
 
 def vllm_topk_softmax(
     topk_weights: torch.Tensor,
@@ -125,6 +129,7 @@ class FusedTopKRouter(BaseRouter):
         renormalize: bool = True,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        layer_id: int | None = None,
     ):
         super().__init__(
             top_k=top_k,
@@ -135,6 +140,7 @@ class FusedTopKRouter(BaseRouter):
         )
         self.renormalize = renormalize
         self.scoring_func = scoring_func
+        self._layer_id = layer_id
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -161,5 +167,16 @@ class FusedTopKRouter(BaseRouter):
             indices_type=indices_type,
             scoring_func=self.scoring_func,
         )
+        
+        # Capture routing data if tracking is enabled
+        if _is_tracking_enabled() and self._layer_id is not None:
+            if self._layer_id not in _ROUTING_DATA:
+                _ROUTING_DATA[self._layer_id] = []
+            # Keep tensors on GPU - will use torch.distributed for collection
+            _ROUTING_DATA[self._layer_id].append({
+                'topk_ids': topk_ids.detach(),  # Keep on GPU
+                'topk_weights': topk_weights.detach(),  # Keep on GPU
+                'num_tokens': hidden_states.shape[0],
+            })
 
         return topk_weights, topk_ids

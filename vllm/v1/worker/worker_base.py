@@ -122,6 +122,47 @@ class WorkerBase:
 
         return format_model_inspection(self.get_model())
 
+    def get_routing_data(self) -> dict[int, list[dict]]:
+        """Return MoE routing data captured during inference."""
+        from vllm.model_executor.layers.fused_moe.layer import get_routing_data
+        return get_routing_data()
+
+    def clear_routing_data(self) -> None:
+        """Clear captured MoE routing data."""
+        from vllm.model_executor.layers.fused_moe.layer import clear_routing_data
+        clear_routing_data()
+
+    def get_routing_data_serialized(self) -> dict[int, list[dict]]:
+        """
+        Return MoE routing data with tensors serialized to bytes.
+
+        RPC serialization corrupts tensor objects, so we serialize them
+        to raw bytes using torch.save + BytesIO. The bytes survive RPC
+        and can be deserialized back to proper PyTorch tensors.
+        """
+        import io
+        import torch
+        from vllm.model_executor.layers.fused_moe.layer import get_routing_data
+
+        local_data = get_routing_data()
+        if not local_data:
+            return {}
+
+        serialized = {}
+        for layer_id, captures in local_data.items():
+            serialized[layer_id] = []
+            for capture in captures:
+                buf = io.BytesIO()
+                torch.save({
+                    'topk_ids': capture['topk_ids'].cpu(),
+                    'topk_weights': capture['topk_weights'].cpu(),
+                }, buf)
+                serialized[layer_id].append({
+                    'tensor_bytes': buf.getvalue(),
+                    'num_tokens': capture['num_tokens'],
+                })
+        return serialized
+
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""
         raise NotImplementedError
