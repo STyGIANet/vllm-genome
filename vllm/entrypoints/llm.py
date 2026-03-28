@@ -2135,10 +2135,71 @@ class LLM:
     def clear_routing_data(self) -> None:
         """
         Clear captured MoE routing data from the worker process.
-        
+
         This is useful for resetting the tracking state between inference runs.
         """
         self.llm_engine.collective_rpc("clear_routing_data")
+
+    def drain_step_snapshots(self) -> list[dict]:
+        """Return and clear per-step routing snapshots (prefill + each decode).
+
+        Each entry in the returned list is one model forward pass::
+
+            {
+                'step_idx': int,   # 0 = prefill, 1..N = decode steps
+                'routing': {
+                    layer_id: [{'topk_ids': Tensor (CPU),
+                                 'topk_weights': Tensor (CPU),
+                                 'num_tokens': int}]
+                }
+            }
+
+        Unlike ``get_routing_data_distributed()``, this method preserves the
+        per-step structure so callers can distinguish prefill from decode and
+        process data step-by-step.
+
+        Call this method after ``generate()`` completes, or poll it in a
+        separate thread while generation is running (thread-safe via the
+        engine's RPC mechanism).
+        """
+        import io
+        import torch
+
+        results = self.llm_engine.collective_rpc(
+            "drain_step_snapshots_serialized"
+        )
+        if not results:
+            return []
+
+        # Each result is from a TP-rank worker.  With TP=1 there is exactly
+        # one result.  Take the first (TP rank 0) — all TP ranks see the same
+        # batch so their routing data is identical.
+        raw = results[0]
+        if not raw:
+            return []
+
+        deserialized = []
+        for snap in raw:
+            deser_routing: dict = {}
+            for layer_id, captures in snap['routing'].items():
+                deser_routing[layer_id] = []
+                for capture in captures:
+                    buf = io.BytesIO(capture['tensor_bytes'])
+                    tensors = torch.load(buf, weights_only=True)
+                    deser_routing[layer_id].append({
+                        'topk_ids': tensors['topk_ids'],
+                        'topk_weights': tensors['topk_weights'],
+                        'num_tokens': capture['num_tokens'],
+                    })
+            deserialized.append({
+                'step_idx': snap['step_idx'],
+                'routing': deser_routing,
+            })
+        return deserialized
+
+    def reset_step_counter(self) -> None:
+        """Reset the per-step routing counter and clear pending snapshots."""
+        self.llm_engine.collective_rpc("reset_step_counter")
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""

@@ -3066,6 +3066,26 @@ class GPUModelRunner(
             }
         )
 
+    def _on_routing_step(self) -> None:
+        """Called after each model forward pass, immediately before eplb_step().
+
+        Snapshots the current step's routing data into the per-step queue and
+        clears _ROUTING_DATA so the next forward pass starts fresh.
+
+        This is the designated extension point for the merged branch: after
+        adding the token_routing and expert_placement branches together, this
+        method will also call ``compute_placement(step_data)`` and feed the
+        result into the EPLB policy so expert positions update every step.
+        """
+        from vllm.model_executor.layers.fused_moe.layer import (
+            _is_tracking_enabled,
+            push_step_snapshot,
+            clear_routing_data,
+        )
+        if _is_tracking_enabled():
+            push_step_snapshot()
+            clear_routing_data()
+
     def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
@@ -3792,6 +3812,14 @@ class GPUModelRunner(
             assert kv_connector_metadata is not None
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
+        # Clear routing data from the previous step so _ROUTING_DATA always
+        # reflects only the current step's captures (prefill or one decode step).
+        from vllm.model_executor.layers.fused_moe.layer import (
+            _is_tracking_enabled, clear_routing_data,
+        )
+        if _is_tracking_enabled():
+            clear_routing_data()
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
             record_function_or_nullcontext("gpu_model_runner: preprocess"),
@@ -4284,6 +4312,9 @@ class GPUModelRunner(
         # draft model to also save its KV cache.
         if spec_config is not None:
             self.finalize_kv_connector()
+
+        with record_function_or_nullcontext("gpu_model_runner: routing_step"):
+            self._on_routing_step()
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()

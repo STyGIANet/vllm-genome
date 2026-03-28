@@ -39,30 +39,75 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 
 # Global routing tracking (in-memory)
 # NOTE: Must be defined BEFORE importing router_factory to avoid circular import issues
-# Stores routing decisions: {layer_idx: [{'topk_ids': np.array, 'topk_weights': np.array, ...}, ...]}
+# Stores routing decisions for the CURRENT step only.
+# Cleared automatically at the start of each execute_model() call when
+# VLLM_TRACK_ROUTING=1 is set.
 _ROUTING_DATA: dict[int, list[dict]] = {}
 
+# Per-step snapshots.  After each execute_model() forward pass, a deep copy of
+# _ROUTING_DATA is appended here (keyed by step index).  Callers drain this
+# queue via drain_step_snapshots() to get ordered, step-level routing data.
+_STEP_ROUTING_SNAPSHOTS: list[dict] = []
+_STEP_COUNTER: list[int] = [0]  # mutable singleton so we can increment it
+
+
 def _is_tracking_enabled() -> bool:
-    """Check if routing tracking is enabled via environment variable.
-    
-    This is checked dynamically rather than at module import time to ensure
-    the environment variable is properly read in worker processes.
-    """
+    """Check if routing tracking is enabled via environment variable."""
     import os
     return bool(int(os.getenv("VLLM_TRACK_ROUTING", "0")))
 
+
 def get_routing_data() -> dict[int, list[dict]]:
-    """Get collected routing data from all MoE layers.
-    
-    Returns:
-        Dictionary mapping layer_idx to list of routing captures.
-        Each capture contains: topk_ids, topk_weights, router_logits, num_tokens.
-    """
+    """Return current step's routing data (all MoE layers)."""
     return _ROUTING_DATA
 
+
 def clear_routing_data() -> None:
-    """Clear all collected routing data."""
+    """Clear the current step's routing data."""
     _ROUTING_DATA.clear()
+
+
+def push_step_snapshot() -> None:
+    """Snapshot the current _ROUTING_DATA into the per-step queue.
+
+    Called inside gpu_model_runner._on_routing_step() after every model
+    forward pass, before clear_routing_data().  The snapshot contains a
+    shallow copy of the dict (the tensors are already .clone()'d at capture
+    time in fused_topk_router.py, so no extra copy is needed here).
+    """
+    snapshot = {
+        'step_idx': _STEP_COUNTER[0],
+        'routing': {k: list(v) for k, v in _ROUTING_DATA.items()},
+    }
+    _STEP_ROUTING_SNAPSHOTS.append(snapshot)
+    _STEP_COUNTER[0] += 1
+
+
+def drain_step_snapshots() -> list[dict]:
+    """Return and clear all pending per-step snapshots.
+
+    Each entry is::
+
+        {
+            'step_idx': int,               # 0 = prefill, 1..N = decode steps
+            'routing': {
+                layer_id: [{'topk_ids': Tensor, 'topk_weights': Tensor,
+                             'num_tokens': int}],
+            }
+        }
+
+    The caller is responsible for processing or forwarding the data before
+    the next call, because this function empties the queue.
+    """
+    snaps = list(_STEP_ROUTING_SNAPSHOTS)
+    _STEP_ROUTING_SNAPSHOTS.clear()
+    return snaps
+
+
+def reset_step_counter() -> None:
+    """Reset the step counter (call between independent inference runs)."""
+    _STEP_COUNTER[0] = 0
+    _STEP_ROUTING_SNAPSHOTS.clear()
 
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,

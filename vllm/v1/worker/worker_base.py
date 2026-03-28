@@ -163,6 +163,54 @@ class WorkerBase:
                 })
         return serialized
 
+    def drain_step_snapshots_serialized(self) -> list[dict]:
+        """Return and clear per-step routing snapshots with serialized tensors.
+
+        Each element of the returned list corresponds to one model forward
+        pass (step_idx=0 is the prefill, 1..N are decode steps).  Tensors are
+        serialized to bytes so they survive the RPC boundary intact.
+
+        Returns:
+            List of dicts::
+
+                {
+                    'step_idx': int,
+                    'routing': {
+                        layer_id: [{'tensor_bytes': bytes, 'num_tokens': int}]
+                    }
+                }
+        """
+        import io
+        import torch
+        from vllm.model_executor.layers.fused_moe.layer import drain_step_snapshots
+
+        raw_snaps = drain_step_snapshots()
+        serialized_snaps = []
+        for snap in raw_snaps:
+            ser_routing: dict = {}
+            for layer_id, captures in snap['routing'].items():
+                ser_routing[layer_id] = []
+                for capture in captures:
+                    buf = io.BytesIO()
+                    torch.save({
+                        'topk_ids': capture['topk_ids'].cpu(),
+                        'topk_weights': capture['topk_weights'].cpu(),
+                    }, buf)
+                    ser_routing[layer_id].append({
+                        'tensor_bytes': buf.getvalue(),
+                        'num_tokens': capture['num_tokens'],
+                    })
+            serialized_snaps.append({
+                'step_idx': snap['step_idx'],
+                'routing': ser_routing,
+            })
+        return serialized_snaps
+
+    def reset_step_counter(self) -> None:
+        """Reset the step counter and clear pending snapshots."""
+        from vllm.model_executor.layers.fused_moe.layer import reset_step_counter
+        reset_step_counter()
+
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""
         raise NotImplementedError
