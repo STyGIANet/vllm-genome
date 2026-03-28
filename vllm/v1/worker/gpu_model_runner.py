@@ -3066,25 +3066,57 @@ class GPUModelRunner(
             }
         )
 
+    # Optional user callback: compute_placement(routing_snapshot) -> dict
+    # Set this on the model runner to enable live expert redistribution.
+    #
+    # Signature::
+    #   def compute_placement(routing: dict) -> dict:
+    #       # routing: {layer_id: [{'topk_ids': Tensor, 'topk_weights': Tensor, 'num_tokens': int}]}
+    #       # returns: {"expert_to_gpu": {"0": gpu_id, "1": gpu_id, ...}}
+    #
+    # When set AND enable_eplb=True AND policy="custom", the returned mapping
+    # is fed into StaticPlacementPolicy before each eplb_step() call so
+    # expert positions update after every forward pass.
+    _compute_placement_callback: object = None
+
     def _on_routing_step(self) -> None:
         """Called after each model forward pass, immediately before eplb_step().
 
-        Snapshots the current step's routing data into the per-step queue and
-        clears _ROUTING_DATA so the next forward pass starts fresh.
-
-        This is the designated extension point for the merged branch: after
-        adding the token_routing and expert_placement branches together, this
-        method will also call ``compute_placement(step_data)`` and feed the
-        result into the EPLB policy so expert positions update every step.
+        1. Snapshots the current step's routing data into the per-step queue.
+        2. Clears _ROUTING_DATA so the next forward pass starts fresh.
+        3. If ``_compute_placement_callback`` is set AND EPLB is active with
+           policy="custom", calls the callback with the routing snapshot and
+           feeds the result into StaticPlacementPolicy for the next eplb_step().
         """
         from vllm.model_executor.layers.fused_moe.layer import (
             _is_tracking_enabled,
             push_step_snapshot,
             clear_routing_data,
+            get_routing_data,
         )
         if _is_tracking_enabled():
+            routing_snapshot = get_routing_data()
             push_step_snapshot()
             clear_routing_data()
+
+            callback = self._compute_placement_callback
+            if (
+                callback is not None
+                and self.parallel_config.enable_eplb
+                and self.parallel_config.eplb_config.policy == "custom"
+            ):
+                try:
+                    placement = callback(routing_snapshot)
+                    if placement:
+                        from vllm.distributed.eplb.policy.custom_policy import (
+                            StaticPlacementPolicy,
+                        )
+                        StaticPlacementPolicy.set_dynamic_config(placement)
+                except Exception as exc:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "compute_placement callback raised an exception: %s", exc
+                    )
 
     def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
         """

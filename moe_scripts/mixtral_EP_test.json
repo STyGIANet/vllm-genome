@@ -1,0 +1,43 @@
+{
+  "steps": [
+    {
+      "_comment": "Step 0: Full reversal — GPU k gets expert (7-k). Opposite of default linear.",
+      "expert_to_gpu": {
+        "0": 7,
+        "1": 6,
+        "2": 5,
+        "3": 4,
+        "4": 3,
+        "5": 2,
+        "6": 1,
+        "7": 0
+      },
+      "layer_configs": {
+        "_comment": "Layer 15 override: rotate by +1. GPU k gets expert k+1 (mod 8).",
+        "15": {
+          "0": 1,
+          "1": 2,
+          "2": 3,
+          "3": 4,
+          "4": 5,
+          "5": 6,
+          "6": 7,
+          "7": 0
+        }
+      }
+    },
+    {
+      "_comment": "Step 1: Default linear — GPU k gets expert k. Verifies cycling.",
+      "expert_to_gpu": {
+        "0": 0,
+        "1": 1,
+        "2": 2,
+        "3": 3,
+        "4": 4,
+        "5": 5,
+        "6": 6,
+        "7": 7
+      }
+    }
+  ]
+}
