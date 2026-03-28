@@ -349,6 +349,92 @@ class TestCombinedIntegration(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Unit tests — compute_placement() load-balancing algorithm
+# ---------------------------------------------------------------------------
+
+class TestComputePlacement(unittest.TestCase):
+    """Tests for the greedy bin-packing compute_placement() in combined_launch.py."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util, sys, types
+        # Load combined_launch.py directly to avoid importing vllm
+        spec = importlib.util.spec_from_file_location(
+            "_combined_launch",
+            str(_REPO_ROOT / "token_tracing/combined_launch.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        # Stub out heavy imports that combined_launch pulls in at module level
+        for name in ["vllm", "vllm.config", "datasets"]:
+            if name not in sys.modules:
+                sys.modules[name] = types.ModuleType(name)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        cls.compute_placement = staticmethod(mod.compute_placement)
+
+    def setUp(self):
+        # Set dp env vars that compute_placement reads
+        os.environ["VLLM_DP_SIZE"] = "4"
+        os.environ["_COMBINED_TP_SIZE"] = "1"
+        os.environ["VLLM_DP_RANK"] = "1"  # non-0 so logging is suppressed
+
+    def _make_routing(self, expert_hits: list[int]) -> dict:
+        """Build a fake routing dict where expert i is hit expert_hits[i] times."""
+        import torch
+        # All tokens route to exactly one expert (top_k=1 for simplicity)
+        token_list = []
+        for expert_id, count in enumerate(expert_hits):
+            token_list.extend([expert_id] * count)
+        topk_ids = torch.tensor(token_list, dtype=torch.int32).unsqueeze(1)  # [T, 1]
+        topk_wts = torch.ones_like(topk_ids, dtype=torch.float32)
+        return {0: [{"topk_ids": topk_ids, "topk_weights": topk_wts, "num_tokens": len(token_list)}]}
+
+    def test_empty_routing_returns_empty(self):
+        """Empty routing dict → return {}."""
+        self.assertEqual(self.compute_placement({}), {})
+
+    def test_all_experts_assigned(self):
+        """Every expert in the routing data is assigned to some GPU."""
+        routing = self._make_routing([10, 5, 8, 3])  # 4 experts
+        result = self.compute_placement(routing)
+        self.assertIn("expert_to_gpu", result)
+        assigned = set(result["expert_to_gpu"].keys())
+        self.assertEqual(assigned, {"0", "1", "2", "3"})
+
+    def test_gpu_assignments_in_range(self):
+        """All assigned GPUs are valid (0 ≤ gpu_id < num_gpus)."""
+        num_gpus = 4  # matches VLLM_DP_SIZE * _COMBINED_TP_SIZE
+        routing = self._make_routing([20, 1, 15, 7, 3, 9, 2, 14])  # 8 experts
+        result = self.compute_placement(routing)
+        for gpu_id in result["expert_to_gpu"].values():
+            self.assertGreaterEqual(gpu_id, 0)
+            self.assertLess(gpu_id, num_gpus)
+
+    def test_balanced_load(self):
+        """With equal-load experts, all GPUs should receive the same number of experts."""
+        # 8 experts × 4 GPUs = 2 experts per GPU (perfect balance)
+        routing = self._make_routing([10] * 8)
+        result = self.compute_placement(routing)
+        from collections import Counter
+        counts = Counter(result["expert_to_gpu"].values())
+        for gpu_id in range(4):
+            self.assertEqual(counts[gpu_id], 2,
+                             f"GPU {gpu_id} should get 2 experts but got {counts[gpu_id]}")
+
+    def test_heavy_expert_gets_own_gpu(self):
+        """A single very heavy expert should be placed alone on one GPU."""
+        # Expert 0 has 1000 hits; experts 1-3 each have 1 hit.
+        # Greedy: expert 0 → GPU A; remaining 3 experts spread across GPUs.
+        routing = self._make_routing([1000, 1, 1, 1])
+        result = self.compute_placement(routing)
+        # GPU assigned to expert 0 should appear only once in the mapping
+        from collections import Counter
+        heavy_gpu = result["expert_to_gpu"]["0"]
+        counts = Counter(result["expert_to_gpu"].values())
+        self.assertEqual(counts[heavy_gpu], 1,
+                         "Heavy expert should be alone on its GPU")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -366,6 +452,7 @@ def main():
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromTestCase(TestDynamicConfigPolicy))
     suite.addTests(loader.loadTestsFromTestCase(TestOnRoutingStepCallback))
+    suite.addTests(loader.loadTestsFromTestCase(TestComputePlacement))
     if args.integration:
         suite.addTests(loader.loadTestsFromTestCase(TestCombinedIntegration))
 

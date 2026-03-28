@@ -10,13 +10,13 @@ This is the primary integration script for the moe-merged branch.  It combines:
 
 Usage (8×L4, Mixtral, placement + tracking):
     source /home/nirmal/moe/merged/vllm/.venv/bin/activate
-    cd /home/nirmal/moe/token_inference_tracking/vllm
+    cd /home/nirmal/moe/merged/vllm
 
     VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \\
     python token_tracing/combined_launch.py \\
         --model mistralai/Mixtral-8x7B-Instruct-v0.1 \\
         --dp-size 8 --trust-remote-code --enforce-eager \\
-        --expert-placement-config moe_scripts/mixtral_EP_test.json
+        --expert-placement-config token_tracing/mixtral_EP_test.json
 
 Tracking only (no placement):
     VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 \\
@@ -29,7 +29,7 @@ Expert placement only (no tracking):
     python token_tracing/combined_launch.py \\
         --model mistralai/Mixtral-8x7B-Instruct-v0.1 \\
         --dp-size 8 --trust-remote-code --enforce-eager \\
-        --expert-placement-config moe_scripts/mixtral_EP_test.json
+        --expert-placement-config token_tracing/mixtral_EP_test.json
 
 Environment variables
 ---------------------
@@ -53,32 +53,80 @@ import torch
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_placement(routing: dict) -> dict:
-    """Compute a new expert→GPU mapping from the current step's routing data.
+    """Load-balancing placement: reassign experts so each GPU gets equal token load.
 
-    This is called after every model forward pass (prefill + each decode step)
-    when --expert-placement-config is active.
+    Algorithm (greedy bin-packing):
+    1. Count how many tokens each expert received this step (sum across all layers).
+    2. Sort experts by load descending.
+    3. Use a min-heap over GPUs keyed by current assigned load.
+    4. Assign each expert (highest-load first) to the currently least-loaded GPU.
+
+    This is called after every forward pass (prefill + each decode step).
+    The returned mapping is fed into StaticPlacementPolicy.set_dynamic_config()
+    and takes effect on the NEXT eplb_step().
 
     Args:
         routing: dict[layer_id, list[capture]]
-            Each capture is::
-
-                {
-                  'topk_ids':     Tensor[num_tokens, top_k]  (int32, GPU),
-                  'topk_weights': Tensor[num_tokens, top_k]  (float32, GPU),
-                  'num_tokens':   int,
-                }
+            Each capture: {'topk_ids': Tensor[T, K], 'topk_weights': Tensor[T, K],
+                           'num_tokens': int}
 
     Returns:
-        dict in the format StaticPlacementPolicy expects::
-
-            {"expert_to_gpu": {"0": gpu_id, "1": gpu_id, ...}}
-
-        Return {} to skip updating the placement for this step (keep current).
-
-    Default behaviour: passthrough — returns {} so the JSON file drives placement.
-    Swap this out with a real balancing algorithm once routing patterns are known.
+        {"expert_to_gpu": {"<expert_id>": <gpu_id>, ...}}
+        Returns {} (no update) if routing is empty or num_gpus cannot be inferred.
     """
-    return {}
+    if not routing:
+        return {}
+
+    import heapq
+
+    # ── Determine num_experts and num_gpus from DP size env var ──────────────
+    dp_size = int(os.environ.get("VLLM_DP_SIZE", "1"))
+    tp_size = int(os.environ.get("_COMBINED_TP_SIZE", "1"))
+    num_gpus = dp_size * tp_size  # == ep_size
+
+    # Accumulate token counts per expert across all layers and all captures
+    expert_load: dict[int, int] = {}
+    for layer_id, captures in routing.items():
+        for cap in captures:
+            topk_ids = cap["topk_ids"]
+            # topk_ids may be on GPU — move to CPU for counting
+            ids_cpu = topk_ids.cpu().reshape(-1).tolist()
+            for eid in ids_cpu:
+                expert_load[eid] = expert_load.get(eid, 0) + 1
+
+    if not expert_load:
+        return {}
+
+    num_experts = max(expert_load.keys()) + 1
+
+    # Pad any unseen experts with zero load
+    for eid in range(num_experts):
+        if eid not in expert_load:
+            expert_load[eid] = 0
+
+    # ── Greedy bin-packing: sort experts by load desc, assign to min-load GPU ─
+    # heap entries: (gpu_current_load, gpu_id)
+    gpu_heap = [(0, g) for g in range(num_gpus)]
+    heapq.heapify(gpu_heap)
+
+    expert_to_gpu: dict[str, int] = {}
+    for expert_id in sorted(expert_load, key=lambda e: -expert_load[e]):
+        gpu_load, gpu_id = heapq.heappop(gpu_heap)
+        expert_to_gpu[str(expert_id)] = gpu_id
+        heapq.heappush(gpu_heap, (gpu_load + expert_load[expert_id], gpu_id))
+
+    # Log load distribution at INFO level (rank 0 only to reduce noise)
+    if os.environ.get("VLLM_DP_RANK", "0") == "0":
+        gpu_loads = {g: 0 for g in range(num_gpus)}
+        for eid_str, gid in expert_to_gpu.items():
+            gpu_loads[gid] += expert_load[int(eid_str)]
+        load_str = "  ".join(f"GPU{g}:{gpu_loads[g]}" for g in range(num_gpus))
+        import logging
+        logging.getLogger(__name__).info(
+            "[compute_placement] load after rebalance: %s", load_str
+        )
+
+    return {"expert_to_gpu": expert_to_gpu}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -225,6 +273,7 @@ def run_rank(
     os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
     os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
     os.environ["VLLM_TRACK_ROUTING"] = "1"
+    os.environ["_COMBINED_TP_SIZE"] = str(gpus_per_rank)  # used by compute_placement
 
     use_placement = expert_placement_config_path is not None
     if use_placement:
