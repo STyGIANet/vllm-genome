@@ -159,7 +159,7 @@ class TestDynamicConfigPolicy(unittest.TestCase):
         self.Policy.set_dynamic_config(mapping)
 
         dummy_load = torch.zeros(num_layers, num_experts)
-        p2l, l2p, replica_count = self.Policy.rebalance_experts(
+        p2l = self.Policy.rebalance_experts(
             global_expert_load=dummy_load,
             num_replicas=num_experts,
             num_groups=1,
@@ -353,40 +353,41 @@ class TestCombinedIntegration(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestComputePlacement(unittest.TestCase):
-    """Tests for the greedy bin-packing compute_placement() in combined_launch.py."""
+    """Tests for the greedy bin-packing compute_placement() in placement_fns.py."""
 
     @classmethod
     def setUpClass(cls):
-        import importlib.util, sys, types
-        # Load combined_launch.py directly to avoid importing vllm
+        import importlib.util
+        # Load placement_fns.py directly — no vllm imports needed.
         spec = importlib.util.spec_from_file_location(
-            "_combined_launch",
-            str(_REPO_ROOT / "token_tracing/combined_launch.py"),
+            "_placement_fns",
+            str(_REPO_ROOT / "token_tracing/placement_fns.py"),
         )
         mod = importlib.util.module_from_spec(spec)
-        # Stub out heavy imports that combined_launch pulls in at module level
-        for name in ["vllm", "vllm.config", "datasets"]:
-            if name not in sys.modules:
-                sys.modules[name] = types.ModuleType(name)
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
         cls.compute_placement = staticmethod(mod.compute_placement)
 
-    def setUp(self):
-        # Set dp env vars that compute_placement reads
-        os.environ["VLLM_DP_SIZE"] = "4"
-        os.environ["_COMBINED_TP_SIZE"] = "1"
-        os.environ["VLLM_DP_RANK"] = "1"  # non-0 so logging is suppressed
+    def _make_routing(self, expert_hits: list[int], num_gpus: int = 4) -> dict:
+        """Build a fake routing dict where expert i is hit expert_hits[i] times.
 
-    def _make_routing(self, expert_hits: list[int]) -> dict:
-        """Build a fake routing dict where expert i is hit expert_hits[i] times."""
+        Includes ``expert_load`` and ``num_gpus`` fields that mirror what
+        _aggregate_routing_load() produces after an EP all-reduce.
+        num_gpus defaults to 4 to match the test setUp env (VLLM_DP_SIZE=4).
+        """
         import torch
-        # All tokens route to exactly one expert (top_k=1 for simplicity)
         token_list = []
         for expert_id, count in enumerate(expert_hits):
             token_list.extend([expert_id] * count)
-        topk_ids = torch.tensor(token_list, dtype=torch.int32).unsqueeze(1)  # [T, 1]
+        topk_ids = torch.tensor(token_list, dtype=torch.int32).unsqueeze(1)
         topk_wts = torch.ones_like(topk_ids, dtype=torch.float32)
-        return {0: [{"topk_ids": topk_ids, "topk_weights": topk_wts, "num_tokens": len(token_list)}]}
+        expert_load = torch.tensor(expert_hits, dtype=torch.int64)
+        return {0: [{
+            "topk_ids": topk_ids,
+            "topk_weights": topk_wts,
+            "num_tokens": len(token_list),
+            "expert_load": expert_load,
+            "num_gpus": num_gpus,
+        }]}
 
     def test_empty_routing_returns_empty(self):
         """Empty routing dict → return {}."""

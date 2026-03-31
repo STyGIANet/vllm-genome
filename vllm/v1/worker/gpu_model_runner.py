@@ -39,6 +39,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_ep_group,
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -3079,14 +3080,73 @@ class GPUModelRunner(
     # expert positions update after every forward pass.
     _compute_placement_callback: object = None
 
+    @staticmethod
+    def _aggregate_routing_load(routing_snapshot: dict) -> dict:
+        """All-reduce per-expert token counts across all EP ranks.
+
+        Each DP rank captures only its own tokens.  Before passing routing data
+        to compute_placement() we sum the per-expert counts across every EP rank
+        with a single NCCL all-reduce so every worker sees the **global** load.
+
+        The returned dict has the same structure as routing_snapshot with two
+        additional keys per capture:
+            expert_load: Tensor[num_logical_experts]  — global token counts, on GPU
+            num_gpus:    int  — EP group size (= dp_size × tp_size), i.e. the
+                               number of GPU slots compute_placement() assigns to
+        """
+        import torch
+
+        if not routing_snapshot:
+            return {}
+
+        ep_group = get_ep_group()
+        num_gpus = ep_group.size()
+        device = next(
+            cap['topk_ids'].device
+            for caps in routing_snapshot.values()
+            for cap in caps
+        )
+
+        # Infer global expert count from the maximum observed expert id.
+        num_experts = 0
+        for caps in routing_snapshot.values():
+            for cap in caps:
+                top = int(cap['topk_ids'].max().item()) + 1
+                if top > num_experts:
+                    num_experts = top
+
+        layer_ids = sorted(routing_snapshot.keys())
+        num_layers = len(layer_ids)
+
+        # Build load[num_layers, num_experts] by scatter-counting topk_ids.
+        load = torch.zeros(num_layers, num_experts,
+                           dtype=torch.int64, device=device)
+        for i, layer_id in enumerate(layer_ids):
+            for cap in routing_snapshot[layer_id]:
+                flat = cap['topk_ids'].reshape(-1).long()
+                load[i].scatter_add_(0, flat, torch.ones_like(flat))
+
+        # Sum across EP ranks: after this every rank holds the global load.
+        ep_group.all_reduce(load)
+
+        # Attach global load and num_gpus to a copy of the snapshot and return.
+        result: dict = {}
+        for i, layer_id in enumerate(layer_ids):
+            result[layer_id] = [
+                {**cap, 'expert_load': load[i], 'num_gpus': num_gpus}
+                for cap in routing_snapshot[layer_id]
+            ]
+        return result
+
     def _on_routing_step(self) -> None:
         """Called after each model forward pass, immediately before eplb_step().
 
         1. Snapshots the current step's routing data into the per-step queue.
         2. Clears _ROUTING_DATA so the next forward pass starts fresh.
         3. If ``_compute_placement_callback`` is set AND EPLB is active with
-           policy="custom", calls the callback with the routing snapshot and
-           feeds the result into StaticPlacementPolicy for the next eplb_step().
+           policy="custom", all-reduces expert load across EP ranks, calls the
+           callback with the globally aggregated snapshot, and feeds the result
+           into StaticPlacementPolicy for the next eplb_step().
         """
         from vllm.model_executor.layers.fused_moe.layer import (
             _is_tracking_enabled,
@@ -3107,7 +3167,13 @@ class GPUModelRunner(
                 and self.parallel_config.eplb_config.policy == "custom"
             ):
                 try:
-                    placement = callback(routing_snapshot)
+                    # Aggregate routing counts globally before calling the
+                    # callback.  Without this each rank has only its own tokens
+                    # and produces a different placement → NCCL P2P deadlock.
+                    global_snapshot = self._aggregate_routing_load(
+                        routing_snapshot
+                    )
+                    placement = callback(global_snapshot)
                     if placement:
                         from vllm.distributed.eplb.policy.custom_policy import (
                             StaticPlacementPolicy,
@@ -3116,7 +3182,8 @@ class GPUModelRunner(
                 except Exception as exc:
                     import logging
                     logging.getLogger(__name__).warning(
-                        "compute_placement callback raised an exception: %s", exc
+                        "compute_placement callback raised an exception: %s",
+                        exc,
                     )
 
             push_step_snapshot()
