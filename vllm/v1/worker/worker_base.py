@@ -211,6 +211,23 @@ class WorkerBase:
         from vllm.model_executor.layers.fused_moe.layer import reset_step_counter
         reset_step_counter()
 
+    def register_placement_callback(self, file_path: str, func_name: str) -> None:
+        """Load a placement function from an absolute file path and register it.
+
+        Called via ``llm.collective_rpc("register_placement_callback", ...)``
+        after LLM initialisation so the worker subprocess loads and caches
+        the function in its own address space.
+
+        Args:
+            file_path: Absolute path to the Python file containing the function.
+            func_name: Name of the callable inside that file.
+        """
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_placement_callback", file_path)
+        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        self.model_runner._compute_placement_callback = getattr(mod, func_name)
+
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""
         raise NotImplementedError

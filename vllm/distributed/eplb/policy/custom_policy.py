@@ -55,7 +55,6 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
         if cls._dynamic_config is not None:
             user_config = cls._dynamic_config
             cls._dynamic_config = None  # consume: one-shot per rebalance cycle
-            logger.info("[EPLB] Using dynamic config from compute_placement() callback.")
         # 1. Fallback: If no config, return standard sequential mapping
         elif not config_path or not os.path.exists(config_path):
             logger.warning(f"Config path {config_path} not found. Falling back to default.")
@@ -72,10 +71,6 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
             step_config = steps_list[effective_step]
             layer_configs = step_config.get("layer_configs", {})
             global_config = step_config.get("expert_to_gpu", {})
-            logger.info(
-                f"[EPLB step {step}] Using step-config index {effective_step} "
-                f"of {len(steps_list)}: {len(global_config)} global mapping(s)"
-            )
         else:
             # Pull configurations
             layer_configs = user_config.get("layer_configs", {})          # Per-layer overrides
@@ -199,40 +194,32 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
         num_gpus: int,
         current_physical_to_logical_map: torch.Tensor = None,
     ):
-        logger.info(f"--- STATIC CUSTOM PLACEMENT POLICY TRIGGERED (step {cls._step}) ---")
-        num_layers, num_logical_experts = global_expert_load.shape
+        # Only EP/DP rank 0 logs the detailed placement info; other ranks are silent.
+        is_rank0 = os.environ.get("VLLM_DP_RANK", "0") == "0"
 
+        num_layers, num_logical_experts = global_expert_load.shape
         config_path = os.getenv("VLLM_EXPERT_CONFIG_PATH")
 
-        # Build the forward map (Physical -> Logical)
         new_physical_to_logical_map = cls._build_map_from_config(
             config_path, num_layers, num_replicas, num_gpus, step=cls._step
         )
 
-        # Log which experts moved relative to the previous placement
-        if current_physical_to_logical_map is not None:
-            cls._log_expert_movement(
-                current_physical_to_logical_map.cpu(),
-                new_physical_to_logical_map,
-                num_gpus,
+        if is_rank0:
+            # Log expert movement summary (one line: total moves across all layers)
+            if current_physical_to_logical_map is not None:
+                cls._log_expert_movement(
+                    current_physical_to_logical_map.cpu(),
+                    new_physical_to_logical_map,
+                    num_gpus,
+                )
+
+            # Log per-GPU assignment for layer 0
+            slots_per_gpu = num_replicas // num_gpus
+            mapping_str = "  ".join(
+                f"GPU{g}:{new_physical_to_logical_map[0, g*slots_per_gpu:(g+1)*slots_per_gpu].tolist()}"
+                for g in range(num_gpus)
             )
+            logger.info("[EPLB step %d] %s", cls._step, mapping_str)
 
         cls._step += 1
-
-        # Build the reverse maps (Logical -> Physical)
-        new_logical_to_physical_map, new_logical_replica_count = \
-            cls._derive_inverse_maps(new_physical_to_logical_map, num_logical_experts)
-
-        logger.info("Expert Mapping per GPU (Sample for Layer 0):")
-        for gpu_id in range(num_gpus):
-            slots_per_gpu = num_replicas // num_gpus
-            start, end = gpu_id * slots_per_gpu, (gpu_id + 1) * slots_per_gpu
-            # Change [0, ...] to [layer_idx, ...] to inspect specific layers
-            gpu_experts = new_physical_to_logical_map[0, start:end].tolist()
-            logger.info(f"  Rank {gpu_id}: Experts {gpu_experts}")
-
-        return (
-            new_physical_to_logical_map,
-            new_logical_to_physical_map,
-            new_logical_replica_count
-        )
+        return new_physical_to_logical_map

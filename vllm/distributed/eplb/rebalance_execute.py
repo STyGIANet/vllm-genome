@@ -251,11 +251,11 @@ def move_to_buffer(
                     b[dst].copy_(w[src_local], non_blocking=True)
 
     p2p_ops: list[P2POp] = []
-    if isinstance(get_ep_group(), StatelessGroupCoordinator):
-        ep_group = get_ep_group()
-        is_stateless = True
-    else:
-        is_stateless = False
+    # ep_group here is get_ep_group().device_group (a real torch.distributed
+    # ProcessGroup) for stateless EP groups. Detect whether we're in the
+    # stateless case so we can use group-local ranks with the device_group
+    # directly, avoiding pynccl which hangs on first P2P channel establishment.
+    is_stateless = isinstance(get_ep_group(), StatelessGroupCoordinator)
 
     # Pre-compute global ranks mapping (only needed for non-stateless groups)
     ep_size = ep_group.size()
@@ -295,12 +295,18 @@ def move_to_buffer(
                 recv_ranks.append(ranks_to_recv[recver_pos])
             for dst in recv_ranks:
                 if is_stateless:
-                    for w in expert_weights:
-                        op = object.__new__(P2POp)
-                        op.op = torch.distributed.isend
-                        op.tensor = w[src]
-                        op.group_peer = dst
-                        p2p_ops.append(op)
+                    # Use group-local rank with the device_group ProcessGroup.
+                    # This uses torch.distributed NCCL P2P (not pynccl) which
+                    # avoids the first-use NCCL channel establishment hang.
+                    p2p_ops += [
+                        P2POp(
+                            torch.distributed.isend,
+                            w[src],
+                            dst,
+                            group=ep_group,
+                        )
+                        for w in expert_weights
+                    ]
                 else:
                     dst_global = rank_to_global[dst]
                     p2p_ops += [
@@ -340,12 +346,16 @@ def move_to_buffer(
             else:
                 src = ranks_to_send[recver_pos - remainder_start]
             if is_stateless:
-                for b in expert_weights_buffers:
-                    op = object.__new__(P2POp)
-                    op.op = torch.distributed.irecv
-                    op.tensor = b[dst]
-                    op.group_peer = src
-                    p2p_ops.append(op)
+                # Use group-local rank with the device_group ProcessGroup.
+                p2p_ops += [
+                    P2POp(
+                        torch.distributed.irecv,
+                        b[dst],
+                        src,
+                        group=ep_group,
+                    )
+                    for b in expert_weights_buffers
+                ]
             else:
                 src_global = rank_to_global[src]
                 p2p_ops += [
@@ -360,19 +370,13 @@ def move_to_buffer(
     # 4. Execute the P2P operations. The real communication happens here.
     if p2p_ops and cuda_stream is not None:
         with torch.cuda.stream(cuda_stream):
-            if is_stateless:
-                ep_group.device_communicator.batch_isend_irecv(p2p_ops)
-            else:
-                reqs = batch_isend_irecv(p2p_ops)
-                for req in reqs:
-                    req.wait()
-    elif p2p_ops:
-        if is_stateless:
-            ep_group.device_communicator.batch_isend_irecv(p2p_ops)
-        else:
             reqs = batch_isend_irecv(p2p_ops)
             for req in reqs:
                 req.wait()
+    elif p2p_ops:
+        reqs = batch_isend_irecv(p2p_ops)
+        for req in reqs:
+            req.wait()
     # wait for the communication to finish
     return (
         is_unchanged,
@@ -618,6 +622,37 @@ def rearrange_expert_weights_inplace(
                 weight,
                 group=ep_group,
             )
+
+        # Pre-warm NCCL P2P channels on the default (WORLD) group.
+        # NCCL establishes P2P channels lazily on first use of each pair.
+        # Channel setup blocks inside ncclGroupEnd() until both endpoints
+        # are ready — but only the FIRST time a pair is used. By doing a
+        # full all-to-all warmup here (all N×(N-1) sends+recvs with all
+        # ranks present), every possible pair gets its channel established
+        # upfront. After this, any subset of ranks can exchange freely
+        # without channel-setup stalls, even when some ranks have no ops.
+        world_size = torch.distributed.get_world_size()
+        if world_size > 1:
+            my_rank = torch.distributed.get_rank()
+            device = first_layer_weights[0].device
+            dummy_send = torch.zeros(1, dtype=torch.float32, device=device)
+            warmup_ops: list[P2POp] = []
+            for peer in range(world_size):
+                if peer == my_rank:
+                    continue
+                warmup_ops.append(
+                    P2POp(torch.distributed.isend, dummy_send, peer)
+                )
+                warmup_ops.append(
+                    P2POp(
+                        torch.distributed.irecv,
+                        torch.zeros(1, dtype=torch.float32, device=device),
+                        peer,
+                    )
+                )
+            warmup_reqs = batch_isend_irecv(warmup_ops)
+            for req in warmup_reqs:
+                req.wait()
         return
 
     # NOTE(bowen): We need this synchronize to run, but I don't know why.

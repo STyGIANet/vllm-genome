@@ -719,7 +719,13 @@ class EplbState:
             self.model_states.values(), global_expert_load_windows
         ):
             if not self.is_async or is_profile:
-                # Get new expert mappings for the model
+                # Get new expert mappings for the model.
+                # For profile runs, save and restore the policy step counter so
+                # the profile call doesn't consume a step from the JSON config.
+                _saved_policy_step = None
+                if is_profile and hasattr(self.policy, '_step'):
+                    _saved_policy_step = self.policy._step
+
                 new_physical_to_logical_map = self.policy.rebalance_experts(
                     global_expert_load_window.cpu(),
                     num_replicas,
@@ -728,6 +734,9 @@ class EplbState:
                     num_gpus,
                     eplb_model_state.physical_to_logical_map.cpu(),
                 )
+
+                if _saved_policy_step is not None:
+                    self.policy._step = _saved_policy_step
 
                 # Update expert weights
                 rearrange_expert_weights_inplace(
@@ -740,6 +749,14 @@ class EplbState:
                 )
 
                 if not is_profile:
+                    # Explicitly synchronize the CUDA device so that all pending
+                    # NCCL P2P expert-weight transfers (queued by
+                    # rearrange_expert_weights_inplace) complete before we update
+                    # the routing maps.  Without this, the first blocking copy()
+                    # inside _commit_eplb_maps / _pad_out_tensor would implicitly
+                    # synchronize, causing an unexpected ~300 s stall on PCIe-only
+                    # hardware (e.g. L4 GPUs connected only via PCIe).
+                    torch.cuda.synchronize()
                     _commit_eplb_maps(
                         eplb_model_state,
                         new_physical_to_logical_map=new_physical_to_logical_map,

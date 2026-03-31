@@ -3096,9 +3096,10 @@ class GPUModelRunner(
         )
         if _is_tracking_enabled():
             routing_snapshot = get_routing_data()
-            push_step_snapshot()
-            clear_routing_data()
 
+            # Call the placement callback BEFORE clearing so it reads live data.
+            # (get_routing_data() returns a reference; clear_routing_data() empties
+            # it in-place, so the callback must run first.)
             callback = self._compute_placement_callback
             if (
                 callback is not None
@@ -3117,6 +3118,9 @@ class GPUModelRunner(
                     logging.getLogger(__name__).warning(
                         "compute_placement callback raised an exception: %s", exc
                     )
+
+            push_step_snapshot()
+            clear_routing_data()
 
     def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
         """
