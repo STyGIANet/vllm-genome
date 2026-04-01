@@ -77,7 +77,7 @@ forward-pass counts → NCCL deadlock. `combined_launch.py` passes
 
 ## Implementing `compute_placement()`
 
-Edit `token_tracing/placement_fns.py`. The function is called after every
+Edit `genome_scripts/placement_fns.py`. The function is called after every
 forward pass (when real tokens were processed) and must return the **same dict
 on every EP rank**.
 
@@ -170,10 +170,10 @@ cd merged/vllm
 ```bash
 VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
-python token_tracing/combined_launch.py \
+python genome_scripts/combined_launch.py \
     --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
     --dp-size 8 --trust-remote-code --enforce-eager \
-    --expert-placement-config token_tracing/mixtral_EP_test.json \
+    --expert-placement-config genome_scripts/mixtral_EP_test.json \
     --placement-step-interval 32 \
     --num-prompts-per-rank 2 \
     --output-length 32
@@ -186,7 +186,7 @@ setup. See hardware notes below.
 
 ```bash
 VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 \
-python token_tracing/combined_launch.py \
+python genome_scripts/combined_launch.py \
     --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
     --dp-size 8 --trust-remote-code --enforce-eager \
     --num-prompts-per-rank 2 --output-length 32
@@ -197,10 +197,10 @@ python token_tracing/combined_launch.py \
 ```bash
 NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
-python token_tracing/combined_launch.py \
+python genome_scripts/combined_launch.py \
     --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
     --dp-size 8 --trust-remote-code --enforce-eager \
-    --expert-placement-config token_tracing/mixtral_EP_test.json \
+    --expert-placement-config genome_scripts/mixtral_EP_test.json \
     --placement-step-interval 32
 ```
 
@@ -209,17 +209,17 @@ python token_tracing/combined_launch.py \
 ```bash
 VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
-python token_tracing/combined_launch.py \
+python genome_scripts/combined_launch.py \
     --model deepseek-ai/deepseek-moe-16b-chat \
     --dp-size 8 --trust-remote-code --enforce-eager \
-    --expert-placement-config token_tracing/deepseek_EP_test.json \
+    --expert-placement-config genome_scripts/deepseek_EP_test.json \
     --placement-step-interval 32
 ```
 
 ### Unit tests (no GPU needed)
 
 ```bash
-python token_tracing/test_combined.py
+python genome_scripts/test_combined.py
 ```
 
 ---
@@ -233,6 +233,8 @@ python token_tracing/test_combined.py
 | `--tp-size M` | 1 | Tensor-parallel GPUs per rank |
 | `--expert-placement-config <path>` | None | JSON placement config; enables EPLB |
 | `--placement-step-interval N` | 32 | EPLB rebalance every N forward passes |
+| `--dataset wikitext\|chatbot` | wikitext | Prompt source (see below) |
+| `--cache-repeat-factor N` | 4 | Chatbot mode: repeat each base prompt N times to warm the KV prefix cache |
 | `--num-prompts-per-rank N` | 3 | Prompts per DP rank |
 | `--output-length N` | 10 | Max output tokens |
 | `--save-routing-pt <path>` | None | Save routing tensors to `<path>_rank<N>.pt` |
@@ -244,6 +246,17 @@ python token_tracing/test_combined.py
 | `NCCL_IB_DISABLE=1` | Disable InfiniBand (single-node only) |
 | `VLLM_LOGGING_LEVEL=INFO` | Show EPLB placement logs |
 | `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=N` | Override 300 s default (needed on PCIe-only L4) |
+
+---
+
+## Datasets
+
+| Mode | Flag | Description |
+|---|---|---|
+| **wikitext** | `--dataset wikitext` | Samples from WikiText-2 (train split). Filters paragraphs shorter than 100 chars; first 300 chars used as prompt. Good diversity of topics; exercises different expert specialisations across layers. |
+| **chatbot** | `--dataset chatbot` | A small fixed pool of conversational prompts, each repeated `--cache-repeat-factor` times (default 4). Enables `enable_prefix_caching=True` automatically so repeated requests warm the KV cache. Use this to measure the impact of prefix cache hit rate on expert routing distributions. |
+
+The chatbot mode is designed to test the hypothesis: *cached prefixes skip early-layer computation → different expert load profile → different optimal placement*. Compare `expert_load` distributions between a cold run and a warm-cache run to observe the effect.
 
 ---
 
@@ -282,9 +295,9 @@ JSON config resumes from where it left off.
 
 | File | What changed |
 |---|---|
-| `token_tracing/combined_launch.py` | Primary launch script |
-| `token_tracing/placement_fns.py` | Default `compute_placement()` — greedy bin-packing on `expert_load` |
-| `token_tracing/test_combined.py` | 13 unit tests (no GPU needed) |
+| `genome_scripts/combined_launch.py` | Primary launch script |
+| `genome_scripts/placement_fns.py` | Default `compute_placement()` — greedy bin-packing on `expert_load` |
+| `genome_scripts/test_combined.py` | 13 unit tests (no GPU needed) |
 | `vllm/v1/worker/gpu_model_runner.py` | `_aggregate_routing_load()` (EP all-reduce, called every step); `_on_routing_step()` |
 | `vllm/distributed/eplb/policy/custom_policy.py` | `StaticPlacementPolicy`: reads JSON, cycles steps, `set_dynamic_config()` override |
 | `vllm/distributed/eplb/eplb_state.py` | `cuda.synchronize()` before `_commit_eplb_maps()`; `_step` save/restore around profile call |

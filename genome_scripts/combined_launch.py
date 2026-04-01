@@ -10,23 +10,29 @@ Primary integration script for the moe-merged branch. Combines:
 
 Usage (8×L4, Mixtral, both features):
     VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \\
-    python token_tracing/combined_launch.py \\
+    python genome_scripts/combined_launch.py \\
         --model mistralai/Mixtral-8x7B-Instruct-v0.1 \\
         --dp-size 8 --trust-remote-code --enforce-eager \\
-        --expert-placement-config token_tracing/mixtral_EP_test.json
+        --expert-placement-config genome_scripts/mixtral_EP_test.json
+
+Datasets:
+    --dataset wikitext           WikiText-2 paragraphs (default)
+    --dataset chatbot            Repeated conversational prompts; enables KV prefix
+                                 caching so repeated requests hit the cache.
+                                 --cache-repeat-factor N  (default 4)
 
 Tracking only (no placement):
     VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 \\
-    python token_tracing/combined_launch.py \\
+    python genome_scripts/combined_launch.py \\
         --model mistralai/Mixtral-8x7B-Instruct-v0.1 \\
         --dp-size 8 --trust-remote-code --enforce-eager
 
 Placement only (no tracking):
     NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \\
-    python token_tracing/combined_launch.py \\
+    python genome_scripts/combined_launch.py \\
         --model mistralai/Mixtral-8x7B-Instruct-v0.1 \\
         --dp-size 8 --trust-remote-code --enforce-eager \\
-        --expert-placement-config token_tracing/mixtral_EP_test.json
+        --expert-placement-config genome_scripts/mixtral_EP_test.json
 
 Environment variables
 ---------------------
@@ -75,8 +81,12 @@ def parse_args():
     parser.add_argument("--disable-expert-parallel", dest="enable_expert_parallel",
                         action="store_false")
     parser.set_defaults(enable_expert_parallel=True)
-    parser.add_argument("--dataset", type=str, default="simple",
-                        choices=["simple", "mmlu"])
+    parser.add_argument("--dataset", type=str, default="wikitext",
+                        choices=["wikitext", "chatbot"])
+    parser.add_argument("--cache-repeat-factor", type=int, default=4,
+                        dest="cache_repeat_factor",
+                        help="Chatbot mode only: repeat each base prompt N times so "
+                             "repeated requests warm the KV prefix cache")
     parser.add_argument("--num-prompts-per-rank", type=int, default=3,
                         dest="num_prompts_per_rank")
     parser.add_argument("--output-length", type=int, default=10, dest="output_length")
@@ -103,51 +113,34 @@ def parse_args():
 # Prompt loading
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_prompts(dataset_name: str, total_prompts: int):
-    if dataset_name == "simple":
-        base = [
-            "Explain the theory of relativity in simple terms.",
-            "What are the main differences between Python and Java?",
-            "Describe the water cycle.",
-            "What is machine learning?",
-            "Explain how a neural network works.",
-            "What causes seasons on Earth?",
-            "Describe the process of photosynthesis.",
-            "What is the difference between HTTP and HTTPS?",
-            "Explain quantum computing for beginners.",
-            "What is the capital of France?",
+def load_prompts(dataset_name: str, total_prompts: int, cache_repeat_factor: int = 4):
+    if dataset_name == "wikitext":
+        from datasets import load_dataset
+        ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        # Filter short/empty lines and use the first 300 chars of each paragraph as prompt
+        texts = [
+            row["text"].strip()[:300]
+            for row in ds
+            if len(row["text"].strip()) > 100
         ]
-        return (base * ((total_prompts // len(base)) + 1))[:total_prompts]
+        if not texts:
+            raise RuntimeError("wikitext dataset returned no usable samples")
+        return (texts * ((total_prompts // len(texts)) + 1))[:total_prompts]
 
-    elif dataset_name == "mmlu":
-        from datasets import load_dataset, concatenate_datasets
-
-        subjects = {
-            "elementary_mathematics": 32,
-            "high_school_us_history": 32,
-            "college_physics": 32,
-        }
-        datasets_list = []
-        for subject, limit in subjects.items():
-            try:
-                ds = load_dataset("cais/mmlu", subject, split=f"test[:{limit}]")
-                datasets_list.append(ds)
-            except Exception as e:
-                print(f"Warning: could not load {subject}: {e}")
-
-        if not datasets_list:
-            print("Warning: MMLU unavailable, falling back to simple prompts.")
-            return load_prompts("simple", total_prompts)
-
-        dataset = concatenate_datasets(datasets_list)
-
-        def fmt(ex):
-            q, choices = ex["question"], ex["choices"]
-            letters = ["A", "B", "C", "D"][:len(choices)]
-            opts = "\n".join(f"{l}) {t}" for l, t in zip(letters, choices))
-            return f"Question: {q}\n{opts}\nAnswer:"
-
-        return [fmt(ex) for ex in dataset][:total_prompts]
+    elif dataset_name == "chatbot":
+        # Fixed pool of conversational prompts. Each is repeated cache_repeat_factor
+        # times so that vLLM's KV prefix cache warms up across repeated requests.
+        base = [
+            "User: What is the capital of France?\nAssistant:",
+            "User: Explain how neural networks learn.\nAssistant:",
+            "User: What causes the seasons on Earth?\nAssistant:",
+            "User: How does photosynthesis work?\nAssistant:",
+            "User: What is the difference between RAM and storage?\nAssistant:",
+        ]
+        pool = []
+        for prompt in base:
+            pool.extend([prompt] * cache_repeat_factor)
+        return (pool * ((total_prompts // len(pool)) + 1))[:total_prompts]
 
     raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -175,6 +168,7 @@ def run_rank(
     callback_placement: bool,
     placement_step_interval: int,
     dataset: str,
+    cache_repeat_factor: int,
     num_prompts_per_rank: int,
     output_length: int,
     save_routing_pt: str,
@@ -215,6 +209,8 @@ def run_rank(
         max_model_len=max_model_len,
         gpu_memory_utilization=gpu_memory_utilization,
         eplb_config=eplb_config,
+        # Chatbot mode repeats prompts to warm the KV prefix cache.
+        enable_prefix_caching=(dataset == "chatbot"),
         # Async scheduling de-syncs EP ranks so they hit ep_group.all_reduce()
         # at different logical steps → NCCL deadlock. Must be disabled when
         # _aggregate_routing_load() uses a collective across EP ranks.
@@ -243,7 +239,7 @@ def run_rank(
 
     # ── Load prompts for this rank ────────────────────────────────────────────
     total_prompts = dp_size * num_prompts_per_rank
-    all_prompts = load_prompts(dataset, total_prompts)
+    all_prompts = load_prompts(dataset, total_prompts, cache_repeat_factor)
     start = global_dp_rank * num_prompts_per_rank
     prompts = all_prompts[start: start + num_prompts_per_rank] or ["Placeholder."]
 
@@ -396,6 +392,7 @@ def main():
                 args.callback_placement,
                 args.placement_step_interval,
                 args.dataset,
+                args.cache_repeat_factor,
                 args.num_prompts_per_rank,
                 args.output_length,
                 args.save_routing_pt,
