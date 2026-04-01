@@ -395,11 +395,15 @@ class TestComputePlacement(unittest.TestCase):
 
     def test_all_experts_assigned(self):
         """Every expert in the routing data is assigned to some GPU."""
-        routing = self._make_routing([10, 5, 8, 3])  # 4 experts
+        routing = self._make_routing([10, 5, 8, 3])  # 4 experts, clearly unbalanced
         result = self.compute_placement(routing)
         self.assertIn("expert_to_gpu", result)
+        self.assertIn("layer_configs", result)
         assigned = set(result["expert_to_gpu"].keys())
         self.assertEqual(assigned, {"0", "1", "2", "3"})
+        # Per-layer config for layer 0 should also cover all experts.
+        layer0 = result["layer_configs"]["0"]
+        self.assertEqual(set(layer0.keys()), {"0", "1", "2", "3"})
 
     def test_gpu_assignments_in_range(self):
         """All assigned GPUs are valid (0 ≤ gpu_id < num_gpus)."""
@@ -411,15 +415,12 @@ class TestComputePlacement(unittest.TestCase):
             self.assertLess(gpu_id, num_gpus)
 
     def test_balanced_load(self):
-        """With equal-load experts, all GPUs should receive the same number of experts."""
-        # 8 experts × 4 GPUs = 2 experts per GPU (perfect balance)
+        """Equal-load experts are already balanced — placement should be skipped."""
+        # All experts have the same load → any assignment gives equal GPU load →
+        # imbalance is 0 → below IMBALANCE_THRESHOLD → return {} (no movement).
         routing = self._make_routing([10] * 8)
         result = self.compute_placement(routing)
-        from collections import Counter
-        counts = Counter(result["expert_to_gpu"].values())
-        for gpu_id in range(4):
-            self.assertEqual(counts[gpu_id], 2,
-                             f"GPU {gpu_id} should get 2 experts but got {counts[gpu_id]}")
+        self.assertEqual(result, {}, "Perfectly balanced load should return {} (skip)")
 
     def test_heavy_expert_gets_own_gpu(self):
         """A single very heavy expert should be placed alone on one GPU."""

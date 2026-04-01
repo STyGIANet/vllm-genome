@@ -1,92 +1,124 @@
 """
-placement_fns.py — User-supplied expert placement function for combined_launch.py.
+placement_fns.py — Expert placement callback for combined_launch.py.
 
-This module must be importable by the vLLM worker subprocesses (run from the
-merged/vllm root directory), so placement logic lives here rather than in
-combined_launch.py.
-
-Register a function via:
+Registered via:
     llm.collective_rpc("register_placement_callback",
-                       args=("token_tracing.placement_fns", "compute_placement"))
+                       args=(path_to_this_file, "compute_placement"))
 
-How the aggregation works
--------------------------
-Before this callback is called, ``GPUModelRunner._on_routing_step()`` runs
-``_aggregate_routing_load()``, which builds a per-expert token-count matrix of
-shape [num_layers, num_experts] from the local routing snapshot and all-reduces
-it across every EP rank.  The result is attached to the snapshot as:
-
-    routing[layer_id][*]['expert_load']  —  Tensor[num_logical_experts]
-
-Because every rank performs the same all-reduce, each rank receives the
-**identical** global load tensor and therefore ``compute_placement()`` produces
-the same ``{"expert_to_gpu": {...}}`` on every rank.  This is required: if ranks
-produce different placements the NCCL P2P sends/recvs inside ``eplb_step()``
-will mismatch and deadlock.
+The callback runs after every forward pass (when routing data is available).
+Edit `compute_placement()` to implement your own placement algorithm.
+See OVERVIEW.md for the full API contract.
 """
 
 import heapq
+import torch
+
+
+# Skip rebalancing if the optimal per-GPU load spread is below this fraction of
+# the mean GPU load.  At 5%, a cluster where GPUs carry 95–105% of the average
+# load is left alone — unnecessary movement avoided.
+IMBALANCE_THRESHOLD = 0.05
+
+
+def _greedy_pack(loads: list[float], num_gpus: int) -> dict[str, int]:
+    """Assign experts to GPUs minimising max GPU load (greedy bin-packing).
+
+    Args:
+        loads:    Per-expert token counts (index = expert_id).
+        num_gpus: Number of GPU slots to pack into.
+
+    Returns:
+        {"<expert_id>": <gpu_id>, ...} for every expert.
+    """
+    gpu_heap = [(0.0, g) for g in range(num_gpus)]
+    heapq.heapify(gpu_heap)
+    assignment: dict[str, int] = {}
+    for expert_id in sorted(range(len(loads)), key=lambda e: -loads[e]):
+        gpu_load, gpu_id = heapq.heappop(gpu_heap)
+        assignment[str(expert_id)] = gpu_id
+        heapq.heappush(gpu_heap, (gpu_load + loads[expert_id], gpu_id))
+    return assignment
+
+
+def _is_balanced(loads: list[float], num_gpus: int) -> bool:
+    """Return True if the optimal GPU load spread is within IMBALANCE_THRESHOLD.
+
+    Runs the same greedy pack and checks whether moving experts would produce
+    a measurably unbalanced result.  If even the best packing is nearly flat,
+    the current placement is probably fine — no need to move anything.
+    """
+    if sum(loads) == 0:
+        return True
+
+    # Simulate the greedy result to get per-GPU loads.
+    gpu_heap = [(0.0, g) for g in range(num_gpus)]
+    heapq.heapify(gpu_heap)
+    for expert_load in sorted(loads, reverse=True):
+        gpu_load, gpu_id = heapq.heappop(gpu_heap)
+        heapq.heappush(gpu_heap, (gpu_load + expert_load, gpu_id))
+
+    gpu_loads = [load for load, _ in gpu_heap]
+    avg = sum(gpu_loads) / num_gpus
+    if avg == 0:
+        return True
+    spread = (max(gpu_loads) - min(gpu_loads)) / avg
+    return spread < IMBALANCE_THRESHOLD
 
 
 def compute_placement(routing: dict) -> dict:
-    """Greedy bin-packing load balancer: assign experts to GPUs by token load.
+    """Per-layer load-balancing via greedy bin-packing with imbalance threshold.
 
-    Accumulates globally aggregated token counts per expert across all layers,
-    then assigns experts to GPUs such that the total token load per GPU is
-    approximately equal (heaviest experts placed on the least-loaded GPU first).
+    Computes an independent expert→GPU assignment for each MoE layer using
+    that layer's globally aggregated token counts.  Returns per-layer configs
+    so that, for example, layer 5 can put expert 4 on GPU 2 while layer 6
+    puts expert 4 on GPU 7 — whatever minimises that layer's load imbalance.
+
+    Skips the update entirely (returns {}) if the optimal placement for every
+    layer is already within IMBALANCE_THRESHOLD of balanced, avoiding
+    unnecessary NCCL P2P expert transfers.
 
     Args:
-        routing: dict[layer_id, list[capture]]
-            Each capture has keys:
-              'topk_ids'     — Tensor[T, K] expert indices (local rank's tokens)
-              'topk_weights' — Tensor[T, K] corresponding router weights
-              'num_tokens'   — int, number of tokens on this rank
-              'expert_load'  — Tensor[num_experts], global token counts (all-reduced)
+        routing: {layer_id: [capture, ...]}
+            capture keys:
+              'expert_load'  Tensor[num_experts]  global token counts per expert
+              'num_gpus'     int                  EP group size (dp_size * tp_size)
 
     Returns:
-        {"expert_to_gpu": {"<expert_id>": <gpu_id>, ...}}
-        Returns {} to skip the update (keeps current placement) if routing is
-        empty or if 'expert_load' is missing (e.g. tracking disabled).
+        {"expert_to_gpu": {...}, "layer_configs": {"<layer_id>": {...}, ...}}
+        or {} to skip (keep current placement unchanged).
     """
     if not routing:
         return {}
 
-    # Sum expert_load across layers to get total tokens per expert globally.
-    expert_totals: dict[int, int] = {}
-    num_gpus = 0
-
-    for layer_captures in routing.values():
-        for cap in layer_captures:
-            if 'expert_load' not in cap:
-                # Aggregation did not run (tracking may be disabled); skip.
-                return {}
-            load_tensor = cap['expert_load']
-            for expert_id, count in enumerate(load_tensor.tolist()):
-                expert_totals[expert_id] = (
-                    expert_totals.get(expert_id, 0) + int(count)
-                )
-            # num_gpus is the EP group size (dp_size × tp_size), provided by
-            # _aggregate_routing_load so we don't conflate experts with GPUs.
-            if cap.get('num_gpus', 0) > num_gpus:
-                num_gpus = cap['num_gpus']
-
-    # Fallback: if num_gpus not supplied (e.g. hand-crafted test data),
-    # treat one GPU per expert (correct for Mixtral-8x7B, 8 experts / 8 GPUs).
-    if num_gpus == 0:
-        num_gpus = len(expert_totals)
-
-    if not expert_totals or num_gpus == 0:
+    first_cap = next(iter(routing.values()))[0]
+    if 'expert_load' not in first_cap:
         return {}
 
-    # Greedy bin-packing: assign heaviest experts to least-loaded GPUs.
-    # min-heap: (current_load_on_gpu, gpu_id)
-    gpu_heap = [(0, g) for g in range(num_gpus)]
-    heapq.heapify(gpu_heap)
+    num_gpus: int = first_cap['num_gpus']
 
-    assignment: dict[str, int] = {}
-    for expert_id, load in sorted(expert_totals.items(), key=lambda x: -x[1]):
-        current_load, gpu_id = heapq.heappop(gpu_heap)
-        assignment[str(expert_id)] = gpu_id
-        heapq.heappush(gpu_heap, (current_load + load, gpu_id))
+    # Build per-layer load vectors (CPU list, used only at rebalance time).
+    layer_loads: dict[int, list[float]] = {}
+    for layer_id, captures in routing.items():
+        layer_tensor = torch.stack([cap['expert_load'] for cap in captures]).sum(dim=0)
+        layer_loads[layer_id] = layer_tensor.tolist()
 
-    return {"expert_to_gpu": assignment}
+    # If every layer is already well-balanced, skip the rebalance entirely.
+    if all(_is_balanced(loads, num_gpus) for loads in layer_loads.values()):
+        return {}
+
+    # Per-layer greedy bin-packing.
+    layer_configs: dict[str, dict[str, int]] = {
+        str(layer_id): _greedy_pack(loads, num_gpus)
+        for layer_id, loads in layer_loads.items()
+    }
+
+    # Global fallback for any layer not present in routing this step (e.g. dense
+    # layers that were skipped).  Use the sum across all observed layers.
+    all_loads_tensor = torch.tensor(list(layer_loads.values()))  # [L, E]
+    global_loads = all_loads_tensor.sum(dim=0).tolist()
+    global_assignment = _greedy_pack(global_loads, num_gpus)
+
+    return {
+        "expert_to_gpu": global_assignment,
+        "layer_configs": layer_configs,
+    }

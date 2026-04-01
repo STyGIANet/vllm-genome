@@ -72,22 +72,19 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
             layer_configs = step_config.get("layer_configs", {})
             global_config = step_config.get("expert_to_gpu", {})
         else:
-            # Pull configurations
-            layer_configs = user_config.get("layer_configs", {})          # Per-layer overrides
-            global_config = user_config.get("expert_to_gpu", {})         # Global overrides
+            layer_configs = user_config.get("layer_configs", {})
+            global_config = user_config.get("expert_to_gpu", {})
         
         slots_per_gpu = num_physical_experts // num_gpus
         full_2d_map = torch.full((num_layers, num_physical_experts), -1, dtype=torch.int32)
 
         for layer_idx in range(num_layers):
-            # Determine mapping for this specific layer: 
-            # Priority: Layer-specific > Global > Empty (to be filled by safety net)
+            # Per-layer override takes precedence over the global mapping.
             current_layer_data = layer_configs.get(str(layer_idx), global_config)
-            
+
             gpu_slot_counters = {i: 0 for i in range(num_gpus)}
             assigned_experts = set()
 
-            # A. Apply Configured Placements
             for expert_id_str, gpu_id in current_layer_data.items():
                 expert_id, gpu_id = int(expert_id_str), int(gpu_id)
                 
@@ -99,8 +96,7 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
                 else:
                     logger.warning(f"Layer {layer_idx}, GPU {gpu_id} full! Skipping Expert {expert_id}.")
 
-            # B. Safety Net: Fill remaining holes with unassigned experts
-            # This prevents the engine from crashing due to "missing" experts
+            # Fill any remaining slots with unassigned experts so the map is complete.
             all_logical_experts = set(range(num_physical_experts))
             unassigned = sorted(list(all_logical_experts - assigned_experts))
             
@@ -114,14 +110,11 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
     def _derive_inverse_maps(cls, physical_to_logical_map, num_logical_experts):
         num_layers, num_physical_experts = physical_to_logical_map.shape
         
-        # DeepSeek-style models can have many experts, but 10 replicas is plenty for a "max"
-        max_replicas = 10 
-        
-        # These are usually stored on CPU during policy calculation
+        max_replicas = 10
         logical_to_physical = torch.full(
             (num_layers, num_logical_experts, max_replicas), -1, dtype=torch.int32)
         replica_count = torch.zeros(
-            (num_layers, num_logical_experts), dtype=torch.long) # vLLM uses long for counts
+            (num_layers, num_logical_experts), dtype=torch.long)
 
         for layer in range(num_layers):
             for physical_idx in range(num_physical_experts):

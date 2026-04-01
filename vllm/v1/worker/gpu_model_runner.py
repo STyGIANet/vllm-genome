@@ -3080,61 +3080,84 @@ class GPUModelRunner(
     # expert positions update after every forward pass.
     _compute_placement_callback: object = None
 
-    @staticmethod
-    def _aggregate_routing_load(routing_snapshot: dict) -> dict:
+    def _aggregate_routing_load(self, routing_snapshot: dict) -> dict:
         """All-reduce per-expert token counts across all EP ranks.
 
         Each DP rank captures only its own tokens.  Before passing routing data
         to compute_placement() we sum the per-expert counts across every EP rank
         with a single NCCL all-reduce so every worker sees the **global** load.
 
-        The returned dict has the same structure as routing_snapshot with two
-        additional keys per capture:
-            expert_load: Tensor[num_logical_experts]  — global token counts, on GPU
-            num_gpus:    int  — EP group size (= dp_size × tp_size), i.e. the
-                               number of GPU slots compute_placement() assigns to
-        """
-        import torch
+        IMPORTANT — all ranks must call this every step:
+            ep_group.all_reduce() is an NCCL collective and acts as a barrier.
+            If any rank skips it (e.g. because its routing_snapshot is empty on
+            a dummy-batch step) while other ranks call it, all participating
+            ranks block forever (NCCL deadlock).  To avoid this, we always build
+            a [num_layers, num_experts] tensor — zeros when routing_snapshot is
+            empty — and always call all_reduce.  We return {} only after the
+            collective if the global sum is zero (nothing to place).
 
-        if not routing_snapshot:
+        Returns a dict with the same structure as routing_snapshot plus:
+            expert_load: Tensor[num_logical_experts]  — global token counts
+            num_gpus:    int  — EP group size (= dp_size × tp_size)
+        Returns {} when the cluster-wide token sum is zero (skip callback).
+        """
+        ep_group = get_ep_group()
+        num_gpus = ep_group.world_size
+
+        # Determine tensor shape.  Prefer eplb_state (authoritative, no GPU
+        # sync needed); fall back to scanning topk_ids only if not yet ready.
+        num_layers = 0
+        num_experts = 0
+        if self.eplb_state is not None and self.eplb_state.model_states:
+            first = next(iter(self.eplb_state.model_states.values()))
+            num_layers = first.model.num_moe_layers
+            num_experts = first.model.num_logical_experts
+
+        if routing_snapshot:
+            layer_ids = sorted(routing_snapshot.keys())
+            if num_layers == 0:
+                num_layers = len(layer_ids)
+            if num_experts == 0:
+                for caps in routing_snapshot.values():
+                    for cap in caps:
+                        top = int(cap['topk_ids'].max().item()) + 1
+                        if top > num_experts:
+                            num_experts = top
+        else:
+            layer_ids = []
+
+        if num_layers == 0 or num_experts == 0:
+            # EPLB state not yet initialised — callback cannot be active yet,
+            # so this branch is unreachable in practice.  Guard only.
             return {}
 
-        ep_group = get_ep_group()
-        num_gpus = ep_group.size()
-        device = next(
-            cap['topk_ids'].device
-            for caps in routing_snapshot.values()
-            for cap in caps
-        )
-
-        # Infer global expert count from the maximum observed expert id.
-        num_experts = 0
-        for caps in routing_snapshot.values():
-            for cap in caps:
-                top = int(cap['topk_ids'].max().item()) + 1
-                if top > num_experts:
-                    num_experts = top
-
-        layer_ids = sorted(routing_snapshot.keys())
-        num_layers = len(layer_ids)
-
-        # Build load[num_layers, num_experts] by scatter-counting topk_ids.
+        # Build load[num_layers, num_experts] — zeros for empty-snapshot ranks.
         load = torch.zeros(num_layers, num_experts,
-                           dtype=torch.int64, device=device)
-        for i, layer_id in enumerate(layer_ids):
-            for cap in routing_snapshot[layer_id]:
-                flat = cap['topk_ids'].reshape(-1).long()
-                load[i].scatter_add_(0, flat, torch.ones_like(flat))
+                           dtype=torch.int64, device=self.device)
+        if routing_snapshot:
+            for i, layer_id in enumerate(layer_ids):
+                for cap in routing_snapshot[layer_id]:
+                    flat = cap['topk_ids'].reshape(-1).long()
+                    load[i].scatter_add_(0, flat, torch.ones_like(flat))
 
-        # Sum across EP ranks: after this every rank holds the global load.
-        ep_group.all_reduce(load)
+        # Every rank calls this — even those with no local tokens.
+        load = ep_group.all_reduce(load)
+
+        # If no real tokens anywhere in the cluster this step, skip callback.
+        if load.sum().item() == 0:
+            return {}
 
         # Attach global load and num_gpus to a copy of the snapshot and return.
+        # On ranks with no local tokens layer_ids is empty; use range(num_layers)
+        # so every rank returns a result with the same keys (required for placement
+        # consistency — compute_placement() reads only expert_load, not topk_ids).
+        ids_to_iterate = layer_ids if routing_snapshot else range(num_layers)
         result: dict = {}
-        for i, layer_id in enumerate(layer_ids):
+        for i, layer_id in enumerate(ids_to_iterate):
+            captures = routing_snapshot.get(layer_id, [{}])
             result[layer_id] = [
                 {**cap, 'expert_load': load[i], 'num_gpus': num_gpus}
-                for cap in routing_snapshot[layer_id]
+                for cap in captures
             ]
         return result
 
@@ -3157,9 +3180,6 @@ class GPUModelRunner(
         if _is_tracking_enabled():
             routing_snapshot = get_routing_data()
 
-            # Call the placement callback BEFORE clearing so it reads live data.
-            # (get_routing_data() returns a reference; clear_routing_data() empties
-            # it in-place, so the callback must run first.)
             callback = self._compute_placement_callback
             if (
                 callback is not None
@@ -3167,9 +3187,6 @@ class GPUModelRunner(
                 and self.parallel_config.eplb_config.policy == "custom"
             ):
                 try:
-                    # Aggregate routing counts globally before calling the
-                    # callback.  Without this each rank has only its own tokens
-                    # and produces a different placement → NCCL P2P deadlock.
                     global_snapshot = self._aggregate_routing_load(
                         routing_snapshot
                     )
@@ -3180,8 +3197,7 @@ class GPUModelRunner(
                         )
                         StaticPlacementPolicy.set_dynamic_config(placement)
                 except Exception as exc:
-                    import logging
-                    logging.getLogger(__name__).warning(
+                    logger.warning(
                         "compute_placement callback raised an exception: %s",
                         exc,
                     )

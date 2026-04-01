@@ -83,6 +83,10 @@ def parse_args():
     parser.add_argument("--expert-placement-config", type=str, default=None,
                         dest="expert_placement_config",
                         help="Path to placement JSON (enables StaticPlacementPolicy)")
+    parser.add_argument("--callback-placement", action="store_true",
+                        dest="callback_placement",
+                        help="Enable EPLB driven entirely by compute_placement() callback "
+                             "(no JSON required; StaticPlacementPolicy starts from identity)")
     parser.add_argument("--placement-step-interval", type=int, default=32,
                         dest="placement_step_interval",
                         help="Run EPLB rebalance every N forward passes. "
@@ -168,6 +172,7 @@ def run_rank(
     max_model_len: int,
     gpu_memory_utilization: float,
     expert_placement_config_path: Optional[str],
+    callback_placement: bool,
     placement_step_interval: int,
     dataset: str,
     num_prompts_per_rank: int,
@@ -183,10 +188,9 @@ def run_rank(
     os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
     os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
     os.environ["VLLM_TRACK_ROUTING"] = "1"
-    os.environ["_COMBINED_TP_SIZE"] = str(gpus_per_rank)  # used by compute_placement
 
-    use_placement = expert_placement_config_path is not None
-    if use_placement:
+    use_placement = expert_placement_config_path is not None or callback_placement
+    if expert_placement_config_path is not None:
         os.environ["VLLM_EXPERT_CONFIG_PATH"] = expert_placement_config_path
 
     # ── Imports (deferred so env vars are set first) ──────────────────────────
@@ -211,6 +215,10 @@ def run_rank(
         max_model_len=max_model_len,
         gpu_memory_utilization=gpu_memory_utilization,
         eplb_config=eplb_config,
+        # Async scheduling de-syncs EP ranks so they hit ep_group.all_reduce()
+        # at different logical steps → NCCL deadlock. Must be disabled when
+        # _aggregate_routing_load() uses a collective across EP ranks.
+        async_scheduling=False,
     )
 
     # ── Wire compute_placement callback into the model runner via RPC ─────────
@@ -332,6 +340,10 @@ def main():
         expert_config_abs = os.path.abspath(args.expert_placement_config)
         if not os.path.exists(expert_config_abs):
             raise FileNotFoundError(f"Expert placement config not found: {expert_config_abs}")
+    elif args.callback_placement:
+        # No JSON — StaticPlacementPolicy starts from identity mapping and
+        # compute_placement() drives every rebalance from the first step.
+        expert_config_abs = None
 
     if args.node_size == 1:
         from vllm.utils.network_utils import get_open_port
@@ -345,11 +357,18 @@ def main():
     dp_per_node = dp_size // args.node_size
     node_rank = args.node_rank
 
+    use_placement = expert_config_abs is not None or args.callback_placement
     tracking = os.environ.get("VLLM_TRACK_ROUTING", "0") == "1"
+    if expert_config_abs:
+        placement_label = f"on ({expert_config_abs})"
+    elif args.callback_placement:
+        placement_label = "on (callback-only)"
+    else:
+        placement_label = "off"
     print(
         f"Launching dp_size={dp_size} tp_size={args.tp_size} "
         f"tracking={'on' if tracking else 'off'} "
-        f"placement={'on (' + expert_config_abs + ')' if expert_config_abs else 'off'}"
+        f"placement={placement_label}"
     )
 
     procs = []
@@ -374,6 +393,7 @@ def main():
                 args.max_model_len,
                 args.gpu_memory_utilization,
                 expert_config_abs,
+                args.callback_placement,
                 args.placement_step_interval,
                 args.dataset,
                 args.num_prompts_per_rank,
