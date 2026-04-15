@@ -156,17 +156,35 @@ def compute_placement(routing: dict) -> dict:
 
 ---
 
-## Launch commands
+## Running the scripts
 
-All commands from `merged/vllm/` with venv active:
+All commands run from `merged/vllm/` with the venv active:
 
 ```bash
 source merged/vllm/.venv/bin/activate
 cd merged/vllm
 ```
 
-### Both features (primary use case)
+---
 
+### `combined_launch.py` — single-shot WikiText inference
+
+Loads WikiText-2 paragraphs, distributes them across DP ranks, runs one `generate()` call per rank, then prints routing summaries. This is the primary script for measuring expert load and testing placement algorithms.
+
+#### Example commands
+
+**Full run — tracking + live callback placement (most common):**
+```bash
+VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \
+VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
+python genome_scripts/combined_launch.py \
+    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
+    --dp-size 8 --trust-remote-code --enforce-eager \
+    --callback-placement --placement-step-interval 32 \
+    --num-prompts-per-rank 4 --output-length 64
+```
+
+**Tracking + JSON-driven placement:**
 ```bash
 VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
@@ -175,37 +193,19 @@ python genome_scripts/combined_launch.py \
     --dp-size 8 --trust-remote-code --enforce-eager \
     --expert-placement-config genome_scripts/mixtral_EP_test.json \
     --placement-step-interval 32 \
-    --num-prompts-per-rank 2 \
-    --output-length 32
+    --num-prompts-per-rank 4 --output-length 64
 ```
 
-`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200` is needed on the current PCIe-only L4
-setup. See hardware notes below.
-
-### Tracking only (no expert movement)
-
+**Tracking only (no expert movement):**
 ```bash
 VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 \
 python genome_scripts/combined_launch.py \
     --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
     --dp-size 8 --trust-remote-code --enforce-eager \
-    --num-prompts-per-rank 2 --output-length 32
+    --num-prompts-per-rank 4 --output-length 64
 ```
 
-### JSON-driven placement only (no live callback)
-
-```bash
-NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \
-VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
-python genome_scripts/combined_launch.py \
-    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
-    --dp-size 8 --trust-remote-code --enforce-eager \
-    --expert-placement-config genome_scripts/mixtral_EP_test.json \
-    --placement-step-interval 32
-```
-
-### DeepSeek-MoE-16B (64 experts, 8 per GPU)
-
+**DeepSeek-MoE-16B (64 experts, 8 per GPU):**
 ```bash
 VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
@@ -213,50 +213,171 @@ python genome_scripts/combined_launch.py \
     --model deepseek-ai/deepseek-moe-16b-chat \
     --dp-size 8 --trust-remote-code --enforce-eager \
     --expert-placement-config genome_scripts/deepseek_EP_test.json \
-    --placement-step-interval 32
+    --placement-step-interval 32 \
+    --num-prompts-per-rank 4 --output-length 64
 ```
 
-### Unit tests (no GPU needed)
+**Save routing tensors to disk:**
+```bash
+VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 \
+python genome_scripts/combined_launch.py \
+    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
+    --dp-size 8 --trust-remote-code --enforce-eager \
+    --num-prompts-per-rank 4 --output-length 64 \
+    --save-routing-pt routing_run1
+# writes routing_run1_rank0.pt ... routing_run1_rank7.pt
+```
 
+**Unit tests (no GPU):**
 ```bash
 python genome_scripts/test_combined.py
 ```
 
+#### CLI flags
+
+**Model and parallelism:**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--model <id>` | Mixtral-8x7B-Instruct-v0.1 | HuggingFace model ID to load |
+| `--dp-size N` | 8 | Data-parallel ranks. One independent vLLM engine is spawned per rank, each on its own GPU(s). EP group size = dp_size × tp_size. |
+| `--tp-size M` | 1 | Tensor-parallel degree within each rank (GPUs per engine). Use >1 if the model doesn't fit on a single GPU. |
+| `--node-size N` | 1 | Total nodes in a multi-node run. On single-node leave at default. |
+| `--node-rank N` | 0 | Which node this process is running on. Launch one process per node, each with its node's rank. |
+| `--master-addr` / `--master-port` | auto | DP coordinator address. Auto-selected on single-node; must be set explicitly for multi-node. |
+
+**Memory and throughput:**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--max-num-seqs N` | 16 | Maximum sequences the engine will hold in flight at once. Higher = more parallelism but more VRAM. |
+| `--max-model-len N` | 512 | Maximum total sequence length (prompt tokens + output tokens). Keep ≤512 on L4s (22 GB VRAM). Raising this increases KV cache size. |
+| `--max-num-batched-tokens N` | 1024 | Token budget per forward pass. In EP mode, the all-gather multiplies effective token count by ep_size — keep this conservative to avoid OOM. 1024 is safe on L4s with ep_size=8. |
+| `--gpu-memory-utilization F` | 0.8 | Fraction of GPU VRAM pre-allocated for the KV cache. Lowering this reduces cache capacity; raising it risks OOM on model weights. |
+
+**Inference behaviour:**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--trust-remote-code` | off | Required for DeepSeek-MoE and any model with custom architecture code on HuggingFace. |
+| `--enforce-eager` | off | Disables CUDA graph capture. Required for EP mode — graph capture conflicts with dynamic expert routing. Always pass this flag. |
+| `--disable-expert-parallel` | off | Disables EP; model runs in DP-only mode. Expert routing still happens but experts are not distributed across GPUs. Not recommended for MoE research. |
+
+**Workload:**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--num-prompts-per-rank N` | 3 | WikiText-2 prompts assigned to each DP rank. Total prompts loaded = dp_size × N. All prompts are loaded once in the main process and distributed before subprocess launch. |
+| `--output-length N` | 10 | Maximum new tokens to generate per prompt. Longer outputs produce more decode steps and richer routing data, but take longer. |
+
+**Expert placement:**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--expert-placement-config <path>` | None | Path to a placement JSON file (see JSON format section below). Enables EPLB with `StaticPlacementPolicy`. On each rebalance step, the JSON mapping is applied unless `compute_placement()` returns a non-empty override. |
+| `--callback-placement` | off | Enables EPLB without a JSON file. `StaticPlacementPolicy` starts from the identity mapping (expert N on GPU N % num_gpus) and `compute_placement()` in `placement_fns.py` drives every subsequent rebalance. Use this to test your placement algorithm without pre-writing a JSON config. Either `--expert-placement-config` or `--callback-placement` must be set for placement to run; passing neither disables EPLB entirely. |
+| `--placement-step-interval N` | 32 | Run EPLB rebalance every N forward passes. Lower values make placement more responsive to load changes but increase overhead — each full Mixtral rebalance moves ~90 GB of expert weights over PCIe. 32 is a safe default on L4s; on NVLink hardware this can be reduced to 1. |
+
+**Output:**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--save-routing-pt <path>` | off | After generation, save per-rank routing tensors to `<path>_rank<N>.pt`. Each file contains `expert_ids [tokens, layers, top_k]`, `expert_weights`, `token_ids`, `origin_gpu`, and step metadata. |
+| `--timeout N` | 600 | Seconds to wait for each subprocess before force-killing it. Increase on slow hardware or for large models. |
+
 ---
 
-## CLI flags
+### `chatbot_launch.py` — multi-turn chatbot simulation
 
-| Flag | Default | Description |
+Simulates real chatbot usage: each DP rank holds `--num-chats` independent sessions. Each session runs `--num-turns` sequential `generate()` calls. After each turn, the model's response is appended to the conversation history, so the next turn's prompt is the full prior exchange plus a new user message — exactly how production LLM chat APIs work.
+
+```
+Turn 0 (cold):  [User: "What is France's capital?"]
+                 → model generates "Paris is the capital..."
+
+Turn 1 (warm):  [User: "What is France's capital?"]
+                [Assistant: "Paris is the capital..."]
+                [User: "Tell me more about its history."]
+                 → KV cache hit on the entire Turn 0 prefix; only new tokens computed
+
+Turn 2 (warm):  [...full Turn 0+1 history...]
+                [User: "What is the population there?"]
+                 → even longer prefix cached; marginal compute approaches zero for early tokens
+```
+
+Per-turn expert load is printed with a `cache=cold/warm` label so you can directly compare routing distributions before and after the prefix cache warms up. This tests the hypothesis: *cached prefixes skip early-layer recomputation → different expert activation profile → different optimal placement*.
+
+#### Example commands
+
+**Basic multi-turn run (tracking + no placement):**
+```bash
+VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 \
+VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
+python genome_scripts/chatbot_launch.py \
+    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
+    --dp-size 8 --trust-remote-code --enforce-eager \
+    --num-chats 2 --num-turns 4 --output-length 32
+```
+Runs 8 ranks × 2 chats = 16 concurrent sessions, each for 4 turns. Turn 0 is cold; turns 1–3 show increasing cache warmth.
+
+**With live callback placement:**
+```bash
+VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \
+VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
+python genome_scripts/chatbot_launch.py \
+    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
+    --dp-size 8 --trust-remote-code --enforce-eager \
+    --callback-placement --placement-step-interval 32 \
+    --num-chats 2 --num-turns 6 --output-length 32
+```
+Placement adapts to load as the cache warms. Watch `expert_load` shift between turns in the logs.
+
+**With JSON-driven placement:**
+```bash
+VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \
+VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
+python genome_scripts/chatbot_launch.py \
+    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
+    --dp-size 8 --trust-remote-code --enforce-eager \
+    --expert-placement-config genome_scripts/mixtral_EP_test.json \
+    --placement-step-interval 32 \
+    --num-chats 2 --num-turns 4 --output-length 32
+```
+
+**Longer sessions to stress-test caching:**
+```bash
+VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 \
+VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
+python genome_scripts/chatbot_launch.py \
+    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
+    --dp-size 8 --trust-remote-code --enforce-eager \
+    --num-chats 1 --num-turns 8 --output-length 64 \
+    --max-model-len 512
+```
+Note: conversation history grows each turn. With `--output-length 64` and `--num-turns 8`, total sequence length can reach ~512 tokens — stay within `--max-model-len`.
+
+#### CLI flags
+
+**Shared flags** — model, parallelism, memory, and placement flags (`--model`, `--dp-size`, `--tp-size`, `--node-size`, `--node-rank`, `--master-addr`, `--master-port`, `--max-num-seqs`, `--max-model-len`, `--max-num-batched-tokens`, `--gpu-memory-utilization`, `--trust-remote-code`, `--enforce-eager`, `--disable-expert-parallel`, `--expert-placement-config`, `--callback-placement`, `--placement-step-interval`, `--timeout`) have identical meaning to `combined_launch.py` above.
+
+**Workload flags unique to `chatbot_launch.py`:**
+
+| Flag | Default | Effect |
 |---|---|---|
-| `--model` | — | HuggingFace model ID |
-| `--dp-size N` | — | DP ranks (one engine per rank) |
-| `--tp-size M` | 1 | Tensor-parallel GPUs per rank |
-| `--expert-placement-config <path>` | None | JSON placement config; enables EPLB |
-| `--placement-step-interval N` | 32 | EPLB rebalance every N forward passes |
-| `--dataset wikitext\|chatbot` | wikitext | Prompt source (see below) |
-| `--cache-repeat-factor N` | 4 | Chatbot mode: repeat each base prompt N times to warm the KV prefix cache |
-| `--num-prompts-per-rank N` | 3 | Prompts per DP rank |
-| `--output-length N` | 10 | Max output tokens |
-| `--save-routing-pt <path>` | None | Save routing tensors to `<path>_rank<N>.pt` |
-| `--timeout N` | 600 | Process join timeout (seconds) |
+| `--num-chats N` | 2 | Chat sessions per DP rank. Total concurrent sessions = dp_size × N. Each session has its own independent conversation history; sessions on different ranks run on different GPUs. More sessions = more diverse routing data but higher VRAM pressure. |
+| `--num-turns N` | 4 | Conversation turns per session. Turn 0 is always cold (no cached prefix). Turns 1+ reuse the growing conversation history as a cached prefix — the benefit increases with each turn. Watch the `cache=warm` lines in the output to see load shifting. |
+| `--output-length N` | 32 | Max tokens generated per turn. Each response is appended to the history, so the total prompt length grows by roughly `output-length` tokens per turn. Make sure `num_turns × output_length + initial_prompt_length < --max-model-len`. |
 
-| Env var | Description |
+---
+
+### Environment variables (both scripts)
+
+| Env var | Effect |
 |---|---|
-| `VLLM_TRACK_ROUTING=1` | Enable per-step routing capture |
-| `NCCL_IB_DISABLE=1` | Disable InfiniBand (single-node only) |
-| `VLLM_LOGGING_LEVEL=INFO` | Show EPLB placement logs |
-| `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=N` | Override 300 s default (needed on PCIe-only L4) |
-
----
-
-## Datasets
-
-| Mode | Flag | Description |
-|---|---|---|
-| **wikitext** | `--dataset wikitext` | Samples from WikiText-2 (train split). Filters paragraphs shorter than 100 chars; first 300 chars used as prompt. Good diversity of topics; exercises different expert specialisations across layers. |
-| **chatbot** | `--dataset chatbot` | A small fixed pool of conversational prompts, each repeated `--cache-repeat-factor` times (default 4). Enables `enable_prefix_caching=True` automatically so repeated requests warm the KV cache. Use this to measure the impact of prefix cache hit rate on expert routing distributions. |
-
-The chatbot mode is designed to test the hypothesis: *cached prefixes skip early-layer computation → different expert load profile → different optimal placement*. Compare `expert_load` distributions between a cold run and a warm-cache run to observe the effect.
+| `VLLM_TRACK_ROUTING=1` | Enable per-step routing capture. Required to see routing summaries and use `compute_placement()`. Without this, no expert load data is collected. |
+| `NCCL_IB_DISABLE=1` | Disable InfiniBand transport for NCCL. Required on single-node VMs that don't have IB hardware — without it NCCL may error or hang. |
+| `VLLM_LOGGING_LEVEL=INFO` | Show INFO-level logs from vLLM internals, including `[EPLB step N] GPU0:[...] GPU1:[...]` placement lines from `custom_policy.py`. |
+| `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=N` | Override the default 300 s per-forward-pass timeout. Set to 1200 on PCIe-only L4 VMs — cross-NUMA expert transfers can take several seconds and the default timeout fires prematurely. Not needed on NVLink hardware. |
 
 ---
 

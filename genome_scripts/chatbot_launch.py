@@ -1,41 +1,40 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """
-combined_launch.py — DP+EP inference with token routing tracking and live
-expert redistribution via a user-supplied compute_placement() callback.
+chatbot_launch.py — Multi-turn chatbot simulation with KV prefix caching.
 
-Primary integration script for the moe-merged branch. Combines:
-  • per-step MoE routing capture (from token_routing branch)
-  • custom expert placement via StaticPlacementPolicy (from expert-placement branch)
+Simulates real chatbot usage: each rank holds N independent chat sessions.
+Each session runs --num-turns sequential generate() calls, appending the
+model's response to the conversation history before the next user message.
+Because vLLM's prefix cache stores past KV states, later turns reuse cached
+computation for all tokens before the new user message.
 
-Usage (8×L4, Mixtral, both features):
+Per-turn expert load is printed so you can observe how routing distributions
+shift as the prefix cache warms up (hypothesis: cached prefixes skip early
+layers → different expert activation profile → different optimal placement).
+
+Usage (8×L4, Mixtral):
     VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \\
-    python genome_scripts/combined_launch.py \\
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \\
+    python genome_scripts/chatbot_launch.py \\
         --model mistralai/Mixtral-8x7B-Instruct-v0.1 \\
         --dp-size 8 --trust-remote-code --enforce-eager \\
-        --expert-placement-config genome_scripts/mixtral_EP_test.json
+        --num-chats 2 --num-turns 4 --output-length 32
 
-Prompts are drawn from WikiText-2 (HuggingFace datasets).
-For multi-turn chatbot simulation see chatbot_launch.py.
-
-Tracking only (no placement):
-    VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 \\
-    python genome_scripts/combined_launch.py \\
-        --model mistralai/Mixtral-8x7B-Instruct-v0.1 \\
-        --dp-size 8 --trust-remote-code --enforce-eager
-
-Placement only (no tracking):
-    NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \\
-    python genome_scripts/combined_launch.py \\
+With live expert placement driven by the callback:
+    VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 VLLM_LOGGING_LEVEL=INFO \\
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \\
+    python genome_scripts/chatbot_launch.py \\
         --model mistralai/Mixtral-8x7B-Instruct-v0.1 \\
         --dp-size 8 --trust-remote-code --enforce-eager \\
-        --expert-placement-config genome_scripts/mixtral_EP_test.json
+        --callback-placement --placement-step-interval 32 \\
+        --num-chats 2 --num-turns 4 --output-length 32
 
 Environment variables
 ---------------------
 VLLM_TRACK_ROUTING=1      Enable per-step routing capture.
 NCCL_IB_DISABLE=1         Disable InfiniBand (single-node only).
-VLLM_LOGGING_LEVEL=INFO   Show EPLB placement logs from custom_policy.py.
+VLLM_LOGGING_LEVEL=INFO   Show EPLB placement logs.
 """
 
 import argparse
@@ -48,16 +47,72 @@ import torch
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Conversation templates
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Each entry is (opening_message, [follow_up_1, follow_up_2, ...]).
+# Follow-ups cycle if --num-turns exceeds their count.
+_CHAT_SESSIONS = [
+    (
+        "What is the capital of France?",
+        ["Tell me more about its history.", "What is the population there?", "What language do they speak?"],
+    ),
+    (
+        "Explain how neural networks learn.",
+        ["What is backpropagation?", "How do activation functions work?", "What is overfitting?"],
+    ),
+    (
+        "What causes the seasons on Earth?",
+        ["How does the tilt affect temperature?", "Are seasons the same in both hemispheres?", "What about near the equator?"],
+    ),
+    (
+        "How does photosynthesis work?",
+        ["What role does chlorophyll play?", "Where does the oxygen come from?", "Can it happen at night?"],
+    ),
+    (
+        "What is the difference between RAM and storage?",
+        ["Which one is faster?", "What happens when RAM is full?", "How much RAM do modern phones have?"],
+    ),
+    (
+        "How do airplanes generate lift?",
+        ["What is Bernoulli's principle?", "How do flaps change lift?", "What happens during a stall?"],
+    ),
+    (
+        "What is quantum entanglement?",
+        ["Can it be used for communication?", "How is it experimentally observed?", "What is superposition?"],
+    ),
+    (
+        "How does the immune system fight viruses?",
+        ["What are T cells?", "How do vaccines train immunity?", "What is herd immunity?"],
+    ),
+]
+
+
+def _format_turn(history: str, user_msg: str) -> str:
+    """Append a user message to the conversation history."""
+    return history + f"User: {user_msg}\nAssistant:"
+
+
+def _initial_prompt(session_idx: int) -> str:
+    opening, _ = _CHAT_SESSIONS[session_idx % len(_CHAT_SESSIONS)]
+    return _format_turn("", opening)
+
+
+def _follow_up(session_idx: int, turn: int) -> str:
+    """Return the follow-up user message for a given session and turn index."""
+    _, follow_ups = _CHAT_SESSIONS[session_idx % len(_CHAT_SESSIONS)]
+    return follow_ups[(turn - 1) % len(follow_ups)]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Argument parsing
 # ─────────────────────────────────────────────────────────────────────────────
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Combined token routing tracking + expert placement (DP+EP mode)"
+        description="Multi-turn chatbot simulation with KV prefix caching (DP+EP mode)"
     )
-    parser.add_argument(
-        "--model", type=str, default="mistralai/Mixtral-8x7B-Instruct-v0.1",
-    )
+    parser.add_argument("--model", type=str, default="mistralai/Mixtral-8x7B-Instruct-v0.1")
     parser.add_argument("--dp-size", type=int, default=8, dest="dp_size")
     parser.add_argument("--tp-size", type=int, default=1, dest="tp_size")
     parser.add_argument("--node-size", type=int, default=1, dest="node_size")
@@ -68,9 +123,7 @@ def parse_args():
     parser.add_argument("--max-model-len", type=int, default=512, dest="max_model_len",
                         help="Keep ≤512 on 22 GiB L4s")
     parser.add_argument("--max-num-batched-tokens", type=int, default=1024,
-                        dest="max_num_batched_tokens",
-                        help="Default 1024 avoids OOM on L4s with EP=8 "
-                             "(EP all-gather multiplies effective tokens by ep_size)")
+                        dest="max_num_batched_tokens")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8,
                         dest="gpu_memory_utilization")
     parser.add_argument("--trust-remote-code", action="store_true", dest="trust_remote_code")
@@ -78,43 +131,21 @@ def parse_args():
     parser.add_argument("--disable-expert-parallel", dest="enable_expert_parallel",
                         action="store_false")
     parser.set_defaults(enable_expert_parallel=True)
-    parser.add_argument("--num-prompts-per-rank", type=int, default=3,
-                        dest="num_prompts_per_rank")
-    parser.add_argument("--output-length", type=int, default=10, dest="output_length")
+    parser.add_argument("--num-chats", type=int, default=2, dest="num_chats",
+                        help="Number of independent chat sessions per DP rank")
+    parser.add_argument("--num-turns", type=int, default=4, dest="num_turns",
+                        help="Number of conversation turns per chat session")
+    parser.add_argument("--output-length", type=int, default=32, dest="output_length")
     parser.add_argument("--expert-placement-config", type=str, default=None,
                         dest="expert_placement_config",
                         help="Path to placement JSON (enables StaticPlacementPolicy)")
     parser.add_argument("--callback-placement", action="store_true",
                         dest="callback_placement",
-                        help="Enable EPLB driven entirely by compute_placement() callback "
-                             "(no JSON required; StaticPlacementPolicy starts from identity)")
+                        help="Enable EPLB driven by compute_placement() callback")
     parser.add_argument("--placement-step-interval", type=int, default=32,
-                        dest="placement_step_interval",
-                        help="Run EPLB rebalance every N forward passes. "
-                             "Default 32 avoids PCIe saturation on L4s "
-                             "(each full Mixtral rearrangement moves ~90 GB of weights)")
-    parser.add_argument("--save-routing-pt", type=str, default="",
-                        dest="save_routing_pt",
-                        help="Save per-rank routing tensors to <path>_rank<N>.pt")
+                        dest="placement_step_interval")
     parser.add_argument("--timeout", type=int, default=600)
     return parser.parse_args()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Prompt loading
-# ─────────────────────────────────────────────────────────────────────────────
-
-def load_prompts(total_prompts: int) -> list[str]:
-    from datasets import load_dataset
-    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-    texts = [
-        text[:300]
-        for row in ds
-        if len(text := row["text"].strip()) > 100
-    ]
-    if not texts:
-        raise RuntimeError("wikitext dataset returned no usable samples")
-    return (texts * ((total_prompts // len(texts)) + 1))[:total_prompts]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,9 +170,9 @@ def run_rank(
     expert_placement_config_path: Optional[str],
     callback_placement: bool,
     placement_step_interval: int,
-    prompts: list[str],
+    num_chats: int,
+    num_turns: int,
     output_length: int,
-    save_routing_pt: str,
 ):
     is_rank0 = global_dp_rank == 0
 
@@ -179,17 +210,11 @@ def run_rank(
         max_model_len=max_model_len,
         gpu_memory_utilization=gpu_memory_utilization,
         eplb_config=eplb_config,
-        # Async scheduling de-syncs EP ranks so they hit ep_group.all_reduce()
-        # at different logical steps → NCCL deadlock. Must be disabled when
-        # _aggregate_routing_load() uses a collective across EP ranks.
+        enable_prefix_caching=True,
+        # Async scheduling de-syncs EP ranks → NCCL deadlock in all_reduce.
         async_scheduling=False,
     )
 
-    # ── Wire compute_placement callback into the model runner via RPC ─────────
-    # Direct attribute access on llm.llm_engine.engine_core doesn't reach the
-    # worker subprocess in DP multiprocess mode (engine_core is a SyncMPClient
-    # proxy). Instead we use collective_rpc to tell each worker to import
-    # placement_fns.compute_placement in its own address space.
     if use_placement:
         placement_fns_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "placement_fns.py"
@@ -199,89 +224,70 @@ def run_rank(
             args=(placement_fns_path, "compute_placement"),
         )
         if is_rank0:
-            print("[Rank 0] compute_placement callback registered on all workers.")
+            print("[Rank 0] compute_placement callback registered.")
 
     if is_rank0:
-        print(f"[Rank 0] All engines ready. placement={'on' if use_placement else 'off'}, "
-              f"tracking=on")
+        print(f"[Rank 0] Engines ready. chats_per_rank={num_chats} turns={num_turns} "
+              f"placement={'on' if use_placement else 'off'}")
 
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=output_length)
 
+    # Assign sessions to this rank: rank R owns session indices offset by global_dp_rank.
+    # e.g. rank 0 → sessions 0, 8, 16 ... (with num_chats=2 → sessions 0, 8)
+    session_indices = [
+        global_dp_rank * num_chats + i for i in range(num_chats)
+    ]
+
+    # ── Initialise conversation histories (one per session) ───────────────────
+    histories = [_initial_prompt(s) for s in session_indices]
+
     llm.reset_step_counter()
-    outputs = llm.generate(prompts, sampling_params)
 
-    # ── Print outputs (all ranks, each owns different prompts) ────────────────
-    for out in outputs:
-        print(f"[Rank {global_dp_rank}] {out.prompt[:60]!r} → {out.outputs[0].text[:80]!r}")
+    # ── Multi-turn loop ───────────────────────────────────────────────────────
+    for turn in range(num_turns):
+        outputs = llm.generate(histories, sampling_params)
 
-    # ── Routing analysis ──────────────────────────────────────────────────────
-    snapshots = llm.drain_step_snapshots()
+        # Drain routing snapshots captured during this turn's generate() call.
+        snapshots = llm.drain_step_snapshots()
 
-    if not snapshots:
-        if is_rank0:
-            print("[Rank 0] No routing snapshots captured — is VLLM_TRACK_ROUTING=1?")
-    else:
-        # Step breakdown: one line per rank showing token counts per step
-        step_summary = "  ".join(
-            f"step{s['step_idx']}:"
-            + str(sum(c["num_tokens"]
-                      for c in next(iter(s["routing"].values()), [])))
-            + "tok"
+        # Compute total tokens processed and mean expert load across all layers.
+        total_tokens = sum(
+            sum(c["num_tokens"] for c in next(iter(s["routing"].values()), []))
             for s in snapshots
         )
-        print(f"[Rank {global_dp_rank}] {len(snapshots)} steps — {step_summary}")
 
-        # ── Flatten captures into [tokens, layers, top_k] tensors ────────────
-        layer_ids = sorted(snapshots[0]["routing"].keys())
-        num_layers = len(layer_ids)
-
-        per_layer_ids: dict[int, list] = {lid: [] for lid in layer_ids}
-        per_layer_wts: dict[int, list] = {lid: [] for lid in layer_ids}
-
+        # Aggregate expert load across all steps and layers for a quick summary.
+        layer_loads: dict[int, torch.Tensor] = {}
         for snap in snapshots:
-            for lid in layer_ids:
-                for cap in snap["routing"].get(lid, []):
-                    per_layer_ids[lid].append(cap["topk_ids"])
-                    per_layer_wts[lid].append(cap["topk_weights"])
+            for layer_id, captures in snap["routing"].items():
+                load = torch.stack([c["expert_load"] for c in captures]).sum(dim=0)
+                if layer_id in layer_loads:
+                    layer_loads[layer_id] += load
+                else:
+                    layer_loads[layer_id] = load
 
-        first_lid = layer_ids[0]
-        all_ids = torch.cat(per_layer_ids[first_lid], dim=0)
-        top_k = all_ids.shape[1]
-        total_tokens = all_ids.shape[0]
+        if layer_loads:
+            all_load = torch.stack(list(layer_loads.values())).sum(dim=0)
+            top_experts = sorted(enumerate(all_load.tolist()), key=lambda x: -x[1])[:4]
+            load_str = " ".join(f"E{e}({int(c)})" for e, c in top_experts)
+        else:
+            load_str = "(no routing data)"
 
-        expert_ids = torch.zeros(total_tokens, num_layers, top_k, dtype=torch.int32)
-        expert_weights = torch.zeros(total_tokens, num_layers, top_k, dtype=torch.float32)
+        print(f"[Rank {global_dp_rank}] turn={turn} tokens={total_tokens} "
+              f"cache={'warm' if turn > 0 else 'cold'} top_experts: {load_str}")
 
-        for layer_idx, lid in enumerate(layer_ids):
-            expert_ids[:, layer_idx, :] = torch.cat(per_layer_ids[lid], dim=0).to(torch.int32)
-            expert_weights[:, layer_idx, :] = torch.cat(per_layer_wts[lid], dim=0).to(torch.float32)
-
-        # Expert usage summary for first 3 layers (per rank, each sees different traffic)
-        usage_parts = []
-        for layer_idx in range(min(3, num_layers)):
-            layer_data = expert_ids[:, layer_idx, :]
-            unique, counts = torch.unique(layer_data, return_counts=True)
-            top_experts = sorted(zip(unique.tolist(), counts.tolist()), key=lambda x: -x[1])[:3]
-            usage_parts.append("L" + str(layer_ids[layer_idx]) + ":"
-                                + ",".join(f"E{e}({c})" for e, c in top_experts))
-        print(f"[Rank {global_dp_rank}] {total_tokens} tokens — top experts: {' | '.join(usage_parts)}")
-
-        # ── Save to disk (optional) ───────────────────────────────────────────
-        if save_routing_pt:
-            save_path = f"{save_routing_pt}_rank{global_dp_rank}.pt"
-            origin_gpu = torch.full((total_tokens,), global_dp_rank, dtype=torch.int32)
-            torch.save({
-                "token_ids":      torch.arange(total_tokens, dtype=torch.int64),
-                "origin_gpu":     origin_gpu,
-                "expert_ids":     expert_ids,
-                "expert_weights": expert_weights,
-                "num_tokens":     total_tokens,
-                "num_layers":     num_layers,
-                "top_k":          top_k,
-                "dp_rank":        global_dp_rank,
-                "num_steps":      len(snapshots),
-            }, save_path)
-            print(f"[Rank {global_dp_rank}] Saved routing → {save_path}")
+        # ── Append model response and next user message to each history ───────
+        for i, (out, sess_idx) in enumerate(zip(outputs, session_indices)):
+            response = out.outputs[0].text.strip()
+            if turn < num_turns - 1:
+                follow_up = _follow_up(sess_idx, turn + 1)
+                histories[i] = (
+                    histories[i] + response + f"\nUser: {follow_up}\nAssistant:"
+                )
+            else:
+                # Last turn — print final exchange.
+                print(f"[Rank {global_dp_rank}] session={sess_idx} "
+                      f"turn={turn} → {response[:80]!r}")
 
     sleep(1)
 
@@ -310,26 +316,12 @@ def main():
     dp_size = args.dp_size
     dp_per_node = dp_size // args.node_size
     node_rank = args.node_rank
-    n = args.num_prompts_per_rank
-
-    all_prompts = load_prompts(dp_size * n)
-    rank_prompts = [
-        all_prompts[r * n : (r + 1) * n] or ["Placeholder."]
-        for r in range(dp_size)
-    ]
 
     use_placement = expert_config_abs is not None or args.callback_placement
-    tracking = os.environ.get("VLLM_TRACK_ROUTING", "0") == "1"
-    if expert_config_abs:
-        placement_label = f"on ({expert_config_abs})"
-    elif args.callback_placement:
-        placement_label = "on (callback-only)"
-    else:
-        placement_label = "off"
     print(
         f"Launching dp_size={dp_size} tp_size={args.tp_size} "
-        f"tracking={'on' if tracking else 'off'} "
-        f"placement={placement_label}"
+        f"chats_per_rank={args.num_chats} turns={args.num_turns} "
+        f"placement={'on' if use_placement else 'off'}"
     )
 
     procs = []
@@ -356,9 +348,9 @@ def main():
                 expert_config_abs,
                 args.callback_placement,
                 args.placement_step_interval,
-                rank_prompts[global_rank],
+                args.num_chats,
+                args.num_turns,
                 args.output_length,
-                args.save_routing_pt,
             ),
         )
         p.start()
