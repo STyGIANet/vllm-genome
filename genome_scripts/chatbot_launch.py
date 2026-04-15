@@ -39,7 +39,7 @@ VLLM_LOGGING_LEVEL=INFO   Show EPLB placement logs.
 
 import argparse
 import os
-from multiprocessing import Process
+from multiprocessing import Barrier, Process
 from time import sleep
 from typing import Optional
 
@@ -144,6 +144,9 @@ def parse_args():
                         help="Enable EPLB driven by compute_placement() callback")
     parser.add_argument("--placement-step-interval", type=int, default=32,
                         dest="placement_step_interval")
+    parser.add_argument("--save-outputs", type=str, default="",
+                        dest="save_outputs",
+                        help="Write conversation turns to <path>_rank<N>.txt")
     parser.add_argument("--timeout", type=int, default=600)
     return parser.parse_args()
 
@@ -173,6 +176,8 @@ def run_rank(
     num_chats: int,
     num_turns: int,
     output_length: int,
+    save_outputs: str,
+    barrier: Barrier,
 ):
     is_rank0 = global_dp_rank == 0
 
@@ -241,53 +246,89 @@ def run_rank(
     # ── Initialise conversation histories (one per session) ───────────────────
     histories = [_initial_prompt(s) for s in session_indices]
 
+    # turn_log: list of (session_idx, turn, user_msg, response, cache_label)
+    turn_log: list[tuple[int, int, str, str, str]] = []
+
     llm.reset_step_counter()
 
     # ── Multi-turn loop ───────────────────────────────────────────────────────
     for turn in range(num_turns):
+        # Synchronise all DP ranks before generate().  Without this barrier the
+        # ranks finish their inter-turn post-processing at different times and
+        # the first rank to call generate() starts NCCL ep_group.all_reduce()
+        # operations inside _on_routing_step() before other ranks' EngineCores
+        # have received any requests, causing a permanent NCCL deadlock.
+        barrier.wait()
+
         outputs = llm.generate(histories, sampling_params)
 
         # Drain routing snapshots captured during this turn's generate() call.
         snapshots = llm.drain_step_snapshots()
 
-        # Compute total tokens processed and mean expert load across all layers.
+        # Compute total tokens processed this turn.
         total_tokens = sum(
             sum(c["num_tokens"] for c in next(iter(s["routing"].values()), []))
             for s in snapshots
         )
 
-        # Aggregate expert load across all steps and layers for a quick summary.
-        layer_loads: dict[int, torch.Tensor] = {}
+        # Count token-to-expert assignments from topk_ids across all steps and
+        # layers.  (expert_load is only available inside the placement callback;
+        # drain_step_snapshots returns topk_ids / topk_weights / num_tokens.)
+        expert_counts: dict[int, int] = {}
         for snap in snapshots:
-            for layer_id, captures in snap["routing"].items():
-                load = torch.stack([c["expert_load"] for c in captures]).sum(dim=0)
-                if layer_id in layer_loads:
-                    layer_loads[layer_id] += load
-                else:
-                    layer_loads[layer_id] = load
+            for captures in snap["routing"].values():
+                for c in captures:
+                    for expert_id in c["topk_ids"].reshape(-1).tolist():
+                        expert_id = int(expert_id)
+                        expert_counts[expert_id] = expert_counts.get(expert_id, 0) + 1
 
-        if layer_loads:
-            all_load = torch.stack(list(layer_loads.values())).sum(dim=0)
-            top_experts = sorted(enumerate(all_load.tolist()), key=lambda x: -x[1])[:4]
-            load_str = " ".join(f"E{e}({int(c)})" for e, c in top_experts)
+        if expert_counts:
+            top_experts = sorted(expert_counts.items(), key=lambda x: -x[1])[:4]
+            load_str = " ".join(f"E{e}({cnt})" for e, cnt in top_experts)
         else:
             load_str = "(no routing data)"
 
+        cache_label = "cold" if turn == 0 else "warm"
         print(f"[Rank {global_dp_rank}] turn={turn} tokens={total_tokens} "
-              f"cache={'warm' if turn > 0 else 'cold'} top_experts: {load_str}")
+              f"cache={cache_label} top_experts: {load_str}")
 
         # ── Append model response and next user message to each history ───────
         for i, (out, sess_idx) in enumerate(zip(outputs, session_indices)):
             response = out.outputs[0].text.strip()
+
+            # Derive the user message for this turn for logging.
+            if turn == 0:
+                user_msg = _CHAT_SESSIONS[sess_idx % len(_CHAT_SESSIONS)][0]
+            else:
+                user_msg = _follow_up(sess_idx, turn)
+            turn_log.append((sess_idx, turn, user_msg, response, cache_label))
+
             if turn < num_turns - 1:
                 follow_up = _follow_up(sess_idx, turn + 1)
                 histories[i] = (
                     histories[i] + response + f"\nUser: {follow_up}\nAssistant:"
                 )
             else:
-                # Last turn — print final exchange.
                 print(f"[Rank {global_dp_rank}] session={sess_idx} "
                       f"turn={turn} → {response[:80]!r}")
+
+    if save_outputs:
+        save_path = f"{save_outputs}_rank{global_dp_rank}.txt"
+        sep = "=" * 80
+        cur_session = None
+        with open(save_path, "w") as f:
+            for sess_idx, turn, user_msg, response, cache_label in turn_log:
+                if sess_idx != cur_session:
+                    cur_session = sess_idx
+                    f.write(f"\n{'#' * 80}\n")
+                    f.write(f"# Session {sess_idx}  (Rank {global_dp_rank})\n")
+                    f.write(f"{'#' * 80}\n\n")
+                f.write(f"{sep}\n")
+                f.write(f"Turn {turn + 1} of {num_turns}  [{cache_label}]\n")
+                f.write(f"{sep}\n")
+                f.write(f"User: {user_msg}\n\n")
+                f.write(f"Assistant: {response}\n\n")
+        print(f"[Rank {global_dp_rank}] Saved outputs → {save_path}")
 
     sleep(1)
 
@@ -324,6 +365,12 @@ def main():
         f"placement={'on' if use_placement else 'off'}"
     )
 
+    # All DP ranks must enter generate() together each turn.  Without this
+    # barrier the first rank to finish inter-turn post-processing starts NCCL
+    # operations inside its EngineCore before other EngineCores have work,
+    # causing a permanent EP all_reduce deadlock.
+    barrier = Barrier(dp_size)
+
     procs = []
     for local_rank, global_rank in enumerate(
         range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)
@@ -351,6 +398,8 @@ def main():
                 args.num_chats,
                 args.num_turns,
                 args.output_length,
+                args.save_outputs,
+                barrier,
             ),
         )
         p.start()

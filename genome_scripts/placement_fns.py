@@ -10,9 +10,15 @@ Edit `compute_placement()` to implement your own placement algorithm.
 See OVERVIEW.md for the full API contract.
 """
 
+import sys
 import heapq
 import torch
+import logging
+from vllm.logger import init_logger
 
+# Use a "vllm." prefix so it inherits vLLM's logging configuration,
+# formatting, and log-level settings from the parent processes!
+logger = init_logger("vllm.genome.placement")
 
 # Skip rebalancing if the optimal per-GPU load spread is below this fraction of
 # the mean GPU load.  At 5%, a cluster where GPUs carry 95–105% of the average
@@ -78,10 +84,17 @@ def compute_placement(routing: dict) -> dict:
     unnecessary NCCL P2P expert transfers.
 
     Args:
-        routing: {layer_id: [capture, ...]}
-            capture keys:
-              'expert_load'  Tensor[num_experts]  global token counts per expert
-              'num_gpus'     int                  EP group size (dp_size * tp_size)
+    routing: {
+        layer_id (int): [   # one entry per MoE layer (0–31 for Mixtral)
+            {
+                'topk_ids':     Tensor[T, K],  # T = tokens on THIS rank, K = 2 for Mixtral
+                'topk_weights': Tensor[T, K],  # gating weights for those experts
+                'num_tokens':   int,           # == T
+                'expert_load':  Tensor[E],     # E = 8 experts; GLOBAL all-reduced counts
+                'num_gpus':     int,           # 8
+            }
+        ]
+    }
 
     Returns:
         {"expert_to_gpu": {...}, "layer_configs": {"<layer_id>": {...}, ...}}
@@ -89,6 +102,19 @@ def compute_placement(routing: dict) -> dict:
     """
     if not routing:
         return {}
+    
+    logger.debug("Starting compute placement computation...")
+
+    
+    if logger.isEnabledFor(logging.INFO):
+        total = 0
+        for layer, data in routing.items():
+            # print("LAYER: ", layer)
+            # print("num_tokens", data[0]["num_tokens"])
+            # print('topk_ids', data[0]['topk_ids'])
+            total += data[0]['topk_ids'].nbytes + data[0]['topk_weights'].nbytes + data[0]['expert_load'].nbytes + sys.getsizeof(data[0]['num_tokens']) + sys.getsizeof(data[0]['num_gpus'])
+        
+        logger.info("Total size of routing data: %s bytes", total)
 
     first_cap = next(iter(routing.values()))[0]
     if 'expert_load' not in first_cap:

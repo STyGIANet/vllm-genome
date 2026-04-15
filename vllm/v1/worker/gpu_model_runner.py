@@ -5686,6 +5686,11 @@ class GPUModelRunner(
         # In such cases, we still have to trigger EPLB to make sure
         # ranks execute the rearrangement in synchronization.
         if not skip_eplb:
+            # _on_routing_step MUST be called before eplb_step on every forward
+            # pass — real or dummy — because _aggregate_routing_load() contains
+            # an NCCL ep_group.all_reduce() that acts as a barrier.  Skipping
+            # it on dummy-batch ranks while real-batch ranks call it deadlocks.
+            self._on_routing_step()
             self.eplb_step(is_dummy=True, is_profile=is_profile)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1

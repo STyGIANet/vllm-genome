@@ -12,6 +12,134 @@ Two capabilities run together on top of vLLM's DP+EP stack:
 
 ---
 
+## Script diagrams
+
+> **VSCode note:** Mermaid diagrams require the
+> [Markdown Preview Mermaid Support](https://marketplace.visualstudio.com/items?itemName=bierner.markdown-mermaid)
+> extension (by Matt Bierner). Install it, then use **Ctrl+Shift+V** to open the preview.
+
+---
+
+### Parallel execution model (both scripts)
+
+Every script spawns one subprocess per DP rank. Each subprocess owns one GPU (or `tp_size` GPUs) and runs a fully independent vLLM engine. The only shared state is the NCCL EP group used for two collectives: `all_reduce` to aggregate expert load every forward pass, and `batch_isend_irecv` to physically move expert weights when EPLB fires.
+
+```mermaid
+flowchart TD
+    subgraph HOST["Host Process"]
+        PARSE["parse_args"] --> SETUP["load prompts or build session list"]
+        SETUP --> SPAWN["spawn dp_size subprocesses"]
+    end
+
+    SPAWN --> R0["Rank 0 / GPU 0\nrun_rank()"]
+    SPAWN --> R1["Rank 1 / GPU 1\nrun_rank()"]
+    SPAWN --> RDOT["ranks 2-6"]
+    SPAWN --> R7["Rank 7 / GPU 7\nrun_rank()"]
+
+    subgraph NCCL["Shared NCCL EP Group"]
+        AR["all_reduce\naggregate expert_load tensor\nevery forward pass"]
+        P2P["batch_isend_irecv\nmove expert weights between GPUs\nevery N forward passes"]
+    end
+
+    R0 --> AR
+    R1 --> AR
+    RDOT --> AR
+    R7 --> AR
+    AR --> R0
+    AR --> R1
+    AR --> R7
+
+    R0 --> P2P
+    R7 --> P2P
+    P2P --> R0
+    P2P --> R7
+```
+
+---
+
+### `combined_launch.py` flow
+
+```mermaid
+flowchart TD
+    subgraph HOST["combined_launch.py - main()"]
+        A["parse_args"] --> B["load_prompts\nWikiText-2 train split\nfilter short lines, first 300 chars"]
+        B --> C["slice rank_prompts\nN prompts per rank, loaded once in parent"]
+        C --> D["spawn dp_size subprocesses"]
+    end
+
+    D --> E
+
+    subgraph RANK["run_rank() - one subprocess per GPU"]
+        E["set VLLM_DP_RANK, VLLM_DP_SIZE\nVLLM_DP_MASTER_IP, PORT\nVLLM_TRACK_ROUTING=1"] --> F
+        F["create LLM engine\nenable_expert_parallel=True\nenable_eplb=True\nasync_scheduling=False"] --> G
+        G["collective_rpc\nregister_placement_callback\nloads placement_fns.py on all workers"] --> H
+        H["llm.reset_step_counter"] --> I
+        I["llm.generate(prompts)"] --> J
+        J["drain_step_snapshots"] --> K
+        K["print routing summary\nstep counts, top experts per layer"] --> SQ
+        SQ{save_outputs?} -->|yes| TXT["rank_N.txt\nprompt and response\nper === section"]
+        SQ --> PQ{save_routing_pt?}
+        PQ -->|yes| PT["rank_N.pt\nexpert_ids, weights, metadata"]
+    end
+
+    subgraph FWD["Inside llm.generate - runs every forward pass"]
+        P["fused_topk_router\ncapture topk_ids, topk_weights\nwrite to _ROUTING_DATA per layer"] --> Q
+        Q["_on_routing_step\nbuild load tensor shape layers x experts\nep_group.all_reduce NCCL barrier\nall 8 ranks call this every step"] --> R
+        R["compute_placement\ngreedy bin-pack per layer\nreturns expert-to-GPU mapping\nor empty dict to skip"] --> S
+        S["StaticPlacementPolicy.set_dynamic_config\nstored for next eplb_step"] --> T
+        T["push_step_snapshot\nclear_routing_data"] --> U{every N passes?}
+        U -->|yes| V["eplb_step\nread _dynamic_config or JSON\nbatch_isend_irecv move weights\ncuda.synchronize\n_commit_eplb_maps"]
+    end
+
+    I --> FWD
+```
+
+---
+
+### `chatbot_launch.py` flow
+
+```mermaid
+flowchart TD
+    subgraph HOST["chatbot_launch.py - main()"]
+        A["parse_args"] --> B["spawn dp_size subprocesses"]
+    end
+
+    B --> E
+
+    subgraph RANK["run_rank() - one subprocess per GPU"]
+        E["set VLLM_DP_RANK, VLLM_DP_SIZE\nVLLM_TRACK_ROUTING=1"] --> F
+        F["create LLM engine\nenable_expert_parallel=True\nenable_prefix_caching=True\nasync_scheduling=False"] --> G
+        G["collective_rpc\nregister_placement_callback"] --> H
+        H["initialise histories\none opening message per chat session"]
+    end
+
+    H --> LOOP_START
+
+    subgraph TURNS["Multi-turn loop"]
+        LOOP_START["turn = 0"] --> GEN
+        GEN["llm.generate(histories)\nfull conversation history per session\ngrows by output_length tokens each turn"] --> DRAIN
+        DRAIN["drain_step_snapshots\nprint cold or warm load summary\ntop 4 experts by token count"] --> APPEND
+        APPEND["append response to history\nadd next follow_up user message"] --> MORE{more turns?}
+        MORE -->|yes, increment turn| GEN
+        MORE -->|no| SAVE
+    end
+
+    SAVE{save_outputs?} -->|yes| TXT["rank_N.txt\nsessions separated by ### headers\nturns labelled cold or warm"]
+
+    subgraph CACHE["KV Prefix Cache effect"]
+        T0["Turn 0 - cold\nno cached KV state\nfull prompt recomputed"]
+        T1["Turn 1 - warm\nall of Turn 0 cached\nonly new tokens computed"]
+        TN["Turn N - warm\nlonger prefix cached each turn\nmarginal compute decreases"]
+        T0 --> T1
+        T1 --> TN
+    end
+
+    GEN -.->|"Turn 0"| T0
+    GEN -.->|"Turn 1 onwards"| T1
+```
+
+---
+
 ## How it all fits together
 
 ```
@@ -167,6 +295,85 @@ cd merged/vllm
 
 ---
 
+### `benchmark_placement.py` — placement strategy throughput comparison
+
+Runs the same WikiText-2 workload under multiple configurations back-to-back and
+produces four plots comparing throughput and latency. Each scenario runs in fresh
+subprocesses so GPU state doesn't bleed between runs.
+
+| Scenario | Tracking | EPLB | Interval |
+|---|---|---|---|
+| `baseline` | off | off | — |
+| `tracking` | on | off | — |
+| `interval_64` | on | on (callback) | 64 |
+| `interval_32` | on | on (callback) | 32 |
+| `interval_16` | on | on (callback) | 16 |
+| `interval_8` | on | on (callback) | 8 |
+| `interval_1` | on | on (callback) | 1 (extreme — very slow on PCIe L4) |
+
+#### Example commands
+
+**Full default sweep (6 scenarios, ~30–90 min on L4s):**
+```bash
+NCCL_IB_DISABLE=1 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
+python genome_scripts/benchmark_placement.py \
+    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
+    --dp-size 8 --trust-remote-code --enforce-eager \
+    --num-prompts-per-rank 4 --output-length 64 \
+    --output-dir benchmark_results
+```
+
+**Quick comparison — just baseline vs. default interval:**
+```bash
+NCCL_IB_DISABLE=1 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
+python genome_scripts/benchmark_placement.py \
+    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
+    --dp-size 8 --trust-remote-code --enforce-eager \
+    --scenarios baseline tracking interval_32 \
+    --num-prompts-per-rank 2 --output-length 32 \
+    --output-dir benchmark_quick
+```
+
+**Include extreme interval_1 (very slow on PCIe hardware):**
+```bash
+NCCL_IB_DISABLE=1 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
+python genome_scripts/benchmark_placement.py \
+    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
+    --dp-size 8 --trust-remote-code --enforce-eager \
+    --scenarios baseline interval_32 interval_8 interval_1 \
+    --timeout 7200 \
+    --output-dir benchmark_extreme
+```
+
+#### Outputs (in `--output-dir`)
+
+| File | Contents |
+|---|---|
+| `results.json` | Per-rank timing dicts + aggregate stats (mean/std across ranks) |
+| `throughput.png` | Bar chart: tokens/s per scenario with error bars |
+| `latency.png` | Bar chart: generate() wall time per scenario |
+| `ttft.png` | Bar chart: TTFT mean + p99 per scenario (prefill latency) |
+| `tpot.png` | Bar chart: TPOT mean + p99 per scenario — p99 captures EPLB stall duration |
+| `interval_sweep.png` | Line chart: tok/s vs. placement-step-interval |
+| `relative_overhead.png` | Bar chart: throughput as % of baseline |
+| `timing/` | Raw per-rank JSON files from each scenario |
+
+See `genome_scripts/BENCHMARK.md` for a full explanation of every metric and how to interpret each plot.
+
+#### CLI flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--scenarios S [S ...]` | all 6 defaults | Which scenarios to run. Any subset of: `baseline tracking interval_64 interval_32 interval_16 interval_8 interval_1` |
+| `--output-dir PATH` | `benchmark_results` | Where to write `results.json`, plots, and `timing/` raw files |
+| `--timeout N` | 1800 | Seconds before force-killing a subprocess. Raise to 7200+ for `interval_1` on PCIe hardware |
+| `--num-prompts-per-rank N` | 4 | Prompts per rank. More prompts = longer run but more steps = more EPLB events |
+| `--output-length N` | 64 | Max new tokens per prompt. More tokens = more decode steps = better differentiation between intervals |
+
+All model/parallelism/memory flags (`--model`, `--dp-size`, `--tp-size`, `--max-num-seqs`, etc.) have identical meaning to `combined_launch.py`.
+
+---
+
 ### `combined_launch.py` — single-shot WikiText inference
 
 Loads WikiText-2 paragraphs, distributes them across DP ranks, runs one `generate()` call per rank, then prints routing summaries. This is the primary script for measuring expert load and testing placement algorithms.
@@ -215,6 +422,18 @@ python genome_scripts/combined_launch.py \
     --expert-placement-config genome_scripts/deepseek_EP_test.json \
     --placement-step-interval 32 \
     --num-prompts-per-rank 4 --output-length 64
+```
+
+**Save prompts and responses to readable text files:**
+```bash
+VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 \
+python genome_scripts/combined_launch.py \
+    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
+    --dp-size 8 --trust-remote-code --enforce-eager \
+    --num-prompts-per-rank 4 --output-length 64 \
+    --save-outputs outputs_run1
+# writes outputs_run1_rank0.txt ... outputs_run1_rank7.txt
+# format: one section per prompt, separated by === headers
 ```
 
 **Save routing tensors to disk:**
@@ -283,6 +502,7 @@ python genome_scripts/test_combined.py
 | Flag | Default | Effect |
 |---|---|---|
 | `--save-routing-pt <path>` | off | After generation, save per-rank routing tensors to `<path>_rank<N>.pt`. Each file contains `expert_ids [tokens, layers, top_k]`, `expert_weights`, `token_ids`, `origin_gpu`, and step metadata. |
+| `--save-outputs <path>` | off | Write each prompt and its generated response to `<path>_rank<N>.txt` in human-readable format. One section per prompt, separated by `===` headers. |
 | `--timeout N` | 600 | Seconds to wait for each subprocess before force-killing it. Increase on slow hardware or for large models. |
 
 ---
@@ -344,6 +564,20 @@ python genome_scripts/chatbot_launch.py \
     --num-chats 2 --num-turns 4 --output-length 32
 ```
 
+**Save conversation turns to readable text files:**
+```bash
+VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 \
+VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
+python genome_scripts/chatbot_launch.py \
+    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
+    --dp-size 8 --trust-remote-code --enforce-eager \
+    --num-chats 2 --num-turns 4 --output-length 32 \
+    --save-outputs chat_run1
+# writes chat_run1_rank0.txt ... chat_run1_rank7.txt
+# each file: sessions separated by ### headers, turns by === headers,
+# each turn labelled [cold] or [warm]
+```
+
 **Longer sessions to stress-test caching:**
 ```bash
 VLLM_TRACK_ROUTING=1 NCCL_IB_DISABLE=1 \
@@ -367,6 +601,7 @@ Note: conversation history grows each turn. With `--output-length 64` and `--num
 | `--num-chats N` | 2 | Chat sessions per DP rank. Total concurrent sessions = dp_size × N. Each session has its own independent conversation history; sessions on different ranks run on different GPUs. More sessions = more diverse routing data but higher VRAM pressure. |
 | `--num-turns N` | 4 | Conversation turns per session. Turn 0 is always cold (no cached prefix). Turns 1+ reuse the growing conversation history as a cached prefix — the benefit increases with each turn. Watch the `cache=warm` lines in the output to see load shifting. |
 | `--output-length N` | 32 | Max tokens generated per turn. Each response is appended to the history, so the total prompt length grows by roughly `output-length` tokens per turn. Make sure `num_turns × output_length + initial_prompt_length < --max-model-len`. |
+| `--save-outputs <path>` | off | Write all conversation turns to `<path>_rank<N>.txt`. Each file groups turns by session; each turn shows the user message and assistant response with a cold/warm label. |
 
 ---
 

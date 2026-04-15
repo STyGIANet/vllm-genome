@@ -96,6 +96,9 @@ def parse_args():
     parser.add_argument("--save-routing-pt", type=str, default="",
                         dest="save_routing_pt",
                         help="Save per-rank routing tensors to <path>_rank<N>.pt")
+    parser.add_argument("--save-outputs", type=str, default="",
+                        dest="save_outputs",
+                        help="Write prompts and responses to <path>_rank<N>.txt")
     parser.add_argument("--timeout", type=int, default=600)
     return parser.parse_args()
 
@@ -142,6 +145,7 @@ def run_rank(
     prompts: list[str],
     output_length: int,
     save_routing_pt: str,
+    save_outputs: str,
 ):
     is_rank0 = global_dp_rank == 0
 
@@ -213,6 +217,20 @@ def run_rank(
     # ── Print outputs (all ranks, each owns different prompts) ────────────────
     for out in outputs:
         print(f"[Rank {global_dp_rank}] {out.prompt[:60]!r} → {out.outputs[0].text[:80]!r}")
+
+    if save_outputs:
+        save_path = f"{save_outputs}_rank{global_dp_rank}.txt"
+        sep = "=" * 80
+        with open(save_path, "w") as f:
+            for i, out in enumerate(outputs):
+                f.write(f"{sep}\n")
+                f.write(f"Rank {global_dp_rank}  |  Prompt {i + 1} of {len(outputs)}\n")
+                f.write(f"{sep}\n")
+                f.write(out.prompt.strip())
+                f.write("\n\n--- Response ---\n")
+                f.write(out.outputs[0].text.strip())
+                f.write("\n\n")
+        print(f"[Rank {global_dp_rank}] Saved outputs → {save_path}")
 
     # ── Routing analysis ──────────────────────────────────────────────────────
     snapshots = llm.drain_step_snapshots()
@@ -359,6 +377,7 @@ def main():
                 rank_prompts[global_rank],
                 args.output_length,
                 args.save_routing_pt,
+                args.save_outputs,
             ),
         )
         p.start()
