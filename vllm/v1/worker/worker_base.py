@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -223,6 +224,7 @@ class WorkerBase:
             func_name: Name of the callable inside that file.
         """
         import importlib.util
+        file_path = os.path.abspath(file_path)
         spec = importlib.util.spec_from_file_location("_placement_callback", file_path)
         mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
         spec.loader.exec_module(mod)  # type: ignore[union-attr]

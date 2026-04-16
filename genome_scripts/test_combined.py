@@ -353,7 +353,7 @@ class TestCombinedIntegration(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestComputePlacement(unittest.TestCase):
-    """Tests for the greedy bin-packing compute_placement() in placement_fns.py."""
+    """Tests for the METIS-style compute_placement() in placement_fns.py."""
 
     @classmethod
     def setUpClass(cls):
@@ -361,7 +361,7 @@ class TestComputePlacement(unittest.TestCase):
         # Load placement_fns.py directly — no vllm imports needed.
         spec = importlib.util.spec_from_file_location(
             "_placement_fns",
-            str(_REPO_ROOT / "token_tracing/placement_fns.py"),
+            str(_REPO_ROOT / "genome_scripts/placement_fns.py"),
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)  # type: ignore[union-attr]

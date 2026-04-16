@@ -245,8 +245,16 @@ def run_rank(
 
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=output_length)
 
+    print(f"[Rank {global_dp_rank}] Before reset_step_counter()", flush=True)
     llm.reset_step_counter()
+    print(f"[Rank {global_dp_rank}] After reset_step_counter()", flush=True)
+    print(
+        f"[Rank {global_dp_rank}] Before generate(): prompts={len(prompts)} "
+        f"output_length={output_length} placement={'on' if use_placement else 'off'}",
+        flush=True,
+    )
     outputs = llm.generate(prompts, sampling_params)
+    print(f"[Rank {global_dp_rank}] After generate(): outputs={len(outputs)}", flush=True)
 
     # ── Print outputs (all ranks, each owns different prompts) ────────────────
     for out in outputs:

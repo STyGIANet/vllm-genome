@@ -13,7 +13,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
-
+import os
 import numpy as np
 import torch
 import torch.distributed
@@ -3103,6 +3103,15 @@ class GPUModelRunner(
         """
         ep_group = get_ep_group()
         num_gpus = ep_group.world_size
+        dp_rank = os.environ.get("VLLM_DP_RANK", "?")
+        ep_rank = getattr(ep_group, "rank_in_group", "?")
+        logger.info(
+            "[routing] dp_rank=%s ep_rank=%s entering _aggregate_routing_load "
+            "with %d routed layer(s)",
+            dp_rank,
+            ep_rank,
+            len(routing_snapshot),
+        )
 
         # Determine tensor shape.  Prefer eplb_state (authoritative, no GPU
         # sync needed); fall back to scanning topk_ids only if not yet ready.
@@ -3141,10 +3150,31 @@ class GPUModelRunner(
                     load[i].scatter_add_(0, flat, torch.ones_like(flat))
 
         # Every rank calls this — even those with no local tokens.
+        logger.info(
+            "[routing] dp_rank=%s ep_rank=%s before ep_group.all_reduce "
+            "shape=%s local_sum=%s",
+            dp_rank,
+            ep_rank,
+            tuple(load.shape),
+            int(load.sum().item()),
+        )
         load = ep_group.all_reduce(load)
+        logger.info(
+            "[routing] dp_rank=%s ep_rank=%s after ep_group.all_reduce "
+            "global_sum=%s",
+            dp_rank,
+            ep_rank,
+            int(load.sum().item()),
+        )
 
         # If no real tokens anywhere in the cluster this step, skip callback.
         if load.sum().item() == 0:
+            logger.info(
+                "[routing] dp_rank=%s ep_rank=%s global routing load is zero; "
+                "skipping placement callback",
+                dp_rank,
+                ep_rank,
+            )
             return {}
 
         # Attach global load and num_gpus to a copy of the snapshot and return.
@@ -3159,6 +3189,13 @@ class GPUModelRunner(
                 {**cap, 'expert_load': load[i], 'num_gpus': num_gpus}
                 for cap in captures
             ]
+        logger.info(
+            "[routing] dp_rank=%s ep_rank=%s leaving _aggregate_routing_load "
+            "with %d layer result(s)",
+            dp_rank,
+            ep_rank,
+            len(result),
+        )
         return result
 
     def _on_routing_step(self) -> None:
@@ -3179,6 +3216,12 @@ class GPUModelRunner(
         )
         if _is_tracking_enabled():
             routing_snapshot = get_routing_data()
+            dp_rank = os.environ.get("VLLM_DP_RANK", "?")
+            logger.info(
+                "[routing] dp_rank=%s entering _on_routing_step with %d routed layer(s)",
+                dp_rank,
+                len(routing_snapshot),
+            )
 
             callback = self._compute_placement_callback
             if (
@@ -3187,15 +3230,33 @@ class GPUModelRunner(
                 and self.parallel_config.eplb_config.policy == "custom"
             ):
                 try:
+                    logger.info("[routing] dp_rank=%s before _aggregate_routing_load", dp_rank)
                     global_snapshot = self._aggregate_routing_load(
                         routing_snapshot
                     )
+                    logger.info(
+                        "[routing] dp_rank=%s after _aggregate_routing_load: "
+                        "global_layers=%d",
+                        dp_rank,
+                        len(global_snapshot),
+                    )
+                    logger.info("[routing] dp_rank=%s before compute_placement callback", dp_rank)
                     placement = callback(global_snapshot)
+                    logger.info(
+                        "[routing] dp_rank=%s after compute_placement callback: "
+                        "has_placement=%s",
+                        dp_rank,
+                        bool(placement),
+                    )
                     if placement:
                         from vllm.distributed.eplb.policy.custom_policy import (
                             StaticPlacementPolicy,
                         )
                         StaticPlacementPolicy.set_dynamic_config(placement)
+                        logger.info(
+                            "[routing] dp_rank=%s stored dynamic placement config",
+                            dp_rank,
+                        )
                 except Exception as exc:
                     logger.warning(
                         "compute_placement callback raised an exception: %s",
@@ -3204,6 +3265,7 @@ class GPUModelRunner(
 
             push_step_snapshot()
             clear_routing_data()
+            logger.info("[routing] dp_rank=%s leaving _on_routing_step", dp_rank)
 
     def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
         """

@@ -1,0 +1,1063 @@
+Launching dp_size=8 tp_size=1 tracking=on placement=off
+INFO 04-01 20:11:49 [utils.py:233] non-default args: {'trust_remote_code': True, 'max_model_len': 512, 'enable_expert_parallel': True, 'eplb_config': EPLBConfig(window_size=1000, step_interval=32, num_redundant_experts=0, log_balancedness=False, log_balancedness_interval=1, use_async=False, policy='default'), 'enable_prefix_caching': False, 'gpu_memory_utilization': 0.8, 'max_num_batched_tokens': 1024, 'max_num_seqs': 16, 'disable_log_stats': True, 'enforce_eager': True, 'async_scheduling': False, 'model': 'mistralai/Mixtral-8x7B-Instruct-v0.1'}
+INFO 04-01 20:11:49 [utils.py:233] non-default args: {'trust_remote_code': True, 'max_model_len': 512, 'enable_expert_parallel': True, 'eplb_config': EPLBConfig(window_size=1000, step_interval=32, num_redundant_experts=0, log_balancedness=False, log_balancedness_interval=1, use_async=False, policy='default'), 'enable_prefix_caching': False, 'gpu_memory_utilization': 0.8, 'max_num_batched_tokens': 1024, 'max_num_seqs': 16, 'disable_log_stats': True, 'enforce_eager': True, 'async_scheduling': False, 'model': 'mistralai/Mixtral-8x7B-Instruct-v0.1'}
+INFO 04-01 20:11:49 [utils.py:233] non-default args: {'trust_remote_code': True, 'max_model_len': 512, 'enable_expert_parallel': True, 'eplb_config': EPLBConfig(window_size=1000, step_interval=32, num_redundant_experts=0, log_balancedness=False, log_balancedness_interval=1, use_async=False, policy='default'), 'enable_prefix_caching': False, 'gpu_memory_utilization': 0.8, 'max_num_batched_tokens': 1024, 'max_num_seqs': 16, 'disable_log_stats': True, 'enforce_eager': True, 'async_scheduling': False, 'model': 'mistralai/Mixtral-8x7B-Instruct-v0.1'}
+INFO 04-01 20:11:50 [utils.py:233] non-default args: {'trust_remote_code': True, 'max_model_len': 512, 'enable_expert_parallel': True, 'eplb_config': EPLBConfig(window_size=1000, step_interval=32, num_redundant_experts=0, log_balancedness=False, log_balancedness_interval=1, use_async=False, policy='default'), 'enable_prefix_caching': False, 'gpu_memory_utilization': 0.8, 'max_num_batched_tokens': 1024, 'max_num_seqs': 16, 'disable_log_stats': True, 'enforce_eager': True, 'async_scheduling': False, 'model': 'mistralai/Mixtral-8x7B-Instruct-v0.1'}
+INFO 04-01 20:11:50 [utils.py:233] non-default args: {'trust_remote_code': True, 'max_model_len': 512, 'enable_expert_parallel': True, 'eplb_config': EPLBConfig(window_size=1000, step_interval=32, num_redundant_experts=0, log_balancedness=False, log_balancedness_interval=1, use_async=False, policy='default'), 'enable_prefix_caching': False, 'gpu_memory_utilization': 0.8, 'max_num_batched_tokens': 1024, 'max_num_seqs': 16, 'disable_log_stats': True, 'enforce_eager': True, 'async_scheduling': False, 'model': 'mistralai/Mixtral-8x7B-Instruct-v0.1'}
+INFO 04-01 20:11:50 [utils.py:233] non-default args: {'trust_remote_code': True, 'max_model_len': 512, 'enable_expert_parallel': True, 'eplb_config': EPLBConfig(window_size=1000, step_interval=32, num_redundant_experts=0, log_balancedness=False, log_balancedness_interval=1, use_async=False, policy='default'), 'enable_prefix_caching': False, 'gpu_memory_utilization': 0.8, 'max_num_batched_tokens': 1024, 'max_num_seqs': 16, 'disable_log_stats': True, 'enforce_eager': True, 'async_scheduling': False, 'model': 'mistralai/Mixtral-8x7B-Instruct-v0.1'}
+INFO 04-01 20:11:50 [utils.py:233] non-default args: {'trust_remote_code': True, 'max_model_len': 512, 'enable_expert_parallel': True, 'eplb_config': EPLBConfig(window_size=1000, step_interval=32, num_redundant_experts=0, log_balancedness=False, log_balancedness_interval=1, use_async=False, policy='default'), 'enable_prefix_caching': False, 'gpu_memory_utilization': 0.8, 'max_num_batched_tokens': 1024, 'max_num_seqs': 16, 'disable_log_stats': True, 'enforce_eager': True, 'async_scheduling': False, 'model': 'mistralai/Mixtral-8x7B-Instruct-v0.1'}
+INFO 04-01 20:11:50 [utils.py:233] non-default args: {'trust_remote_code': True, 'max_model_len': 512, 'enable_expert_parallel': True, 'eplb_config': EPLBConfig(window_size=1000, step_interval=32, num_redundant_experts=0, log_balancedness=False, log_balancedness_interval=1, use_async=False, policy='default'), 'enable_prefix_caching': False, 'gpu_memory_utilization': 0.8, 'max_num_batched_tokens': 1024, 'max_num_seqs': 16, 'disable_log_stats': True, 'enforce_eager': True, 'async_scheduling': False, 'model': 'mistralai/Mixtral-8x7B-Instruct-v0.1'}
+INFO 04-01 20:11:50 [model.py:549] Resolved architecture: MixtralForCausalLM
+INFO 04-01 20:11:50 [model.py:1678] Using max model len 512
+INFO 04-01 20:11:50 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=1024.
+INFO 04-01 20:11:50 [vllm.py:786] Asynchronous scheduling is disabled.
+WARNING 04-01 20:11:50 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 04-01 20:11:50 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 04-01 20:11:50 [model.py:549] Resolved architecture: MixtralForCausalLM
+INFO 04-01 20:11:50 [model.py:1678] Using max model len 512
+INFO 04-01 20:11:50 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=1024.
+INFO 04-01 20:11:50 [vllm.py:786] Asynchronous scheduling is disabled.
+WARNING 04-01 20:11:50 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 04-01 20:11:50 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 04-01 20:11:50 [model.py:549] Resolved architecture: MixtralForCausalLM
+INFO 04-01 20:11:50 [model.py:1678] Using max model len 512
+INFO 04-01 20:11:50 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=1024.
+INFO 04-01 20:11:50 [vllm.py:786] Asynchronous scheduling is disabled.
+WARNING 04-01 20:11:50 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 04-01 20:11:50 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 04-01 20:11:50 [model.py:549] Resolved architecture: MixtralForCausalLM
+INFO 04-01 20:11:50 [model.py:1678] Using max model len 512
+INFO 04-01 20:11:50 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=1024.
+INFO 04-01 20:11:50 [vllm.py:786] Asynchronous scheduling is disabled.
+WARNING 04-01 20:11:50 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 04-01 20:11:50 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 04-01 20:11:50 [model.py:549] Resolved architecture: MixtralForCausalLM
+INFO 04-01 20:11:50 [model.py:1678] Using max model len 512
+INFO 04-01 20:11:50 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=1024.
+INFO 04-01 20:11:50 [vllm.py:786] Asynchronous scheduling is disabled.
+WARNING 04-01 20:11:50 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 04-01 20:11:50 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 04-01 20:11:50 [model.py:549] Resolved architecture: MixtralForCausalLM
+INFO 04-01 20:11:50 [model.py:1678] Using max model len 512
+INFO 04-01 20:11:50 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=1024.
+INFO 04-01 20:11:50 [vllm.py:786] Asynchronous scheduling is disabled.
+WARNING 04-01 20:11:50 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 04-01 20:11:50 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 04-01 20:11:50 [model.py:549] Resolved architecture: MixtralForCausalLM
+INFO 04-01 20:11:50 [model.py:1678] Using max model len 512
+INFO 04-01 20:11:50 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=1024.
+INFO 04-01 20:11:50 [vllm.py:786] Asynchronous scheduling is disabled.
+WARNING 04-01 20:11:50 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 04-01 20:11:50 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 04-01 20:11:50 [model.py:549] Resolved architecture: MixtralForCausalLM
+INFO 04-01 20:11:50 [model.py:1678] Using max model len 512
+INFO 04-01 20:11:50 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=1024.
+INFO 04-01 20:11:50 [vllm.py:786] Asynchronous scheduling is disabled.
+WARNING 04-01 20:11:50 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 04-01 20:11:50 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 04-01 20:11:51 [vllm.py:1021] Cudagraph is disabled under eager mode
+INFO 04-01 20:11:51 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+INFO 04-01 20:11:51 [vllm.py:1021] Cudagraph is disabled under eager mode
+INFO 04-01 20:11:51 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+INFO 04-01 20:11:51 [vllm.py:1021] Cudagraph is disabled under eager mode
+INFO 04-01 20:11:51 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+INFO 04-01 20:11:51 [vllm.py:1021] Cudagraph is disabled under eager mode
+INFO 04-01 20:11:51 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+INFO 04-01 20:11:51 [vllm.py:1021] Cudagraph is disabled under eager mode
+INFO 04-01 20:11:51 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+INFO 04-01 20:11:51 [vllm.py:1021] Cudagraph is disabled under eager mode
+INFO 04-01 20:11:51 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+INFO 04-01 20:11:51 [vllm.py:1021] Cudagraph is disabled under eager mode
+INFO 04-01 20:11:51 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+INFO 04-01 20:11:51 [vllm.py:1021] Cudagraph is disabled under eager mode
+INFO 04-01 20:11:51 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+(EngineCore_DP2 pid=1111381) WARNING 04-01 20:11:52 [multiproc_executor.py:1014] Reducing Torch parallelism from 64 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+(EngineCore_DP5 pid=1111385) WARNING 04-01 20:11:52 [multiproc_executor.py:1014] Reducing Torch parallelism from 64 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+(EngineCore_DP1 pid=1111394) WARNING 04-01 20:11:52 [multiproc_executor.py:1014] Reducing Torch parallelism from 64 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+(EngineCore_DP0 pid=1111362) INFO 04-01 20:11:52 [core.py:105] Initializing a V1 LLM engine (v0.1.dev15341+gfa4f7ef5c.d20260401) with config: model='mistralai/Mixtral-8x7B-Instruct-v0.1', speculative_config=None, tokenizer='mistralai/Mixtral-8x7B-Instruct-v0.1', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=512, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=8, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=mistralai/Mixtral-8x7B-Instruct-v0.1, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_images_per_batch': 0, 'compile_sizes': [], 'compile_ranges_endpoints': [1024], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+(EngineCore_DP2 pid=1111381) INFO 04-01 20:11:52 [multiproc_executor.py:134] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.168.0.77 (local), world_size=1, local_world_size=1
+(EngineCore_DP7 pid=1111371) WARNING 04-01 20:11:52 [multiproc_executor.py:1014] Reducing Torch parallelism from 64 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+(EngineCore_DP6 pid=1111412) WARNING 04-01 20:11:52 [multiproc_executor.py:1014] Reducing Torch parallelism from 64 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+(EngineCore_DP3 pid=1111370) WARNING 04-01 20:11:52 [multiproc_executor.py:1014] Reducing Torch parallelism from 64 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+(EngineCore_DP4 pid=1111403) WARNING 04-01 20:11:52 [multiproc_executor.py:1014] Reducing Torch parallelism from 64 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+(EngineCore_DP5 pid=1111385) INFO 04-01 20:11:52 [multiproc_executor.py:134] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.168.0.77 (local), world_size=1, local_world_size=1
+(EngineCore_DP7 pid=1111371) INFO 04-01 20:11:52 [multiproc_executor.py:134] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.168.0.77 (local), world_size=1, local_world_size=1
+(EngineCore_DP0 pid=1111362) WARNING 04-01 20:11:52 [multiproc_executor.py:1014] Reducing Torch parallelism from 64 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+(EngineCore_DP1 pid=1111394) INFO 04-01 20:11:52 [multiproc_executor.py:134] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.168.0.77 (local), world_size=1, local_world_size=1
+(EngineCore_DP6 pid=1111412) INFO 04-01 20:11:52 [multiproc_executor.py:134] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.168.0.77 (local), world_size=1, local_world_size=1
+(EngineCore_DP4 pid=1111403) INFO 04-01 20:11:52 [multiproc_executor.py:134] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.168.0.77 (local), world_size=1, local_world_size=1
+(EngineCore_DP3 pid=1111370) INFO 04-01 20:11:52 [multiproc_executor.py:134] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.168.0.77 (local), world_size=1, local_world_size=1
+(EngineCore_DP0 pid=1111362) INFO 04-01 20:11:52 [multiproc_executor.py:134] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.168.0.77 (local), world_size=1, local_world_size=1
+(Worker pid=1111462) INFO 04-01 20:11:54 [parallel_state.py:1400] world_size=8 rank=0 local_rank=0 distributed_init_method=tcp://127.0.0.1:34892 backend=nccl
+(Worker pid=1111457) INFO 04-01 20:11:54 [parallel_state.py:1400] world_size=8 rank=1 local_rank=1 distributed_init_method=tcp://127.0.0.1:34892 backend=nccl
+(Worker pid=1111463) INFO 04-01 20:11:54 [parallel_state.py:1400] world_size=8 rank=4 local_rank=4 distributed_init_method=tcp://127.0.0.1:34892 backend=nccl
+(Worker pid=1111461) INFO 04-01 20:11:54 [parallel_state.py:1400] world_size=8 rank=5 local_rank=5 distributed_init_method=tcp://127.0.0.1:34892 backend=nccl
+(Worker pid=1111464) INFO 04-01 20:11:54 [parallel_state.py:1400] world_size=8 rank=7 local_rank=7 distributed_init_method=tcp://127.0.0.1:34892 backend=nccl
+(Worker pid=1111460) INFO 04-01 20:11:54 [parallel_state.py:1400] world_size=8 rank=6 local_rank=6 distributed_init_method=tcp://127.0.0.1:34892 backend=nccl
+(Worker pid=1111458) INFO 04-01 20:11:54 [parallel_state.py:1400] world_size=8 rank=3 local_rank=3 distributed_init_method=tcp://127.0.0.1:34892 backend=nccl
+(Worker pid=1111459) INFO 04-01 20:11:54 [parallel_state.py:1400] world_size=8 rank=2 local_rank=2 distributed_init_method=tcp://127.0.0.1:34892 backend=nccl
+(Worker pid=1111462) INFO 04-01 20:11:55 [pynccl.py:111] vLLM is using nccl==2.28.9
+(Worker pid=1111462) INFO 04-01 20:11:55 [cuda_communicator.py:174] Using AgRsAll2AllManager all2all manager.
+(Worker pid=1111462) INFO 04-01 20:11:55 [parallel_state.py:1716] rank 0 in world size 8 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank 0, EPLB rank N/A
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:11:56 [gpu_model_runner.py:4935] Starting to load model mistralai/Mixtral-8x7B-Instruct-v0.1...
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:11:56 [cuda.py:334] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:11:56 [flash_attn.py:596] Using FlashAttention version 2
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:11:56 [layer.py:469] [EP Rank 0/8] Expert parallelism is enabled. Expert placement strategy: linear. Local/global number of experts: 1/8. Experts local to global index map: 0->0.
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.0.block_sparse_moe.experts', extracted layer_id: 0
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:11:56 [unquantized.py:172] FlashInfer CUTLASS MoE is currently not available for DP.
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:11:56 [unquantized.py:186] Using TRITON backend for Unquantized MoE
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.1.block_sparse_moe.experts', extracted layer_id: 1
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.2.block_sparse_moe.experts', extracted layer_id: 2
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.3.block_sparse_moe.experts', extracted layer_id: 3
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.4.block_sparse_moe.experts', extracted layer_id: 4
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.5.block_sparse_moe.experts', extracted layer_id: 5
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.6.block_sparse_moe.experts', extracted layer_id: 6
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.7.block_sparse_moe.experts', extracted layer_id: 7
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.8.block_sparse_moe.experts', extracted layer_id: 8
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.9.block_sparse_moe.experts', extracted layer_id: 9
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.10.block_sparse_moe.experts', extracted layer_id: 10
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.11.block_sparse_moe.experts', extracted layer_id: 11
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.12.block_sparse_moe.experts', extracted layer_id: 12
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.13.block_sparse_moe.experts', extracted layer_id: 13
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.14.block_sparse_moe.experts', extracted layer_id: 14
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.15.block_sparse_moe.experts', extracted layer_id: 15
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.16.block_sparse_moe.experts', extracted layer_id: 16
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.17.block_sparse_moe.experts', extracted layer_id: 17
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.18.block_sparse_moe.experts', extracted layer_id: 18
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.19.block_sparse_moe.experts', extracted layer_id: 19
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.20.block_sparse_moe.experts', extracted layer_id: 20
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.21.block_sparse_moe.experts', extracted layer_id: 21
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.22.block_sparse_moe.experts', extracted layer_id: 22
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.23.block_sparse_moe.experts', extracted layer_id: 23
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.24.block_sparse_moe.experts', extracted layer_id: 24
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.25.block_sparse_moe.experts', extracted layer_id: 25
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.26.block_sparse_moe.experts', extracted layer_id: 26
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.27.block_sparse_moe.experts', extracted layer_id: 27
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.28.block_sparse_moe.experts', extracted layer_id: 28
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.29.block_sparse_moe.experts', extracted layer_id: 29
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.30.block_sparse_moe.experts', extracted layer_id: 30
+(Worker_DP0_EP0 pid=1111462) [DEBUG] FusedMoE.layer_id property called (PID: 1111462), layer_name: 'model.layers.31.block_sparse_moe.experts', extracted layer_id: 31
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards:   0% Completed | 0/19 [00:00<?, ?it/s]
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards:   5% Completed | 1/19 [00:00<00:02,  7.63it/s]
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards:  11% Completed | 2/19 [00:00<00:02,  7.51it/s]
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards:  21% Completed | 4/19 [00:00<00:01,  9.30it/s]
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards:  26% Completed | 5/19 [00:00<00:01,  8.93it/s]
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards:  32% Completed | 6/19 [00:00<00:01,  9.00it/s]
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards:  42% Completed | 8/19 [00:00<00:01, 10.33it/s]
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards:  53% Completed | 10/19 [00:01<00:00, 10.82it/s]
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards:  63% Completed | 12/19 [00:01<00:00, 10.49it/s]
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards:  74% Completed | 14/19 [00:01<00:00, 10.83it/s]
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards:  84% Completed | 16/19 [00:01<00:00, 10.48it/s]
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards:  95% Completed | 18/19 [00:01<00:00, 11.15it/s]
+(Worker_DP0_EP0 pid=1111462) Loading safetensors checkpoint shards: 100% Completed | 19/19 [00:01<00:00, 10.39it/s]
+(Worker_DP0_EP0 pid=1111462) 
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:11:59 [default_loader.py:384] Loading weights took 1.84 seconds
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:00 [gpu_model_runner.py:5020] Model loading took 13.5 GiB memory and 2.720832 seconds
+(Worker_DP0_EP0 pid=1111462) WARNING 04-01 20:12:01 [fused_moe.py:1090] Using default MoE config. Performance might be sub-optimal! Config file not found at /home/deeksha/eplb-expert/vllm/model_executor/layers/fused_moe/configs/E=1,N=14336,device_name=NVIDIA_L4.json
+(EngineCore_DP1 pid=1111394) INFO 04-01 20:12:04 [kv_cache_utils.py:1319] GPU KV cache size: 21,360 tokens
+(EngineCore_DP1 pid=1111394) INFO 04-01 20:12:04 [kv_cache_utils.py:1324] Maximum concurrency for 512 tokens per request: 41.72x
+(EngineCore_DP5 pid=1111385) INFO 04-01 20:12:04 [kv_cache_utils.py:1319] GPU KV cache size: 21,360 tokens
+(EngineCore_DP5 pid=1111385) INFO 04-01 20:12:04 [kv_cache_utils.py:1324] Maximum concurrency for 512 tokens per request: 41.72x
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:04 [gpu_worker.py:436] Available KV cache memory: 2.62 GiB
+(EngineCore_DP0 pid=1111362) INFO 04-01 20:12:04 [kv_cache_utils.py:1319] GPU KV cache size: 21,488 tokens
+(EngineCore_DP0 pid=1111362) INFO 04-01 20:12:04 [kv_cache_utils.py:1324] Maximum concurrency for 512 tokens per request: 41.97x
+(EngineCore_DP6 pid=1111412) INFO 04-01 20:12:04 [kv_cache_utils.py:1319] GPU KV cache size: 21,488 tokens
+(EngineCore_DP6 pid=1111412) INFO 04-01 20:12:04 [kv_cache_utils.py:1324] Maximum concurrency for 512 tokens per request: 41.97x
+(EngineCore_DP7 pid=1111371) INFO 04-01 20:12:04 [kv_cache_utils.py:1319] GPU KV cache size: 21,360 tokens
+(EngineCore_DP7 pid=1111371) INFO 04-01 20:12:04 [kv_cache_utils.py:1324] Maximum concurrency for 512 tokens per request: 41.72x
+(EngineCore_DP2 pid=1111381) INFO 04-01 20:12:04 [kv_cache_utils.py:1319] GPU KV cache size: 21,488 tokens
+(EngineCore_DP2 pid=1111381) INFO 04-01 20:12:04 [kv_cache_utils.py:1324] Maximum concurrency for 512 tokens per request: 41.97x
+(EngineCore_DP3 pid=1111370) INFO 04-01 20:12:04 [kv_cache_utils.py:1319] GPU KV cache size: 21,360 tokens
+(EngineCore_DP3 pid=1111370) INFO 04-01 20:12:04 [kv_cache_utils.py:1324] Maximum concurrency for 512 tokens per request: 41.72x
+(EngineCore_DP4 pid=1111403) INFO 04-01 20:12:05 [kv_cache_utils.py:1319] GPU KV cache size: 21,488 tokens
+(EngineCore_DP4 pid=1111403) INFO 04-01 20:12:05 [kv_cache_utils.py:1324] Maximum concurrency for 512 tokens per request: 41.97x
+(EngineCore_DP1 pid=1111394) INFO 04-01 20:12:05 [core.py:283] init engine (profile, create kv cache, warmup model) took 5.27 seconds
+(EngineCore_DP2 pid=1111381) INFO 04-01 20:12:05 [core.py:283] init engine (profile, create kv cache, warmup model) took 4.82 seconds
+(EngineCore_DP3 pid=1111370) INFO 04-01 20:12:05 [core.py:283] init engine (profile, create kv cache, warmup model) took 4.86 seconds
+(EngineCore_DP7 pid=1111371) INFO 04-01 20:12:05 [core.py:283] init engine (profile, create kv cache, warmup model) took 4.87 seconds
+(EngineCore_DP6 pid=1111412) INFO 04-01 20:12:05 [core.py:283] init engine (profile, create kv cache, warmup model) took 5.47 seconds
+(EngineCore_DP0 pid=1111362) INFO 04-01 20:12:05 [core.py:283] init engine (profile, create kv cache, warmup model) took 5.02 seconds
+(EngineCore_DP5 pid=1111385) INFO 04-01 20:12:05 [core.py:283] init engine (profile, create kv cache, warmup model) took 5.44 seconds
+(EngineCore_DP4 pid=1111403) INFO 04-01 20:12:05 [core.py:283] init engine (profile, create kv cache, warmup model) took 4.18 seconds
+(EngineCore_DP1 pid=1111394) WARNING 04-01 20:12:05 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore_DP1 pid=1111394) WARNING 04-01 20:12:05 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore_DP1 pid=1111394) INFO 04-01 20:12:05 [vllm.py:1021] Cudagraph is disabled under eager mode
+(EngineCore_DP0 pid=1111362) WARNING 04-01 20:12:05 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore_DP0 pid=1111362) WARNING 04-01 20:12:05 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore_DP0 pid=1111362) INFO 04-01 20:12:05 [vllm.py:1021] Cudagraph is disabled under eager mode
+(EngineCore_DP7 pid=1111371) WARNING 04-01 20:12:05 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore_DP7 pid=1111371) WARNING 04-01 20:12:05 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore_DP7 pid=1111371) INFO 04-01 20:12:05 [vllm.py:1021] Cudagraph is disabled under eager mode
+(EngineCore_DP2 pid=1111381) WARNING 04-01 20:12:05 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore_DP2 pid=1111381) WARNING 04-01 20:12:05 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore_DP2 pid=1111381) INFO 04-01 20:12:05 [vllm.py:1021] Cudagraph is disabled under eager mode
+(EngineCore_DP3 pid=1111370) WARNING 04-01 20:12:05 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore_DP3 pid=1111370) WARNING 04-01 20:12:05 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore_DP3 pid=1111370) INFO 04-01 20:12:05 [vllm.py:1021] Cudagraph is disabled under eager mode
+(EngineCore_DP6 pid=1111412) WARNING 04-01 20:12:05 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore_DP6 pid=1111412) WARNING 04-01 20:12:05 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore_DP6 pid=1111412) INFO 04-01 20:12:05 [vllm.py:1021] Cudagraph is disabled under eager mode
+(EngineCore_DP5 pid=1111385) WARNING 04-01 20:12:05 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore_DP5 pid=1111385) WARNING 04-01 20:12:05 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore_DP5 pid=1111385) INFO 04-01 20:12:05 [vllm.py:1021] Cudagraph is disabled under eager mode
+(EngineCore_DP4 pid=1111403) WARNING 04-01 20:12:05 [vllm.py:844] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore_DP4 pid=1111403) WARNING 04-01 20:12:05 [vllm.py:855] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore_DP4 pid=1111403) INFO 04-01 20:12:05 [vllm.py:1021] Cudagraph is disabled under eager mode
+[Rank 1] Before reset_step_counter()
+[Rank 1] After reset_step_counter()
+[Rank 1] Before generate(): prompts=2 output_length=32 placement=off
+Rendering prompts:   0%|          | 0/2 [00:00<?, ?it/s][Rank 3] Before reset_step_counter()
+Rendering prompts: 100%|██████████| 2/2 [00:00<00:00, 166.52it/s]
+Processed prompts:   0%|          | 0/2 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s][Rank 3] After reset_step_counter()
+[Rank 3] Before generate(): prompts=2 output_length=32 placement=off
+Rendering prompts:   0%|          | 0/2 [00:00<?, ?it/s][Rank 7] Before reset_step_counter()
+[Rank 7] After reset_step_counter()
+[Rank 7] Before generate(): prompts=2 output_length=32 placement=off
+Rendering prompts:   0%|          | 0/2 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 2/2 [00:00<00:00, 168.59it/s]
+Processed prompts:   0%|          | 0/2 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Rendering prompts: 100%|██████████| 2/2 [00:00<00:00, 168.48it/s]
+Processed prompts:   0%|          | 0/2 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s][Rank 0] All engines ready. placement=off, tracking=on
+[Rank 0] Before reset_step_counter()
+[Rank 0] After reset_step_counter()
+[Rank 0] Before generate(): prompts=2 output_length=32 placement=off
+Rendering prompts:   0%|          | 0/2 [00:00<?, ?it/s][Rank 6] Before reset_step_counter()
+[Rank 6] After reset_step_counter()
+[Rank 6] Before generate(): prompts=2 output_length=32 placement=off
+Rendering prompts:   0%|          | 0/2 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 2/2 [00:00<00:00, 169.35it/s]
+Processed prompts:   0%|          | 0/2 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Rendering prompts: 100%|██████████| 2/2 [00:00<00:00, 167.12it/s]
+Processed prompts:   0%|          | 0/2 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s][Rank 2] Before reset_step_counter()
+[Rank 2] After reset_step_counter()
+[Rank 2] Before generate(): prompts=2 output_length=32 placement=off
+Rendering prompts:   0%|          | 0/2 [00:00<?, ?it/s][Rank 4] Before reset_step_counter()
+[Rank 4] After reset_step_counter()
+[Rank 4] Before generate(): prompts=2 output_length=32 placement=off
+Rendering prompts:   0%|          | 0/2 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 2/2 [00:00<00:00, 169.42it/s]
+Processed prompts:   0%|          | 0/2 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Rendering prompts: 100%|██████████| 2/2 [00:00<00:00, 166.52it/s]
+Processed prompts:   0%|          | 0/2 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s][Rank 5] Before reset_step_counter()
+[Rank 5] After reset_step_counter()
+[Rank 5] Before generate(): prompts=2 output_length=32 placement=off
+Rendering prompts:   0%|          | 0/2 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 2/2 [00:00<00:00, 167.82it/s]
+Processed prompts:   0%|          | 0/2 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s](Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.0.block_sparse_moe.experts', extracted layer_id: 0
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.1.block_sparse_moe.experts', extracted layer_id: 1
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.2.block_sparse_moe.experts', extracted layer_id: 2
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.3.block_sparse_moe.experts', extracted layer_id: 3
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.4.block_sparse_moe.experts', extracted layer_id: 4
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.5.block_sparse_moe.experts', extracted layer_id: 5
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.6.block_sparse_moe.experts', extracted layer_id: 6
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.7.block_sparse_moe.experts', extracted layer_id: 7
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.8.block_sparse_moe.experts', extracted layer_id: 8
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.9.block_sparse_moe.experts', extracted layer_id: 9
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.10.block_sparse_moe.experts', extracted layer_id: 10
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.11.block_sparse_moe.experts', extracted layer_id: 11
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.12.block_sparse_moe.experts', extracted layer_id: 12
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.13.block_sparse_moe.experts', extracted layer_id: 13
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.14.block_sparse_moe.experts', extracted layer_id: 14
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.15.block_sparse_moe.experts', extracted layer_id: 15
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.16.block_sparse_moe.experts', extracted layer_id: 16
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.17.block_sparse_moe.experts', extracted layer_id: 17
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.18.block_sparse_moe.experts', extracted layer_id: 18
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.19.block_sparse_moe.experts', extracted layer_id: 19
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.20.block_sparse_moe.experts', extracted layer_id: 20
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.21.block_sparse_moe.experts', extracted layer_id: 21
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.22.block_sparse_moe.experts', extracted layer_id: 22
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.23.block_sparse_moe.experts', extracted layer_id: 23
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.24.block_sparse_moe.experts', extracted layer_id: 24
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.25.block_sparse_moe.experts', extracted layer_id: 25
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.26.block_sparse_moe.experts', extracted layer_id: 26
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.27.block_sparse_moe.experts', extracted layer_id: 27
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.28.block_sparse_moe.experts', extracted layer_id: 28
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.29.block_sparse_moe.experts', extracted layer_id: 29
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.30.block_sparse_moe.experts', extracted layer_id: 30
+(Worker_DP5_EP5 pid=1111461) [DEBUG] FusedMoE.layer_id property called (PID: 1111461), layer_name: 'model.layers.31.block_sparse_moe.experts', extracted layer_id: 31
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.0.block_sparse_moe.experts', extracted layer_id: 0
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.1.block_sparse_moe.experts', extracted layer_id: 1
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.2.block_sparse_moe.experts', extracted layer_id: 2
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.3.block_sparse_moe.experts', extracted layer_id: 3
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.4.block_sparse_moe.experts', extracted layer_id: 4
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.5.block_sparse_moe.experts', extracted layer_id: 5
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.6.block_sparse_moe.experts', extracted layer_id: 6
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.7.block_sparse_moe.experts', extracted layer_id: 7
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.8.block_sparse_moe.experts', extracted layer_id: 8
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.9.block_sparse_moe.experts', extracted layer_id: 9
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.10.block_sparse_moe.experts', extracted layer_id: 10
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.11.block_sparse_moe.experts', extracted layer_id: 11
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.12.block_sparse_moe.experts', extracted layer_id: 12
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.13.block_sparse_moe.experts', extracted layer_id: 13
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.14.block_sparse_moe.experts', extracted layer_id: 14
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.15.block_sparse_moe.experts', extracted layer_id: 15
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.16.block_sparse_moe.experts', extracted layer_id: 16
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.17.block_sparse_moe.experts', extracted layer_id: 17
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.18.block_sparse_moe.experts', extracted layer_id: 18
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.19.block_sparse_moe.experts', extracted layer_id: 19
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.20.block_sparse_moe.experts', extracted layer_id: 20
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.21.block_sparse_moe.experts', extracted layer_id: 21
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.22.block_sparse_moe.experts', extracted layer_id: 22
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.23.block_sparse_moe.experts', extracted layer_id: 23
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.24.block_sparse_moe.experts', extracted layer_id: 24
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.25.block_sparse_moe.experts', extracted layer_id: 25
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.26.block_sparse_moe.experts', extracted layer_id: 26
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.27.block_sparse_moe.experts', extracted layer_id: 27
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.28.block_sparse_moe.experts', extracted layer_id: 28
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.29.block_sparse_moe.experts', extracted layer_id: 29
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.30.block_sparse_moe.experts', extracted layer_id: 30
+(Worker_DP1_EP1 pid=1111457) [DEBUG] FusedMoE.layer_id property called (PID: 1111457), layer_name: 'model.layers.31.block_sparse_moe.experts', extracted layer_id: 31
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.0.block_sparse_moe.experts', extracted layer_id: 0
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.1.block_sparse_moe.experts', extracted layer_id: 1
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.2.block_sparse_moe.experts', extracted layer_id: 2
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.3.block_sparse_moe.experts', extracted layer_id: 3
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.4.block_sparse_moe.experts', extracted layer_id: 4
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.5.block_sparse_moe.experts', extracted layer_id: 5
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.6.block_sparse_moe.experts', extracted layer_id: 6
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.7.block_sparse_moe.experts', extracted layer_id: 7
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.8.block_sparse_moe.experts', extracted layer_id: 8
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.9.block_sparse_moe.experts', extracted layer_id: 9
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.10.block_sparse_moe.experts', extracted layer_id: 10
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.11.block_sparse_moe.experts', extracted layer_id: 11
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.12.block_sparse_moe.experts', extracted layer_id: 12
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.13.block_sparse_moe.experts', extracted layer_id: 13
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.14.block_sparse_moe.experts', extracted layer_id: 14
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.15.block_sparse_moe.experts', extracted layer_id: 15
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.16.block_sparse_moe.experts', extracted layer_id: 16
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.17.block_sparse_moe.experts', extracted layer_id: 17
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.18.block_sparse_moe.experts', extracted layer_id: 18
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.19.block_sparse_moe.experts', extracted layer_id: 19
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.20.block_sparse_moe.experts', extracted layer_id: 20
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.21.block_sparse_moe.experts', extracted layer_id: 21
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.22.block_sparse_moe.experts', extracted layer_id: 22
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.23.block_sparse_moe.experts', extracted layer_id: 23
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.24.block_sparse_moe.experts', extracted layer_id: 24
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.25.block_sparse_moe.experts', extracted layer_id: 25
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.26.block_sparse_moe.experts', extracted layer_id: 26
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.27.block_sparse_moe.experts', extracted layer_id: 27
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.28.block_sparse_moe.experts', extracted layer_id: 28
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.29.block_sparse_moe.experts', extracted layer_id: 29
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.30.block_sparse_moe.experts', extracted layer_id: 30
+(Worker_DP2_EP2 pid=1111459) [DEBUG] FusedMoE.layer_id property called (PID: 1111459), layer_name: 'model.layers.31.block_sparse_moe.experts', extracted layer_id: 31
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.0.block_sparse_moe.experts', extracted layer_id: 0
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.1.block_sparse_moe.experts', extracted layer_id: 1
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.2.block_sparse_moe.experts', extracted layer_id: 2
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.3.block_sparse_moe.experts', extracted layer_id: 3
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.4.block_sparse_moe.experts', extracted layer_id: 4
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.5.block_sparse_moe.experts', extracted layer_id: 5
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.6.block_sparse_moe.experts', extracted layer_id: 6
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.7.block_sparse_moe.experts', extracted layer_id: 7
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.8.block_sparse_moe.experts', extracted layer_id: 8
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.9.block_sparse_moe.experts', extracted layer_id: 9
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.10.block_sparse_moe.experts', extracted layer_id: 10
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.11.block_sparse_moe.experts', extracted layer_id: 11
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.12.block_sparse_moe.experts', extracted layer_id: 12
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.13.block_sparse_moe.experts', extracted layer_id: 13
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.14.block_sparse_moe.experts', extracted layer_id: 14
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.15.block_sparse_moe.experts', extracted layer_id: 15
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.16.block_sparse_moe.experts', extracted layer_id: 16
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.17.block_sparse_moe.experts', extracted layer_id: 17
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.18.block_sparse_moe.experts', extracted layer_id: 18
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.19.block_sparse_moe.experts', extracted layer_id: 19
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.20.block_sparse_moe.experts', extracted layer_id: 20
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.21.block_sparse_moe.experts', extracted layer_id: 21
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.22.block_sparse_moe.experts', extracted layer_id: 22
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.23.block_sparse_moe.experts', extracted layer_id: 23
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.24.block_sparse_moe.experts', extracted layer_id: 24
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.25.block_sparse_moe.experts', extracted layer_id: 25
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.26.block_sparse_moe.experts', extracted layer_id: 26
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.27.block_sparse_moe.experts', extracted layer_id: 27
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.28.block_sparse_moe.experts', extracted layer_id: 28
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.29.block_sparse_moe.experts', extracted layer_id: 29
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.30.block_sparse_moe.experts', extracted layer_id: 30
+(Worker_DP3_EP3 pid=1111458) [DEBUG] FusedMoE.layer_id property called (PID: 1111458), layer_name: 'model.layers.31.block_sparse_moe.experts', extracted layer_id: 31
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.0.block_sparse_moe.experts', extracted layer_id: 0
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.1.block_sparse_moe.experts', extracted layer_id: 1
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.2.block_sparse_moe.experts', extracted layer_id: 2
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.3.block_sparse_moe.experts', extracted layer_id: 3
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.4.block_sparse_moe.experts', extracted layer_id: 4
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.5.block_sparse_moe.experts', extracted layer_id: 5
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.6.block_sparse_moe.experts', extracted layer_id: 6
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.7.block_sparse_moe.experts', extracted layer_id: 7
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.8.block_sparse_moe.experts', extracted layer_id: 8
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.9.block_sparse_moe.experts', extracted layer_id: 9
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.10.block_sparse_moe.experts', extracted layer_id: 10
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.11.block_sparse_moe.experts', extracted layer_id: 11
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.12.block_sparse_moe.experts', extracted layer_id: 12
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.13.block_sparse_moe.experts', extracted layer_id: 13
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.14.block_sparse_moe.experts', extracted layer_id: 14
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.15.block_sparse_moe.experts', extracted layer_id: 15
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.16.block_sparse_moe.experts', extracted layer_id: 16
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.17.block_sparse_moe.experts', extracted layer_id: 17
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.18.block_sparse_moe.experts', extracted layer_id: 18
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.19.block_sparse_moe.experts', extracted layer_id: 19
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.20.block_sparse_moe.experts', extracted layer_id: 20
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.21.block_sparse_moe.experts', extracted layer_id: 21
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.22.block_sparse_moe.experts', extracted layer_id: 22
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.23.block_sparse_moe.experts', extracted layer_id: 23
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.24.block_sparse_moe.experts', extracted layer_id: 24
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.25.block_sparse_moe.experts', extracted layer_id: 25
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.26.block_sparse_moe.experts', extracted layer_id: 26
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.27.block_sparse_moe.experts', extracted layer_id: 27
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.28.block_sparse_moe.experts', extracted layer_id: 28
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.29.block_sparse_moe.experts', extracted layer_id: 29
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.30.block_sparse_moe.experts', extracted layer_id: 30
+(Worker_DP4_EP4 pid=1111463) [DEBUG] FusedMoE.layer_id property called (PID: 1111463), layer_name: 'model.layers.31.block_sparse_moe.experts', extracted layer_id: 31
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.0.block_sparse_moe.experts', extracted layer_id: 0
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.1.block_sparse_moe.experts', extracted layer_id: 1
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.2.block_sparse_moe.experts', extracted layer_id: 2
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.3.block_sparse_moe.experts', extracted layer_id: 3
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.4.block_sparse_moe.experts', extracted layer_id: 4
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.5.block_sparse_moe.experts', extracted layer_id: 5
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.6.block_sparse_moe.experts', extracted layer_id: 6
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.7.block_sparse_moe.experts', extracted layer_id: 7
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.8.block_sparse_moe.experts', extracted layer_id: 8
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.9.block_sparse_moe.experts', extracted layer_id: 9
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.10.block_sparse_moe.experts', extracted layer_id: 10
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.11.block_sparse_moe.experts', extracted layer_id: 11
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.12.block_sparse_moe.experts', extracted layer_id: 12
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.13.block_sparse_moe.experts', extracted layer_id: 13
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.14.block_sparse_moe.experts', extracted layer_id: 14
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.15.block_sparse_moe.experts', extracted layer_id: 15
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.16.block_sparse_moe.experts', extracted layer_id: 16
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.17.block_sparse_moe.experts', extracted layer_id: 17
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.18.block_sparse_moe.experts', extracted layer_id: 18
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.19.block_sparse_moe.experts', extracted layer_id: 19
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.20.block_sparse_moe.experts', extracted layer_id: 20
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.21.block_sparse_moe.experts', extracted layer_id: 21
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.22.block_sparse_moe.experts', extracted layer_id: 22
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.23.block_sparse_moe.experts', extracted layer_id: 23
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.24.block_sparse_moe.experts', extracted layer_id: 24
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.25.block_sparse_moe.experts', extracted layer_id: 25
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.26.block_sparse_moe.experts', extracted layer_id: 26
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.27.block_sparse_moe.experts', extracted layer_id: 27
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.28.block_sparse_moe.experts', extracted layer_id: 28
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.29.block_sparse_moe.experts', extracted layer_id: 29
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.30.block_sparse_moe.experts', extracted layer_id: 30
+(Worker_DP6_EP6 pid=1111460) [DEBUG] FusedMoE.layer_id property called (PID: 1111460), layer_name: 'model.layers.31.block_sparse_moe.experts', extracted layer_id: 31
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.0.block_sparse_moe.experts', extracted layer_id: 0
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.1.block_sparse_moe.experts', extracted layer_id: 1
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.2.block_sparse_moe.experts', extracted layer_id: 2
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.3.block_sparse_moe.experts', extracted layer_id: 3
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.4.block_sparse_moe.experts', extracted layer_id: 4
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.5.block_sparse_moe.experts', extracted layer_id: 5
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.6.block_sparse_moe.experts', extracted layer_id: 6
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.7.block_sparse_moe.experts', extracted layer_id: 7
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.8.block_sparse_moe.experts', extracted layer_id: 8
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.9.block_sparse_moe.experts', extracted layer_id: 9
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.10.block_sparse_moe.experts', extracted layer_id: 10
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.11.block_sparse_moe.experts', extracted layer_id: 11
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.12.block_sparse_moe.experts', extracted layer_id: 12
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.13.block_sparse_moe.experts', extracted layer_id: 13
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.14.block_sparse_moe.experts', extracted layer_id: 14
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.15.block_sparse_moe.experts', extracted layer_id: 15
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.16.block_sparse_moe.experts', extracted layer_id: 16
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.17.block_sparse_moe.experts', extracted layer_id: 17
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.18.block_sparse_moe.experts', extracted layer_id: 18
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.19.block_sparse_moe.experts', extracted layer_id: 19
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.20.block_sparse_moe.experts', extracted layer_id: 20
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.21.block_sparse_moe.experts', extracted layer_id: 21
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.22.block_sparse_moe.experts', extracted layer_id: 22
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.23.block_sparse_moe.experts', extracted layer_id: 23
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.24.block_sparse_moe.experts', extracted layer_id: 24
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.25.block_sparse_moe.experts', extracted layer_id: 25
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.26.block_sparse_moe.experts', extracted layer_id: 26
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.27.block_sparse_moe.experts', extracted layer_id: 27
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.28.block_sparse_moe.experts', extracted layer_id: 28
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.29.block_sparse_moe.experts', extracted layer_id: 29
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.30.block_sparse_moe.experts', extracted layer_id: 30
+(Worker_DP7_EP7 pid=1111464) [DEBUG] FusedMoE.layer_id property called (PID: 1111464), layer_name: 'model.layers.31.block_sparse_moe.experts', extracted layer_id: 31
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:07 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:07 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:08 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+Processed prompts:  50%|█████     | 1/2 [00:02<00:02,  2.36s/it, est. speed input: 29.24 toks/s, output: 13.56 toks/s]Processed prompts:  50%|█████     | 1/2 [00:02<00:02,  2.30s/it, est. speed input: 28.29 toks/s, output: 13.93 toks/s]Processed prompts:  50%|█████     | 1/2 [00:02<00:02,  2.42s/it, est. speed input: 28.05 toks/s, output: 13.20 toks/s]Processed prompts:  50%|█████     | 1/2 [00:02<00:02,  2.39s/it, est. speed input: 38.90 toks/s, output: 13.39 toks/s]Processed prompts:  50%|█████     | 1/2 [00:02<00:02,  2.39s/it, est. speed input: 36.43 toks/s, output: 13.40 toks/s]Processed prompts:  50%|█████     | 1/2 [00:02<00:02,  2.35s/it, est. speed input: 29.37 toks/s, output: 13.62 toks/s]Processed prompts:  50%|█████     | 1/2 [00:02<00:02,  2.41s/it, est. speed input: 35.23 toks/s, output: 13.26 toks/s]Processed prompts:  50%|█████     | 1/2 [00:02<00:02,  2.44s/it, est. speed input: 25.03 toks/s, output: 13.13 toks/s](Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=2 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=6 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=5 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=4 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=1 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=3 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=7 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3220] [routing] dp_rank=0 entering _on_routing_step with 32 routed layer(s)
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=2 leaving _on_routing_step
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=6 leaving _on_routing_step
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=5 leaving _on_routing_step
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=4 leaving _on_routing_step
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=1 leaving _on_routing_step
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=3 leaving _on_routing_step
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=7 leaving _on_routing_step
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:09 [gpu_model_runner.py:3268] [routing] dp_rank=0 leaving _on_routing_step
+Processed prompts: 100%|██████████| 2/2 [00:02<00:00,  2.39s/it, est. speed input: 66.39 toks/s, output: 26.07 toks/s]Processed prompts: 100%|██████████| 2/2 [00:02<00:00,  2.44s/it, est. speed input: 51.10 toks/s, output: 25.55 toks/s]Processed prompts: 100%|██████████| 2/2 [00:02<00:00,  2.30s/it, est. speed input: 56.23 toks/s, output: 27.06 toks/s]Processed prompts: 100%|██████████| 2/2 [00:02<00:00,  2.42s/it, est. speed input: 54.58 toks/s, output: 25.69 toks/s]Processed prompts: 100%|██████████| 2/2 [00:02<00:00,  2.35s/it, est. speed input: 59.17 toks/s, output: 26.48 toks/s]Processed prompts: 100%|██████████| 2/2 [00:02<00:00,  2.36s/it, est. speed input: 55.62 toks/s, output: 26.37 toks/s]Processed prompts: 100%|██████████| 2/2 [00:02<00:00,  2.41s/it, est. speed input: 58.06 toks/s, output: 25.81 toks/s]Processed prompts: 100%|██████████| 2/2 [00:02<00:00,  2.39s/it, est. speed input: 66.32 toks/s, output: 26.04 toks/s]Processed prompts: 100%|██████████| 2/2 [00:04<00:00,  2.16s/it, est. speed input: 58.06 toks/s, output: 25.81 toks/s]
+Processed prompts: 100%|██████████| 2/2 [00:04<00:00,  2.15s/it, est. speed input: 66.39 toks/s, output: 26.07 toks/s]Processed prompts: 100%|██████████| 2/2 [00:04<00:00,  2.15s/it, est. speed input: 66.32 toks/s, output: 26.04 toks/s][Rank 7] After generate(): outputs=2
+
+
+[Rank 6] After generate(): outputs=2
+[Rank 0] After generate(): outputs=2
+Processed prompts: 100%|██████████| 2/2 [00:04<00:00,  2.10s/it, est. speed input: 56.23 toks/s, output: 27.06 toks/s]Processed prompts: 100%|██████████| 2/2 [00:04<00:00,  2.13s/it, est. speed input: 59.17 toks/s, output: 26.48 toks/s]
+
+Processed prompts: 100%|██████████| 2/2 [00:04<00:00,  2.13s/it, est. speed input: 55.62 toks/s, output: 26.37 toks/s]
+Processed prompts: 100%|██████████| 2/2 [00:04<00:00,  2.16s/it, est. speed input: 54.58 toks/s, output: 25.69 toks/s]Processed prompts: 100%|██████████| 2/2 [00:04<00:00,  2.17s/it, est. speed input: 51.10 toks/s, output: 25.55 toks/s][Rank 5] After generate(): outputs=2
+[Rank 4] After generate(): outputs=2
+
+[Rank 2] After generate(): outputs=2
+
+[Rank 3] After generate(): outputs=2
+[Rank 1] After generate(): outputs=2
+(EngineCore_DP1 pid=1111394) INFO 04-01 20:12:13 [core.py:1210] Shutdown initiated (timeout=0)
+(EngineCore_DP1 pid=1111394) INFO 04-01 20:12:13 [core.py:1233] Shutdown complete
+(Worker_DP1_EP1 pid=1111457) INFO 04-01 20:12:13 [multiproc_executor.py:859] WorkerProc shutting down.
+(EngineCore_DP2 pid=1111381) INFO 04-01 20:12:13 [core.py:1210] Shutdown initiated (timeout=0)
+(EngineCore_DP2 pid=1111381) INFO 04-01 20:12:13 [core.py:1233] Shutdown complete
+(Worker_DP2_EP2 pid=1111459) INFO 04-01 20:12:13 [multiproc_executor.py:859] WorkerProc shutting down.
+(EngineCore_DP6 pid=1111412) INFO 04-01 20:12:13 [core.py:1210] Shutdown initiated (timeout=0)
+(EngineCore_DP6 pid=1111412) INFO 04-01 20:12:13 [core.py:1233] Shutdown complete
+(Worker_DP6_EP6 pid=1111460) INFO 04-01 20:12:13 [multiproc_executor.py:859] WorkerProc shutting down.
+(EngineCore_DP3 pid=1111370) INFO 04-01 20:12:13 [core.py:1210] Shutdown initiated (timeout=0)
+(EngineCore_DP3 pid=1111370) INFO 04-01 20:12:13 [core.py:1233] Shutdown complete
+(Worker_DP3_EP3 pid=1111458) INFO 04-01 20:12:13 [multiproc_executor.py:859] WorkerProc shutting down.
+(EngineCore_DP4 pid=1111403) INFO 04-01 20:12:13 [core.py:1210] Shutdown initiated (timeout=0)
+(EngineCore_DP4 pid=1111403) INFO 04-01 20:12:13 [core.py:1233] Shutdown complete
+(Worker_DP4_EP4 pid=1111463) INFO 04-01 20:12:13 [multiproc_executor.py:859] WorkerProc shutting down.
+(EngineCore_DP7 pid=1111371) INFO 04-01 20:12:13 [core.py:1210] Shutdown initiated (timeout=0)
+(EngineCore_DP7 pid=1111371) INFO 04-01 20:12:13 [core.py:1233] Shutdown complete
+(Worker_DP7_EP7 pid=1111464) INFO 04-01 20:12:13 [multiproc_executor.py:859] WorkerProc shutting down.
+(EngineCore_DP0 pid=1111362) INFO 04-01 20:12:13 [core.py:1210] Shutdown initiated (timeout=0)
+(EngineCore_DP0 pid=1111362) INFO 04-01 20:12:13 [core.py:1233] Shutdown complete
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:13 [multiproc_executor.py:764] Parent process exited, terminating worker queues
+(Worker_DP0_EP0 pid=1111462) INFO 04-01 20:12:13 [multiproc_executor.py:859] WorkerProc shutting down.
+(EngineCore_DP5 pid=1111385) INFO 04-01 20:12:13 [core.py:1210] Shutdown initiated (timeout=0)
+(EngineCore_DP5 pid=1111385) INFO 04-01 20:12:13 [core.py:1233] Shutdown complete
+(Worker_DP5_EP5 pid=1111461) INFO 04-01 20:12:13 [multiproc_executor.py:859] WorkerProc shutting down.
+[Rank 1] 'It met with positive sales in Japan , and was praised by bot' → 'ja in the west , it was decided that the next game in the series , Persona Q: Sh'
+[Rank 1] 'As with previous Valkyira Chronicles games , Valkyria Chroni' → 'ors expressing their thoughts and feelings through thought bubbles .\n\nPlayers co'
+[Rank 1] 33 steps — step0:61tok  step1:68tok  step2:2tok  step3:2tok  step4:2tok  step5:2tok  step6:2tok  step7:2tok  step8:2tok  step9:2tok  step10:2tok  step11:2tok  step12:2tok  step13:2tok  step14:2tok  step15:2tok  step16:2tok  step17:2tok  step18:2tok  step19:2tok  step20:2tok  step21:2tok  step22:2tok  step23:2tok  step24:2tok  step25:2tok  step26:2tok  step27:2tok  step28:2tok  step29:2tok  step30:2tok  step31:2tok  step32:1tok
+[Rank 1] 190 tokens — top experts: L0:E5(68),E1(55),E7(53) | L1:E5(59),E0(56),E3(56) | L2:E1(60),E6(54),E0(51)
+[Rank 0] 'Senjō no Valkyria 3 : Unrecorded Chronicles ( Japanese : 戦場の' → ' @-@ ry 2011, it is the third game in the Valkyria Chronicles series.\n\nValkyria '
+[Rank 0] 'The game began development in 2010 , carrying over a large p' → 'ō returned , as did the Seiyuu for Alicia Melchiott and Welkin Gunther . Additio'
+[Rank 0] 33 steps — step0:93tok  step1:71tok  step2:2tok  step3:2tok  step4:2tok  step5:2tok  step6:2tok  step7:2tok  step8:2tok  step9:2tok  step10:2tok  step11:2tok  step12:2tok  step13:2tok  step14:2tok  step15:2tok  step16:2tok  step17:2tok  step18:2tok  step19:2tok  step20:2tok  step21:2tok  step22:2tok  step23:2tok  step24:2tok  step25:2tok  step26:2tok  step27:2tok  step28:2tok  step29:2tok  step30:2tok  step31:2tok  step32:1tok
+[Rank 0] 225 tokens — top experts: L0:E2(66),E0(64),E1(64) | L1:E0(80),E4(67),E5(67) | L2:E6(75),E0(72),E3(71)
+[Rank 5] 'The majority of material created for previous games , such a' → '\n\nThe game is turn-based . Each turn represents 20 minutes of the in- game day a'
+[Rank 5] 'The music was composed by Hitoshi Sakimoto , who had also wo' → 'arked back to the concept of the Valkyria as a warrior spirit that took over a h'
+[Rank 5] 33 steps — step0:65tok  step1:69tok  step2:2tok  step3:2tok  step4:2tok  step5:2tok  step6:2tok  step7:2tok  step8:2tok  step9:2tok  step10:2tok  step11:2tok  step12:2tok  step13:2tok  step14:2tok  step15:2tok  step16:2tok  step17:2tok  step18:2tok  step19:2tok  step20:2tok  step21:2tok  step22:2tok  step23:2tok  step24:2tok  step25:2tok  step26:2tok  step27:2tok  step28:2tok  step29:2tok  step30:2tok  step31:2tok  step32:1tok
+[Rank 5] 195 tokens — top experts: L0:E5(58),E2(56),E7(55) | L1:E4(58),E5(55),E0(50) | L2:E1(64),E6(55),E0(53)
+[Rank 2] "The game 's battle system , the BliTZ system , is carried ov" → ' rson view . Combat is turn @-@ based , with players moving all of their charact'
+[Rank 2] 'Troops are divided into five classes : Scouts , Shocktrooper' → ' gained by each individual trooper which can be used to improve the class of the'
+[Rank 2] 33 steps — step0:69tok  step1:67tok  step2:2tok  step3:2tok  step4:2tok  step5:2tok  step6:2tok  step7:2tok  step8:2tok  step9:2tok  step10:2tok  step11:2tok  step12:2tok  step13:2tok  step14:2tok  step15:2tok  step16:2tok  step17:2tok  step18:2tok  step19:2tok  step20:2tok  step21:2tok  step22:2tok  step23:2tok  step24:2tok  step25:2tok  step26:2tok  step27:2tok  step28:2tok  step29:2tok  step30:2tok  step31:2tok  step32:1tok
+[Rank 2] 197 tokens — top experts: L0:E5(77),E7(58),E2(53) | L1:E1(68),E0(57),E4(51) | L2:E0(58),E1(57),E5(54)
+[Rank 7] 'On its day of release in Japan , Valkyria Chronicles III top' → '@ 000 copies .\n\nOn April 12 , Sega released a statement via Twitter and its webs'
+[Rank 7] 'Famitsu enjoyed the story , and were particularly pleased wi' → 'eting . Japanese gaming magazine Famitsu gave the game a score of 37 out of 40, '
+[Rank 7] 33 steps — step0:85tok  step1:60tok  step2:2tok  step3:2tok  step4:2tok  step5:2tok  step6:2tok  step7:2tok  step8:2tok  step9:2tok  step10:2tok  step11:2tok  step12:2tok  step13:2tok  step14:2tok  step15:2tok  step16:2tok  step17:2tok  step18:2tok  step19:2tok  step20:2tok  step21:2tok  step22:2tok  step23:2tok  step24:2tok  step25:2tok  step26:2tok  step27:2tok  step28:2tok  step29:2tok  step30:2tok  step31:2tok  step32:1tok
+[Rank 7] 206 tokens — top experts: L0:E5(62),E7(60),E4(55) | L1:E4(70),E0(56),E3(56) | L2:E0(78),E1(59),E5(59)
+[Rank 4] 'Partly due to these events , and partly due to the major los' → 'reshadowing in the epilogue shows . The Nameless are a secretive and enigmatic s'
+[Rank 4] 'Concept work for Valkyria Chronicles III began after develop' → '22 months , and the game was released in Japan on January 27 , 2011 .\n\nThe setti'
+[Rank 4] 33 steps — step0:69tok  step1:75tok  step2:2tok  step3:2tok  step4:2tok  step5:2tok  step6:2tok  step7:2tok  step8:2tok  step9:2tok  step10:2tok  step11:2tok  step12:2tok  step13:2tok  step14:2tok  step15:2tok  step16:2tok  step17:2tok  step18:2tok  step19:2tok  step20:2tok  step21:2tok  step22:2tok  step23:2tok  step24:2tok  step25:2tok  step26:2tok  step27:2tok  step28:2tok  step29:2tok  step30:2tok  step31:2tok  step32:1tok
+[Rank 4] 205 tokens — top experts: L0:E7(71),E5(63),E3(61) | L1:E0(69),E3(59),E4(57) | L2:E3(69),E1(66),E5(58)
+[Rank 6] 'In September 2010 , a teaser website was revealed by Sega , ' → ' was shown to the public.\n\nThe demo for Valkyria Chronicles 3 was released on Pl'
+[Rank 6] 'Unlike its two predecessors , Valkyria Chronicles III was no' → '3DS ROM of the game can download it here .\n\nThis patch is version 1.0 : it’s sti'
+[Rank 6] 33 steps — step0:87tok  step1:77tok  step2:2tok  step3:2tok  step4:2tok  step5:2tok  step6:2tok  step7:2tok  step8:2tok  step9:2tok  step10:2tok  step11:2tok  step12:2tok  step13:2tok  step14:2tok  step15:2tok  step16:2tok  step17:2tok  step18:2tok  step19:2tok  step20:2tok  step21:2tok  step22:2tok  step23:2tok  step24:2tok  step25:2tok  step26:2tok  step27:2tok  step28:2tok  step29:2tok  step30:2tok  step31:2tok  step32:1tok
+[Rank 6] 225 tokens — top experts: L0:E1(66),E5(64),E2(61) | L1:E0(83),E3(68),E4(68) | L2:E3(73),E0(65),E1(62)
+[Rank 3] 'The game takes place during the Second Europan War . Gallian' → 'ained with the worst missions , this squad is led by Sergeant Feldt and composed'
+[Rank 3] 'As the Nameless officially do not exist , the upper echelons' → 'karuga , it has also resulted in situations where the Nameless are unable to cla'
+[Rank 3] 33 steps — step0:68tok  step1:69tok  step2:2tok  step3:2tok  step4:2tok  step5:2tok  step6:2tok  step7:2tok  step8:2tok  step9:2tok  step10:2tok  step11:2tok  step12:2tok  step13:2tok  step14:2tok  step15:2tok  step16:2tok  step17:2tok  step18:2tok  step19:2tok  step20:2tok  step21:2tok  step22:2tok  step23:2tok  step24:2tok  step25:2tok  step26:2tok  step27:2tok  step28:2tok  step29:2tok  step30:2tok  step31:2tok  step32:1tok
+[Rank 3] 198 tokens — top experts: L0:E7(66),E5(62),E4(57) | L1:E1(69),E4(60),E0(51) | L2:E1(66),E3(61),E2(59)
