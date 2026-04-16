@@ -389,6 +389,38 @@ class TestComputePlacement(unittest.TestCase):
             "num_gpus": num_gpus,
         }]}
 
+    def _make_pair_routing(
+        self,
+        topk_rows: list[list[int]],
+        num_experts: int,
+        num_gpus: int = 4,
+    ) -> dict:
+        """Build routing dict from explicit per-token expert co-activations."""
+        import torch
+
+        topk_ids = torch.tensor(topk_rows, dtype=torch.int32)
+        topk_wts = torch.ones_like(topk_ids, dtype=torch.float32)
+        expert_load = torch.zeros(num_experts, dtype=torch.int64)
+        for expert_id in topk_ids.reshape(-1).tolist():
+            expert_load[expert_id] += 1
+
+        pair_load = torch.zeros(num_experts, num_experts, dtype=torch.int64)
+        for row in topk_rows:
+            unique_experts = sorted(set(row))
+            for left_idx, left in enumerate(unique_experts[:-1]):
+                for right in unique_experts[left_idx + 1:]:
+                    pair_load[left, right] += 1
+                    pair_load[right, left] += 1
+
+        return {0: [{
+            "topk_ids": topk_ids,
+            "topk_weights": topk_wts,
+            "num_tokens": len(topk_rows),
+            "expert_load": expert_load,
+            "expert_pair_load": pair_load,
+            "num_gpus": num_gpus,
+        }]}
+
     def test_empty_routing_returns_empty(self):
         """Empty routing dict → return {}."""
         self.assertEqual(self.compute_placement({}), {})
@@ -434,6 +466,20 @@ class TestComputePlacement(unittest.TestCase):
         counts = Counter(result["expert_to_gpu"].values())
         self.assertEqual(counts[heavy_gpu], 1,
                          "Heavy expert should be alone on its GPU")
+
+    def test_pairwise_coactivation_drives_layer_partition(self):
+        """Edge weights follow token-level expert pair co-activation counts."""
+        routing = self._make_pair_routing(
+            [[0, 1], [0, 1], [2, 3], [2, 3]],
+            num_experts=4,
+            num_gpus=2,
+        )
+        result = self.compute_placement(routing)
+        layer0 = result["layer_configs"]["0"]
+
+        self.assertEqual(layer0["0"], layer0["1"])
+        self.assertEqual(layer0["2"], layer0["3"])
+        self.assertNotEqual(layer0["0"], layer0["2"])
 
 
 # ---------------------------------------------------------------------------

@@ -3081,7 +3081,7 @@ class GPUModelRunner(
     _compute_placement_callback: object = None
 
     def _aggregate_routing_load(self, routing_snapshot: dict) -> dict:
-        """All-reduce per-expert token counts across all EP ranks.
+        """All-reduce per-expert and pairwise token counts across all EP ranks.
 
         Each DP rank captures only its own tokens.  Before passing routing data
         to compute_placement() we sum the per-expert counts across every EP rank
@@ -3097,8 +3097,13 @@ class GPUModelRunner(
             collective if the global sum is zero (nothing to place).
 
         Returns a dict with the same structure as routing_snapshot plus:
-            expert_load: Tensor[num_logical_experts]  — global token counts
-            num_gpus:    int  — EP group size (= dp_size × tp_size)
+            expert_load: Tensor[num_logical_experts]
+                Global per-expert token counts.
+            expert_pair_load: Tensor[num_logical_experts, num_logical_experts]
+                Global pairwise co-activation counts where entry (i, j) is the
+                number of tokens that activated both experts i and j.
+            num_gpus: int
+                EP group size (= dp_size × tp_size)
         Returns {} when the cluster-wide token sum is zero (skip callback).
         """
         ep_group = get_ep_group()
@@ -3140,31 +3145,62 @@ class GPUModelRunner(
             # so this branch is unreachable in practice.  Guard only.
             return {}
 
-        # Build load[num_layers, num_experts] — zeros for empty-snapshot ranks.
+        # Build load[num_layers, num_experts] and pair_load[num_layers,
+        # num_experts, num_experts] — zeros for empty-snapshot ranks.
         load = torch.zeros(num_layers, num_experts,
                            dtype=torch.int64, device=self.device)
+        pair_load = torch.zeros(
+            num_layers,
+            num_experts,
+            num_experts,
+            dtype=torch.int64,
+            device=self.device,
+        )
         if routing_snapshot:
             for i, layer_id in enumerate(layer_ids):
                 for cap in routing_snapshot[layer_id]:
-                    flat = cap['topk_ids'].reshape(-1).long()
+                    topk_ids = cap['topk_ids'].long()
+                    flat = topk_ids.reshape(-1)
                     load[i].scatter_add_(0, flat, torch.ones_like(flat))
+
+                    if topk_ids.shape[1] < 2:
+                        continue
+                    sorted_ids = torch.sort(topk_ids, dim=1).values
+                    for left_idx in range(sorted_ids.shape[1] - 1):
+                        left = sorted_ids[:, left_idx]
+                        for right_idx in range(left_idx + 1, sorted_ids.shape[1]):
+                            right = sorted_ids[:, right_idx]
+                            valid = left != right
+                            if not valid.any():
+                                continue
+                            pair_index = left[valid] * num_experts + right[valid]
+                            counts = torch.bincount(
+                                pair_index,
+                                minlength=num_experts * num_experts,
+                            ).reshape(num_experts, num_experts)
+                            pair_load[i] += counts
+
+        pair_load = pair_load + pair_load.transpose(-1, -2)
 
         # Every rank calls this — even those with no local tokens.
         logger.info(
             "[routing] dp_rank=%s ep_rank=%s before ep_group.all_reduce "
-            "shape=%s local_sum=%s",
+            "shape=%s local_sum=%s local_pair_sum=%s",
             dp_rank,
             ep_rank,
             tuple(load.shape),
             int(load.sum().item()),
+            int(pair_load.sum().item()),
         )
         load = ep_group.all_reduce(load)
+        pair_load = ep_group.all_reduce(pair_load)
         logger.info(
             "[routing] dp_rank=%s ep_rank=%s after ep_group.all_reduce "
-            "global_sum=%s",
+            "global_sum=%s global_pair_sum=%s",
             dp_rank,
             ep_rank,
             int(load.sum().item()),
+            int(pair_load.sum().item()),
         )
 
         # If no real tokens anywhere in the cluster this step, skip callback.
@@ -3186,7 +3222,12 @@ class GPUModelRunner(
         for i, layer_id in enumerate(ids_to_iterate):
             captures = routing_snapshot.get(layer_id, [{}])
             result[layer_id] = [
-                {**cap, 'expert_load': load[i], 'num_gpus': num_gpus}
+                {
+                    **cap,
+                    'expert_load': load[i],
+                    'expert_pair_load': pair_load[i],
+                    'num_gpus': num_gpus,
+                }
                 for cap in captures
             ]
         logger.info(

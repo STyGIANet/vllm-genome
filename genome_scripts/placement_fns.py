@@ -9,15 +9,18 @@ The callback runs after every forward pass once routing load has been
 all-reduced across every EP rank. This implementation keeps the callback fully
 in-memory and deterministic across ranks:
 
-- placement decisions only use ``expert_load`` and ``num_gpus``
+- placement decisions only use globally aggregated routing fields
 - no JSON files are read
-- local-only fields like ``topk_ids`` are ignored
+- local-only fields like ``topk_ids`` are only used as a local fallback in
+  single-process tests; distributed runs rely on the global
+  ``expert_pair_load`` tensor injected by the worker
 
 The algorithm is METIS-style rather than file-driven METIS:
 
 1. For each MoE layer, treat experts as graph nodes.
 2. Assign node weights from the global per-expert token load.
-3. Connect experts with weighted edges derived from shared load intensity.
+3. Connect experts with weighted edges equal to the number of tokens that
+   activated both experts.
 4. Partition the graph into ``num_gpus`` parts using ``pymetis`` when
    available, otherwise use a deterministic greedy graph-growing fallback.
 5. Return ``layer_configs`` so each layer can use its own expert->GPU map.
@@ -83,21 +86,42 @@ def _is_balanced(loads: list[float], num_gpus: int) -> bool:
     return spread < IMBALANCE_THRESHOLD
 
 
-def _build_expert_graph(loads: list[float]) -> tuple[list[int], list[list[int]], list[list[int]]]:
-    """Build a dense, weighted expert graph from per-expert load.
+def _coactivation_from_topk_ids(
+    topk_ids: torch.Tensor,
+    num_experts: int,
+) -> list[list[float]]:
+    """Derive pairwise co-activation counts from token routing ids."""
+    pair_counts = [[0.0] * num_experts for _ in range(num_experts)]
+    if topk_ids.numel() == 0 or topk_ids.shape[1] < 2:
+        return pair_counts
+
+    for token_experts in topk_ids.detach().cpu().tolist():
+        unique_experts = sorted({int(expert_id) for expert_id in token_experts})
+        for left_idx, left in enumerate(unique_experts[:-1]):
+            for right in unique_experts[left_idx + 1:]:
+                pair_counts[left][right] += 1.0
+                pair_counts[right][left] += 1.0
+    return pair_counts
+
+
+def _build_expert_graph(
+    loads: list[float],
+    pair_counts: list[list[float]] | None = None,
+) -> tuple[list[int], list[list[int]], list[list[int]]]:
+    """Build a weighted expert graph from per-expert load and co-activation.
 
     Nodes are experts in one layer. Node weights are the expert loads. Edge
-    weights use ``min(load_i, load_j)`` so experts that are both heavily used
-    are more likely to stay together during partitioning.
+    weights count how many tokens activated both experts.
     """
     num_experts = len(loads)
     node_weights = [_scale_weight(load) for load in loads]
     adjacency: list[list[int]] = [[] for _ in range(num_experts)]
     edge_weights: list[list[int]] = [[] for _ in range(num_experts)]
+    pair_counts = pair_counts or [[0.0] * num_experts for _ in range(num_experts)]
 
     for left in range(num_experts):
         for right in range(left + 1, num_experts):
-            shared_weight = min(loads[left], loads[right])
+            shared_weight = pair_counts[left][right]
             if shared_weight <= 0:
                 continue
             scaled = _scale_weight(shared_weight)
@@ -111,13 +135,14 @@ def _build_expert_graph(loads: list[float]) -> tuple[list[int], list[list[int]],
 
 def _pymetis_partition(
     loads: list[float],
+    pair_counts: list[list[float]] | None,
     num_parts: int,
 ) -> list[int] | None:
     """Partition experts with pymetis when it is installed."""
     if pymetis is None:
         return None
 
-    node_weights, adjacency, edge_weights = _build_expert_graph(loads)
+    node_weights, adjacency, edge_weights = _build_expert_graph(loads, pair_counts)
     if not any(adjacency):
         return None
 
@@ -137,7 +162,11 @@ def _pymetis_partition(
     return [int(part) for part in parts]
 
 
-def _fallback_partition(loads: list[float], num_parts: int) -> list[int]:
+def _fallback_partition(
+    loads: list[float],
+    pair_counts: list[list[float]] | None,
+    num_parts: int,
+) -> list[int]:
     """Deterministic graph-growing fallback when pymetis is unavailable.
 
     Seeds the heaviest experts first, then assigns remaining experts to the
@@ -147,7 +176,7 @@ def _fallback_partition(loads: list[float], num_parts: int) -> list[int]:
     num_experts = len(loads)
     parts = [-1] * num_experts
     part_loads = [0.0] * num_parts
-    node_weights, adjacency, edge_weights = _build_expert_graph(loads)
+    node_weights, adjacency, edge_weights = _build_expert_graph(loads, pair_counts)
 
     order = sorted(range(num_experts), key=lambda idx: (-loads[idx], idx))
     seeds = order[:num_parts]
@@ -176,7 +205,11 @@ def _fallback_partition(loads: list[float], num_parts: int) -> list[int]:
     return parts
 
 
-def _partition_experts(loads: list[float], num_gpus: int) -> dict[str, int]:
+def _partition_experts(
+    loads: list[float],
+    num_gpus: int,
+    pair_counts: list[list[float]] | None = None,
+) -> dict[str, int]:
     """Return an expert->GPU map using METIS-style graph partitioning."""
     if not loads:
         return {}
@@ -186,9 +219,9 @@ def _partition_experts(loads: list[float], num_gpus: int) -> dict[str, int]:
     if num_parts == num_experts:
         return {str(expert_id): expert_id for expert_id in range(num_experts)}
 
-    parts = _pymetis_partition(loads, num_parts)
+    parts = _pymetis_partition(loads, pair_counts, num_parts)
     if parts is None:
-        parts = _fallback_partition(loads, num_parts)
+        parts = _fallback_partition(loads, pair_counts, num_parts)
 
     experts_by_part: dict[int, list[int]] = defaultdict(list)
     for expert_id, part_id in enumerate(parts):
@@ -220,8 +253,10 @@ def compute_placement(routing: dict) -> dict:
     Args:
         routing: ``{layer_id: [capture, ...]}``
             capture keys used here:
-              ``expert_load``  Tensor[num_experts]  global token counts
-              ``num_gpus``     int                  EP group size
+              ``expert_load``       Tensor[num_experts] global token counts
+              ``expert_pair_load``  Tensor[num_experts, num_experts]
+                                    global pairwise co-activation counts
+              ``num_gpus``          int EP group size
 
     Returns:
         ``{"expert_to_gpu": {...}, "layer_configs": {"<layer_id>": {...}}}``
@@ -239,6 +274,7 @@ def compute_placement(routing: dict) -> dict:
 
     num_gpus = int(first_cap["num_gpus"])
     layer_loads: dict[int, list[float]] = {}
+    layer_pair_loads: dict[int, list[list[float]]] = {}
     for layer_id, captures in routing.items():
         if not captures:
             continue
@@ -246,6 +282,15 @@ def compute_placement(routing: dict) -> dict:
             [capture["expert_load"].detach().cpu() for capture in captures]
         ).sum(dim=0)
         layer_loads[int(layer_id)] = layer_tensor.tolist()
+        if "expert_pair_load" in captures[0]:
+            layer_pair_loads[int(layer_id)] = (
+                captures[0]["expert_pair_load"].detach().cpu().tolist()
+            )
+        elif "topk_ids" in captures[0]:
+            layer_pair_loads[int(layer_id)] = _coactivation_from_topk_ids(
+                captures[0]["topk_ids"],
+                len(layer_loads[int(layer_id)]),
+            )
 
     if not layer_loads:
         return {}
@@ -254,7 +299,11 @@ def compute_placement(routing: dict) -> dict:
         return {}
 
     layer_configs = {
-        str(layer_id): _partition_experts(loads, num_gpus)
+        str(layer_id): _partition_experts(
+            loads,
+            num_gpus,
+            layer_pair_loads.get(layer_id),
+        )
         for layer_id, loads in sorted(layer_loads.items())
     }
 
