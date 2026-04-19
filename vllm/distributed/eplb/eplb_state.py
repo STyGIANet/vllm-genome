@@ -602,9 +602,15 @@ class EplbState:
             for eplb_model_state in self.model_states.values():
                 all_ranks_buffer_ready = False
                 if eplb_model_state.pending_global_ready_check:
-                    all_ranks_buffer_ready = self._all_ranks_buffer_ready(
-                        eplb_model_state
-                    )
+                    if hasattr(self.policy, 'snapshot_for_rebalance'):
+                        # Custom policy: all EP ranks always advance in lock-step
+                        # (guaranteed by the _aggregate_routing_load all_reduce in
+                        # gpu_model_runner).  Skip the extra NCCL all_reduce here.
+                        all_ranks_buffer_ready = bool(eplb_model_state.ep_buffer_ready)
+                    else:
+                        all_ranks_buffer_ready = self._all_ranks_buffer_ready(
+                            eplb_model_state
+                        )
                 if eplb_model_state.ep_buffer_ready and all_ranks_buffer_ready:
                     self.move_to_workspace(
                         model_state=eplb_model_state,
@@ -793,8 +799,13 @@ class EplbState:
                 eplb_model_state.rebalanced = True
                 eplb_model_state.layer_to_transfer = 0
                 eplb_model_state.pending_global_ready_check = True
-        # Signal async thread to start transferring layers
+        # Signal async thread to start transferring layers.
+        # For custom policy, snapshot _dynamic_config → _pending_rebalance before
+        # waking the worker so it reads the config that was current at rearrange()
+        # time, not a later update from the next decode step's callback.
         if self.is_async and (not is_profile):
+            if hasattr(self.policy, 'snapshot_for_rebalance'):
+                self.policy.snapshot_for_rebalance()
             self.rearrange_event.set()
         return None
 

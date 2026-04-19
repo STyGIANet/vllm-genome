@@ -169,6 +169,9 @@ def run_rank(
         policy="custom" if use_placement else "default",
         step_interval=placement_step_interval,
         log_balancedness=False,
+        use_async=use_placement,  # async expert transfer — background thread moves
+                                  # weights layer-by-layer, main thread only stalls
+                                  # for a fast local copy from staging buffer
     )
 
     llm = LLM(

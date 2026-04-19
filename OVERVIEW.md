@@ -88,7 +88,7 @@ flowchart TD
         R["compute_placement\ngreedy bin-pack per layer\nreturns expert-to-GPU mapping\nor empty dict to skip"] --> S
         S["StaticPlacementPolicy.set_dynamic_config\nstored for next eplb_step"] --> T
         T["push_step_snapshot\nclear_routing_data"] --> U{every N passes?}
-        U -->|yes| V["eplb_step\nread _dynamic_config or JSON\nbatch_isend_irecv move weights\ncuda.synchronize\n_commit_eplb_maps"]
+        U -->|yes| V["eplb_step (async)\nsnapshot_for_rebalance\nwake async worker thread\nworker: transfer_layer per layer (background)\nmain: move_from_buffer when buffer ready"]
     end
 
     I --> FWD
@@ -166,17 +166,32 @@ Each forward pass (execute_model)
 │
 └─ eplb_step()  (fires every --placement-step-interval forward passes)
      │
-     ├─ EplbState.step()  →  EplbState.rearrange()
-     │    ├─ policy.rebalance_experts()  ← StaticPlacementPolicy
-     │    │    └─ _build_map_from_config()
-     │    │         ├─ if _dynamic_config set → use it (from compute_placement)
-     │    │         └─ else → read VLLM_EXPERT_CONFIG_PATH JSON, advance _step
+     ├─ EplbState.step()  →  EplbState.rearrange()  [called on main thread]
      │    │
-     │    ├─ rearrange_expert_weights_inplace()  (rebalance_execute.py)
-     │    │    └─ torch.distributed.batch_isend_irecv()  ← NCCL P2P
+     │    │  ── ASYNC PATH (custom policy, use_async=True) ──────────────────
+     │    ├─ policy.snapshot_for_rebalance()
+     │    │    └─ atomically moves _dynamic_config → _pending_rebalance
+     │    │       (locks out concurrent set_dynamic_config() calls)
      │    │
-     │    ├─ torch.cuda.synchronize()    ← wait for all P2P transfers
-     │    └─ _commit_eplb_maps()         ← update routing maps
+     │    ├─ rearrange_event.set()   ← wakes async daemon thread
+     │    │
+     │    │  ── DAEMON THREAD (async_worker.py) ──────────────────────────────
+     │    ├─ transfer_run_periodically() wakes on rearrange_event
+     │    │    ├─ run_rebalance_experts()
+     │    │    │    └─ policy.rebalance_experts()  ← reads _pending_rebalance
+     │    │    │         └─ _build_map_from_config()
+     │    │    │              ├─ _pending_rebalance set → use it (from compute_placement)
+     │    │    │              └─ else → read VLLM_EXPERT_CONFIG_PATH JSON
+     │    │    │
+     │    │    └─ transfer_layer() per MoE layer   ← NCCL P2P on private CUDA stream
+     │    │         ├─ move_to_buffer(): batch_isend_irecv for this layer
+     │    │         └─ cuda_stream.synchronize()   ← wait for this layer's transfer
+     │    │              → sets ep_buffer_ready = 1
+     │    │
+     │    │  ── MAIN THREAD (subsequent forward passes) ─────────────────────
+     │    └─ EplbState.step(): checks ep_buffer_ready (no all_reduce for custom policy)
+     │         └─ move_to_workspace()  ← fast local copy from staging buffer (~10–50 ms)
+     │              └─ _commit_eplb_maps()  ← update routing maps
      │
      └─ Next forward pass uses new expert locations
 ```
@@ -200,6 +215,19 @@ a zero tensor when needed) and returns `{}` only *after* the collective.
 multiproc executor. This de-syncs EP ranks so they hit `all_reduce` at different
 forward-pass counts → NCCL deadlock. `combined_launch.py` passes
 `async_scheduling=False` to `LLM()` to disable it.
+
+**Async snapshot isolation** — In async mode, `snapshot_for_rebalance()` is
+called atomically before `rearrange_event.set()`. This ensures the async worker
+always reads the `_dynamic_config` that was current *when the rebalance fired*,
+not a later value written by the next decode step's `compute_placement()` call.
+Without this snapshot, the worker could silently apply a future step's placement
+to the current weight transfer.
+
+**No spurious all_reduce during async transfer** — The default EPLB async path
+calls `_all_ranks_buffer_ready()` on every forward pass during a transfer; this
+is an NCCL all_reduce. Custom policy skips this because all 8 EP ranks always
+advance in lock-step (enforced by the `_aggregate_routing_load` all_reduce in
+`gpu_model_runner`). A `ep_buffer_ready` local flag suffices.
 
 ---
 
@@ -651,16 +679,118 @@ JSON config resumes from where it left off.
 
 | File | What changed |
 |---|---|
-| `genome_scripts/combined_launch.py` | Primary launch script |
+| `genome_scripts/combined_launch.py` | Primary launch script; `EPLBConfig(use_async=True)` when placement is active |
+| `genome_scripts/benchmark_placement.py` | Throughput benchmarking across placement strategies; produces 6 comparison plots |
 | `genome_scripts/placement_fns.py` | Default `compute_placement()` — greedy bin-packing on `expert_load` |
 | `genome_scripts/test_combined.py` | 13 unit tests (no GPU needed) |
+| `genome_scripts/BENCHMARK.md` | Documents every metric, plot, and result field produced by `benchmark_placement.py` |
 | `vllm/v1/worker/gpu_model_runner.py` | `_aggregate_routing_load()` (EP all-reduce, called every step); `_on_routing_step()` |
-| `vllm/distributed/eplb/policy/custom_policy.py` | `StaticPlacementPolicy`: reads JSON, cycles steps, `set_dynamic_config()` override |
-| `vllm/distributed/eplb/eplb_state.py` | `cuda.synchronize()` before `_commit_eplb_maps()`; `_step` save/restore around profile call |
+| `vllm/distributed/eplb/policy/custom_policy.py` | `StaticPlacementPolicy`: reads JSON, cycles steps, `set_dynamic_config()` override; **async**: `snapshot_for_rebalance()` + `_pending_rebalance` + `_config_lock` |
+| `vllm/distributed/eplb/eplb_state.py` | `cuda.synchronize()` before `_commit_eplb_maps()`; `_step` save/restore around profile call; **async**: calls `snapshot_for_rebalance()` before waking daemon; skips `_all_ranks_buffer_ready()` all_reduce for custom policy |
+| `vllm/config/parallel.py` | Removed `use_async + custom policy` validation restriction |
 | `vllm/distributed/eplb/rebalance_execute.py` | `torch.distributed.batch_isend_irecv` instead of pynccl; full all-to-all warmup in profile |
 | `vllm/v1/worker/worker_base.py` | `drain_step_snapshots_serialized()`, `reset_step_counter()` RPCs |
 | `vllm/model_executor/layers/fused_moe/layer.py` | `_ROUTING_DATA`, `_STEP_ROUTING_SNAPSHOTS` globals and accessors |
 | `vllm/model_executor/layers/fused_moe/router/fused_topk_router.py` | EP-rank-aware token capture (avoids double-counting in DP+EP all-gather mode) |
+
+---
+
+## Async EPLB — how the background transfer works
+
+With `use_async=True` (the default when placement is active), expert weight
+transfers run on a daemon thread with its own `torch.cuda.Stream`. The main
+inference loop is no longer blocked for the full 1–5 s of a Mixtral rebalance.
+Instead:
+
+1. **Rebalance fires** (`eplb_step()`): main thread calls
+   `policy.snapshot_for_rebalance()` (saves current placement to
+   `_pending_rebalance`), then sets `rearrange_event` to wake the daemon.
+
+2. **Daemon transfers layer-by-layer**: for each MoE layer, `transfer_layer()`
+   posts NCCL P2P sends/recvs on the private stream, then
+   `cuda_stream.synchronize()`. When a layer is done `ep_buffer_ready = 1`.
+
+3. **Main thread applies each layer**: on the next few forward passes,
+   `EplbState.step()` checks `ep_buffer_ready`. When set, `move_to_workspace()`
+   does a fast device-to-device copy from the staging buffer (~10–50 ms) and
+   calls `_commit_eplb_maps()` to make the new placement live for routing.
+
+The visible stall per rebalance drops from **~transfer time** to
+**~copy time** (typically one order of magnitude faster on PCIe hardware).
+
+---
+
+## Pending optimizations
+
+These optimizations were identified but not yet implemented. Each can be enabled
+independently; they are ordered by expected impact.
+
+### Opt A — Reduce `_aggregate_routing_load` all_reduce frequency
+
+**Files**: `vllm/v1/worker/gpu_model_runner.py`
+
+**What**: Currently `_aggregate_routing_load()` fires an NCCL all_reduce on
+**every** forward pass (even when no rebalance is imminent). On 8-rank EP with a
+256-expert load tensor this costs ~0.5–2 ms per step. At typical decode speeds
+(20–50 ms/step) that is 4–10% overhead just for data collection.
+
+**Change**: Add a counter `_routing_load_step`. Only run the all_reduce every
+`_routing_load_interval` steps (e.g. `placement_step_interval / 4`). On the
+steps in between, accumulate into a local buffer and skip the collective. Flush
+immediately before a rebalance.
+
+**Risk**: All 8 ranks must skip or run the all_reduce on the same steps (barrier
+constraint). Tie the skip condition to `expert_rearrangement_step` (already
+synchronised across ranks) rather than a local counter.
+
+---
+
+### Opt B — Hardware-aware transfer-benefit gate
+
+**Files**: `genome_scripts/placement_fns.py`, `vllm/distributed/eplb/eplb_state.py`
+
+**What**: On PCIe L4 hardware a full Mixtral rebalance moves ~90 GB and costs
+1–5 s. The benefit (better load balance) is only worth the cost if the current
+load imbalance is large enough to matter. On NVLink hardware (25 ms transfer)
+the gate threshold should be near-zero.
+
+**Change**: In `compute_placement()`, compute a load imbalance score
+(e.g. `max_load / mean_load` across all layers). Return `{}` (skip rebalance)
+if the score is below a threshold. Tune the threshold by hardware:
+
+```python
+IMBALANCE_THRESHOLD = {
+    "pcie_l4":  0.25,   # skip if < 25% imbalance — not worth 1–5 s transfer
+    "nvlink":   0.02,   # skip if < 2% — 25 ms transfer is nearly free
+}
+```
+
+Or expose it as a CLI flag `--min-imbalance-to-rebalance`.
+
+**Risk**: Requires knowing or detecting hardware type. Can default to a
+conservative value (e.g. 0.10) that's reasonable for both hardware classes.
+
+---
+
+### Opt C — Prefetch placement decision one step early
+
+**Files**: `vllm/v1/worker/gpu_model_runner.py`, `genome_scripts/placement_fns.py`
+
+**What**: `compute_placement()` runs on the same step that `eplb_step()` fires,
+so the new mapping is computed and then immediately transferred. Doing the
+computation one step earlier (step N−1 instead of N) gives the transfer daemon
+a head start and may reduce the window between "rebalance fires" and "all layers
+applied".
+
+**Change**: In `_on_routing_step()`, track how many steps until the next
+rebalance (`steps_until_rebalance = step_interval - expert_rearrangement_step`).
+When `steps_until_rebalance == 1`, run `compute_placement()` and call
+`StaticPlacementPolicy.set_dynamic_config()` so `_dynamic_config` is already
+set before `rearrange()` calls `snapshot_for_rebalance()` one step later.
+
+**Risk**: Low. The mapping is computed from slightly older load data (one step
+stale), but placement decisions are already based on a sliding window so one
+extra step of staleness is negligible.
 
 ---
 

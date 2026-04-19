@@ -55,6 +55,7 @@ Outputs (written to --output-dir)
 import argparse
 import json
 import os
+import socket
 import statistics
 import time
 from collections import OrderedDict
@@ -203,6 +204,13 @@ def parse_args() -> argparse.Namespace:
                    help="Seconds to wait for each subprocess before force-killing. "
                         "Default 1800 s accommodates PCIe-heavy EPLB on L4 VMs. "
                         "Increase further if running interval_1.")
+    p.add_argument("--inter-scenario-cooldown", type=int, default=65,
+                   dest="inter_scenario_cooldown",
+                   help="Seconds to sleep between scenarios. Linux tcp_fin_timeout "
+                        "is 60 s by default, so vLLM's internal NCCL rendezvous "
+                        "ports stay in TIME_WAIT for 60 s after a scenario exits. "
+                        "The default 65 s gives a 5 s margin over that. "
+                        "Set to 0 to disable (risks EADDRINUSE on later scenarios).")
 
     return p.parse_args()
 
@@ -276,6 +284,8 @@ def run_rank(
         policy="custom" if use_placement else "default",
         step_interval=interval,
         log_balancedness=False,
+        use_async=use_placement,  # async transfer: background thread moves weights,
+                                  # main thread only waits for fast local buffer copy
     )
 
     llm = LLM(
@@ -429,66 +439,142 @@ def run_rank(
 
 # ─── Scenario runner ──────────────────────────────────────────────────────────
 
+def _log_gpu_processes(label: str) -> None:
+    """Log current CUDA processes via nvidia-smi to detect unexpected GPU users.
+
+    Prints a warning if any processes are found — helps distinguish between
+    benchmark crashes caused by port/NCCL issues and those caused by another
+    user's workload occupying GPU memory or NCCL network ports on the same host.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,process_name,used_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
+        if lines:
+            print(f"  [GPU monitor — {label}] WARNING: {len(lines)} CUDA process(es) detected:")
+            for line in lines:
+                parts = (line + ",,").split(",", 2)
+                pid, name, mem = parts[0], parts[1], parts[2]
+                print(f"    PID {pid.strip()}  {name.strip():<35}  {mem.strip()} MiB")
+        else:
+            print(f"  [GPU monitor — {label}] GPUs clear — no CUDA processes detected.")
+    except FileNotFoundError:
+        print(f"  [GPU monitor — {label}] nvidia-smi not found — skipping GPU check.")
+    except Exception as e:
+        print(f"  [GPU monitor — {label}] nvidia-smi error: {e}")
+
+
+def _pick_port(exclude: set) -> int:
+    """Pick a free TCP port using stdlib only (no vllm import in the parent process).
+
+    Using get_open_port() from vllm.utils.network_utils imports vLLM in the parent
+    process, which opens internal sockets that are inherited by every forked child.
+    When all 8 children exit they leave multiple copies of those sockets in TIME_WAIT,
+    eventually causing a recycled port to hit EADDRINUSE on a later scenario.
+
+    We avoid the vllm import entirely and also skip recently-used ports.
+    """
+    for _ in range(100):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        if port not in exclude:
+            return port
+    # Fallback: return whatever we got last (shouldn't happen in practice)
+    return port
+
+
 def run_scenario(
     scenario_name: str,
     scenario_cfg: dict,
     args: argparse.Namespace,
     rank_prompts: list,
     timing_dir: str,
+    used_ports: set,
 ) -> list:
-    """Spawn one subprocess per DP rank for this scenario. Returns list of timing dicts."""
-    from vllm.utils.network_utils import get_open_port
+    """Spawn one subprocess per DP rank for this scenario. Returns list of timing dicts.
+
+    ``used_ports`` is mutated in place: every port tried (success or failure) is
+    added so the next scenario's port selection skips it.
+    """
     dp_master_ip = "127.0.0.1"
-    dp_master_port = get_open_port()
+    MAX_ATTEMPTS = 3
 
-    procs = []
-    for rank in range(args.dp_size):
-        timing_file = os.path.join(timing_dir, f"{scenario_name}_rank{rank}.json")
-        # Remove stale file from a previous (failed) run
-        if os.path.exists(timing_file):
-            os.remove(timing_file)
+    for attempt in range(MAX_ATTEMPTS):
+        dp_master_port = _pick_port(exclude=used_ports)
+        used_ports.add(dp_master_port)
 
-        p = Process(
-            target=run_rank,
-            args=(
-                scenario_name,
-                scenario_cfg["track_routing"],
-                scenario_cfg["callback_placement"],
-                scenario_cfg["placement_step_interval"],
-                timing_file,
-                args.model,
-                args.dp_size,
-                rank,          # local_dp_rank  (single-node → same as global)
-                rank,          # global_dp_rank
-                dp_master_ip,
-                dp_master_port,
-                args.tp_size,
-                args.enforce_eager,
-                args.enable_expert_parallel,
-                args.trust_remote_code,
-                args.max_num_seqs,
-                args.max_num_batched_tokens,
-                args.max_model_len,
-                args.gpu_memory_utilization,
-                rank_prompts[rank],
-                args.output_length,
-            ),
-        )
-        p.start()
-        procs.append(p)
+        procs = []
+        for rank in range(args.dp_size):
+            timing_file = os.path.join(timing_dir, f"{scenario_name}_rank{rank}.json")
+            # Remove stale file from a previous (failed) run
+            if os.path.exists(timing_file):
+                os.remove(timing_file)
 
-    failed = 0
-    for p in procs:
-        p.join(timeout=args.timeout)
-        if p.exitcode is None:
-            print(f"  WARNING: Killing process {p.pid} (timeout after {args.timeout} s)")
-            p.kill()
-            failed += 1
-        elif p.exitcode != 0:
-            failed += 1
+            p = Process(
+                target=run_rank,
+                args=(
+                    scenario_name,
+                    scenario_cfg["track_routing"],
+                    scenario_cfg["callback_placement"],
+                    scenario_cfg["placement_step_interval"],
+                    timing_file,
+                    args.model,
+                    args.dp_size,
+                    rank,          # local_dp_rank  (single-node → same as global)
+                    rank,          # global_dp_rank
+                    dp_master_ip,
+                    dp_master_port,
+                    args.tp_size,
+                    args.enforce_eager,
+                    args.enable_expert_parallel,
+                    args.trust_remote_code,
+                    args.max_num_seqs,
+                    args.max_num_batched_tokens,
+                    args.max_model_len,
+                    args.gpu_memory_utilization,
+                    rank_prompts[rank],
+                    args.output_length,
+                ),
+            )
+            p.start()
+            procs.append(p)
 
-    if failed:
-        print(f"  WARNING: {failed}/{len(procs)} rank(s) failed in scenario '{scenario_name}'")
+        t_attempt = time.monotonic()
+        failed = 0
+        for p in procs:
+            p.join(timeout=args.timeout)
+            if p.exitcode is None:
+                print(f"  WARNING: Killing process {p.pid} (timeout after {args.timeout} s)")
+                p.kill()
+                failed += 1
+            elif p.exitcode != 0:
+                failed += 1
+        elapsed = time.monotonic() - t_attempt
+
+        all_failed = failed == len(procs)
+        fast_failure = elapsed < 60  # startup failure, not a runtime crash
+
+        if all_failed and fast_failure and attempt < MAX_ATTEMPTS - 1:
+            print(
+                f"  All {len(procs)} ranks failed within {elapsed:.0f}s on port "
+                f"{dp_master_port} (likely EADDRINUSE). "
+                f"Retrying with a fresh port (attempt {attempt + 2}/{MAX_ATTEMPTS})..."
+            )
+            sleep(3)
+            continue
+
+        if failed:
+            print(f"  WARNING: {failed}/{len(procs)} rank(s) failed in scenario '{scenario_name}'")
+        break
 
     # Collect whatever timing files were written
     timings = []
@@ -881,6 +967,10 @@ def main() -> None:
     print("      Results reflect generate() time only — model loading is excluded.\n")
 
     results: dict = {}
+    # Tracks every port used across all scenarios so _pick_port() never re-selects
+    # one that may still be in TCP TIME_WAIT from a previous scenario's NCCL group.
+    used_ports: set = set()
+    cooldown = args.inter_scenario_cooldown
 
     for idx, scenario_name in enumerate(scenarios_to_run, 1):
         cfg = ALL_SCENARIOS[scenario_name]
@@ -890,7 +980,9 @@ def main() -> None:
         print(f"  {cfg['description']}")
         print(bar)
 
-        timings = run_scenario(scenario_name, cfg, args, rank_prompts, timing_dir)
+        _log_gpu_processes(f"before '{scenario_name}'")
+        timings = run_scenario(scenario_name, cfg, args, rank_prompts, timing_dir, used_ports)
+        _log_gpu_processes(f"after '{scenario_name}'")
 
         if timings:
             agg = aggregate(timings)
@@ -906,6 +998,15 @@ def main() -> None:
             )
         else:
             print(f"\n  WARNING: No timing data for scenario '{scenario_name}' — all ranks failed.")
+
+        # Inter-scenario cooldown — let NCCL TCP connections from this scenario's
+        # 8 child processes age through TIME_WAIT before the next port selection.
+        if idx < len(scenarios_to_run) and cooldown > 0:
+            print(
+                f"\n  Cooling down {cooldown} s before next scenario "
+                f"(NCCL TIME_WAIT connections from {scenario_name} need to clear)..."
+            )
+            sleep(cooldown)
 
     # ── Summary table ─────────────────────────────────────────────────────────
     print_summary_table(results, ALL_SCENARIOS)

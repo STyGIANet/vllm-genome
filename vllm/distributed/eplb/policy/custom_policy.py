@@ -1,4 +1,5 @@
 from .abstract import AbstractEplbPolicy
+import threading
 import torch
 import os
 import json
@@ -35,6 +36,14 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
     # Reset to None after it is consumed (one-shot per step).
     _dynamic_config: dict | None = None
 
+    # In async EPLB mode the async worker calls rebalance_experts() from a
+    # background thread.  snapshot_for_rebalance() atomically moves
+    # _dynamic_config → _pending_rebalance on the main thread (before the
+    # async worker wakes up) so the worker always reads the config that was
+    # current at the time rearrange() fired, not a later update.
+    _pending_rebalance: dict | None = None
+    _config_lock: threading.Lock = threading.Lock()
+
     @classmethod
     def set_dynamic_config(cls, config: dict) -> None:
         """Set the placement config for the NEXT rebalance_experts() call.
@@ -47,12 +56,31 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
         After the cycle the slot is cleared so subsequent calls fall back to
         the JSON file (or the identity mapping if no file is configured).
         """
-        cls._dynamic_config = config
+        with cls._config_lock:
+            cls._dynamic_config = config
+
+    @classmethod
+    def snapshot_for_rebalance(cls) -> None:
+        """Atomically move _dynamic_config → _pending_rebalance.
+
+        Called by EplbState.rearrange() on the main thread just before the
+        async worker is signalled.  This guarantees that the async worker reads
+        the config snapshot that was current when rearrange() fired, even if
+        the main thread later calls set_dynamic_config() with a newer value.
+        """
+        with cls._config_lock:
+            cls._pending_rebalance = cls._dynamic_config
+            cls._dynamic_config = None
 
     @classmethod
     def _build_map_from_config(cls, config_path, num_layers, num_physical_experts, num_gpus, step=0):
-        # 0. Dynamic override from compute_placement() callback (takes priority).
-        if cls._dynamic_config is not None:
+        # 0a. Async snapshot (set by snapshot_for_rebalance() on the main thread
+        #     before the async worker wakes up — takes highest priority).
+        if cls._pending_rebalance is not None:
+            user_config = cls._pending_rebalance
+            cls._pending_rebalance = None  # consume: one-shot per rebalance cycle
+        # 0b. Sync dynamic override from compute_placement() callback.
+        elif cls._dynamic_config is not None:
             user_config = cls._dynamic_config
             cls._dynamic_config = None  # consume: one-shot per rebalance cycle
         # 1. Fallback: If no config, return standard sequential mapping
