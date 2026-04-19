@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import heapq
 import os
+from logging import getLogger
 from collections import defaultdict
 
 import torch
@@ -39,6 +40,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     pymetis = None
 
+logger = getLogger(__name__)
 
 # Skip rebalancing if every layer is already close to perfectly balanced.
 IMBALANCE_THRESHOLD = 0.05
@@ -46,6 +48,7 @@ IMBALANCE_THRESHOLD = 0.05
 # Scale floating/token loads to integer node / edge weights for graph
 # partitioning. The exact value is not important as long as it is stable.
 WEIGHT_SCALE = 1024
+COACT_LOG_TOPK = 8
 
 
 def _scale_weight(value: float) -> int:
@@ -131,6 +134,82 @@ def _build_expert_graph(
             edge_weights[right].append(scaled)
 
     return node_weights, adjacency, edge_weights
+
+
+def _log_coactivation_summary(
+    layer_id: int,
+    loads: list[float],
+    pair_counts: list[list[float]] | None,
+) -> None:
+    """Log the hottest co-activating expert pairs for one layer."""
+    if os.environ.get("VLLM_DP_RANK", "0") != "0":
+        return
+    if not pair_counts:
+        return
+
+    num_experts = len(loads)
+    hot_pairs: list[tuple[float, int, int]] = []
+    for left in range(num_experts):
+        for right in range(left + 1, num_experts):
+            pair_weight = float(pair_counts[left][right])
+            if pair_weight <= 0:
+                continue
+            hot_pairs.append((pair_weight, left, right))
+
+    if not hot_pairs:
+        logger.info("[co-act] layer=%s no co-activated expert pairs", layer_id)
+        return
+
+    hot_pairs.sort(key=lambda item: (-item[0], item[1], item[2]))
+    pair_summary = "  ".join(
+        f"E{left}-E{right}:{int(weight)}"
+        for weight, left, right in hot_pairs[:COACT_LOG_TOPK]
+    )
+    logger.info(
+        "[co-act] layer=%s top_pairs=%s total_pair_weight=%s",
+        layer_id,
+        pair_summary,
+        int(sum(weight for weight, _, _ in hot_pairs)),
+    )
+
+
+def _log_partition_coactivation_summary(
+    layer_id: int,
+    assignment: dict[str, int],
+    pair_counts: list[list[float]] | None,
+) -> None:
+    """Log how much co-activation is kept within partitions vs cut across them."""
+    if os.environ.get("VLLM_DP_RANK", "0") != "0":
+        return
+    if not pair_counts:
+        return
+
+    within_weight = 0.0
+    cut_weight = 0.0
+    num_experts = len(pair_counts)
+    for left in range(num_experts):
+        for right in range(left + 1, num_experts):
+            pair_weight = float(pair_counts[left][right])
+            if pair_weight <= 0:
+                continue
+            left_gpu = assignment.get(str(left))
+            right_gpu = assignment.get(str(right))
+            if left_gpu is None or right_gpu is None:
+                continue
+            if left_gpu == right_gpu:
+                within_weight += pair_weight
+            else:
+                cut_weight += pair_weight
+
+    total_weight = within_weight + cut_weight
+    kept_ratio = 0.0 if total_weight == 0 else within_weight / total_weight
+    logger.info(
+        "[co-act] layer=%s kept=%s cut=%s kept_ratio=%.4f",
+        layer_id,
+        int(within_weight),
+        int(cut_weight),
+        kept_ratio,
+    )
 
 
 def _pymetis_partition(
@@ -298,14 +377,26 @@ def compute_placement(routing: dict) -> dict:
     if all(_is_balanced(loads, num_gpus) for loads in layer_loads.values()):
         return {}
 
-    layer_configs = {
-        str(layer_id): _partition_experts(
+    for layer_id, loads in sorted(layer_loads.items()):
+        _log_coactivation_summary(
+            layer_id,
+            loads,
+            layer_pair_loads.get(layer_id),
+        )
+
+    layer_configs: dict[str, dict[str, int]] = {}
+    for layer_id, loads in sorted(layer_loads.items()):
+        assignment = _partition_experts(
             loads,
             num_gpus,
             layer_pair_loads.get(layer_id),
         )
-        for layer_id, loads in sorted(layer_loads.items())
-    }
+        layer_configs[str(layer_id)] = assignment
+        _log_partition_coactivation_summary(
+            layer_id,
+            assignment,
+            layer_pair_loads.get(layer_id),
+        )
 
     global_loads = torch.tensor(
         [loads for _, loads in sorted(layer_loads.items())], dtype=torch.float32

@@ -16,10 +16,35 @@ forwards all arguments to ``combined_launch.py`` while forcing
 
 from __future__ import annotations
 
+import importlib.util
+import os
+import subprocess
 import sys
 
 
+def _ensure_pymetis_installed() -> None:
+    """Install pymetis into the active repo environment when it is missing."""
+    if importlib.util.find_spec("pymetis") is not None:
+        return
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cmd = ["uv", "pip", "install", "pymetis"]
+    print("[METIS] pymetis not found; installing with:", " ".join(cmd), flush=True)
+    try:
+        subprocess.run(cmd, check=True, cwd=repo_root)
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            "Failed to install pymetis with `uv pip install pymetis`."
+        ) from exc
+
+    if importlib.util.find_spec("pymetis") is None:
+        raise SystemExit(
+            "pymetis still unavailable after installation attempt."
+        )
+
+
 def main() -> None:
+    _ensure_pymetis_installed()
     argv = sys.argv[1:]
     if "--expert-placement-config" in argv:
         raise SystemExit(

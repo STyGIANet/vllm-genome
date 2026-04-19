@@ -58,6 +58,7 @@ pip-delete-this-directory.txt
 
 #logs
 cd genome_scripts/logs/
+logs/
 
 # Unit test / coverage reports
 htmlcov/
