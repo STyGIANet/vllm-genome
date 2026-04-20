@@ -18,4 +18,7 @@ echo "kv_connectors.txt done"
 
 uv pip install -e . --no-build-isolation
 
+cd ./DeepEP-SM8x
+./install-deepep.sh
+
 cmake --preset release
