@@ -317,9 +317,24 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         num_rdma_bytes = None
         num_qps_per_rank = None
 
-        if self.internode and not envs.VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE:
+        # With DISABLE_SM90_FEATURES builds (is_sm90_compiled() == False,
+        # NUM_MAX_NVL_PEERS=1), NVLink is disabled and ALL multi-rank
+        # communication routes through RDMA regardless of node topology.
+        # Detect this and always allocate an RDMA buffer for multi-rank groups.
+        try:
+            import deep_ep_cpp  # type: ignore[import-not-found]
+            non_sm90_rdma_needed = (
+                not deep_ep_cpp.is_sm90_compiled() and self.world_size > 1
+            )
+        except Exception:
+            non_sm90_rdma_needed = False
+
+        if (
+            self.internode
+            and not envs.VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE
+        ) or non_sm90_rdma_needed:
             num_rdma_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
-            num_qps_per_rank = self.num_sms // 2
+            num_qps_per_rank = self.num_sms // 2 if self.internode else 1
         else:
             num_rdma_bytes = 0
             num_qps_per_rank = 1

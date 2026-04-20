@@ -6,11 +6,13 @@ export NVSHMEM_DIR=/usr/local/nvshmem
 export LD_LIBRARY_PATH=/usr/local/nvshmem/lib:${LD_LIBRARY_PATH}
 
 if [ "$RANK" -eq "$HEAD_RANK" ]; then
+	echo "using api-server-count for $RANK"
   EXTRA_ARGS="--api-server-count=1"
 else
+	echo "using --headless for $RANK"
   EXTRA_ARGS="--headless"
 fi
-
+echo "$RANK, $HEAD_RANK"
 vllm serve $MODEL \
 	  --tensor-parallel-size 1 \
 	  --data-parallel-size ${WORLD_SIZE} \
