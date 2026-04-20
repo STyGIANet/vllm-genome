@@ -1,0 +1,3 @@
+[submodule "DeepEP-SM8x"]
+	path = DeepEP-SM8x
+	url = git@github.com:STyGIANet/DeepEP-SM8x.git
