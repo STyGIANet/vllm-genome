@@ -18,7 +18,4 @@ echo "kv_connectors.txt done"
 
 uv pip install -e . --no-build-isolation
 
-uv pip uninstall torch torchvision
-uv pip install torch torchvision
-
 cmake --preset release
