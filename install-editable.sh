@@ -1,6 +1,7 @@
 #!/bin/bash
 
 source .venv/bin/activate
+uv pip install pip # later DeepEP will require pip
 uv pip install -r requirements/build.txt
 echo "build.txt done"
 uv pip install -r requirements/common.txt
