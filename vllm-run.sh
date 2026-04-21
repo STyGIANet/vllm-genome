@@ -29,6 +29,5 @@ mpirun -np 8 -H \
 	-x VLLM_SKIP_DEEPEP_DUMMY_BATCH="${VLLM_SKIP_DEEPEP_DUMMY_BATCH}" \
 	-x CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING}" \
 	--map-by ppr:1:node \
-	-x CHAT_TEMPLATE=${SCRIPT_DIR}/template.jinja \
 	-x PLACEMENT_PATH="${SCRIPT_DIR}/genome_scripts/placement_fns.py" \
 	nswrap --python ${SCRIPT_DIR}/.venv ${SCRIPT_DIR}/vllm-ns-worker.sh $MODEL
