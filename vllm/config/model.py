@@ -223,6 +223,9 @@ class ModelConfig:
     """Linear-combination weight for the normalized load routing score."""
     load_balancer_debug: bool = False
     """Whether to print expert/KV/load routing diagnostics during serving."""
+    max_pending_requests_per_engine: int = 0
+    """Frontend-side admission limit for requests pending at each engine.
+    Set to 0 to disable the frontend dispatch queue."""
     placement_callback_path: str | None = None
     """Optional Python file that exports the EPLB/METIS placement callback."""
     placement_callback_func: str = "compute_placement"

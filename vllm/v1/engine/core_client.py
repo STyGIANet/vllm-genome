@@ -498,6 +498,15 @@ class InFlightRequestInfo:
     is_shadow: bool = False
     primary_request_id: str | None = None
     expert_affinity_prefill_learned: bool = False
+    pending_engine_indices: tuple[int, ...] = ()
+    pending_slot_released: bool = False
+
+
+@dataclass
+class QueuedDispatchRequest:
+    request: EngineCoreRequest
+    dispatched: asyncio.Future[None]
+    cancelled: bool = False
 # ///////////// Expert-based load balancing
 
 
@@ -1437,6 +1446,17 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             else 0.0
         )
         self.load_balancer_debug = model_config.load_balancer_debug
+        self.max_pending_requests_per_engine = max(
+            0, int(model_config.max_pending_requests_per_engine)
+        )
+        self.frontend_dispatch_queue_enabled = (
+            self.max_pending_requests_per_engine > 0
+        )
+        self.engine_pending_request_counts = [0] * len(self.core_engines)
+        self.queued_dispatch_requests: deque[QueuedDispatchRequest] = deque()
+        self.queued_dispatch_by_request_id: dict[str, QueuedDispatchRequest] = {}
+        self.dispatch_queue_lock = asyncio.Lock()
+        self.dispatch_queue_task: asyncio.Task | None = None
         self.coordinator_routing_enabled = (
             self.route_query_address is not None
             and (
@@ -1447,11 +1467,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         if self.load_balancer_debug:
             logger.warning(
                 "LB debug enabled expert_affinity_enabled=%s kv_block_prefix_enabled=%s "
-                "load_score_enabled=%s coordinator_routing_enabled=%s route_query_address=%s",
+                "load_score_enabled=%s coordinator_routing_enabled=%s "
+                "frontend_dispatch_queue_enabled=%s max_pending_requests_per_engine=%d "
+                "route_query_address=%s",
                 self.expert_affinity_enabled,
                 self.kv_block_prefix_enabled,
                 self.load_score_enabled,
                 self.coordinator_routing_enabled,
+                self.frontend_dispatch_queue_enabled,
+                self.max_pending_requests_per_engine,
                 self.route_query_address,
             )
         self.expert_affinity_epoch = 0
@@ -1503,6 +1527,271 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             parallel_config.enable_expert_parallel
             and parallel_config.data_parallel_size > 1
         )
+
+    def _engine_index_for_identity(self, engine: EngineIdentity) -> int:
+        for idx, candidate in enumerate(self.core_engines):
+            if candidate == engine:
+                return idx
+        raise ValueError("Unknown engine identity")
+
+    def _pending_engine_indices_for_engine(
+        self,
+        engine: EngineIdentity,
+    ) -> tuple[int, ...]:
+        if self._should_broadcast_ep_request():
+            return tuple(range(len(self.core_engines)))
+        return (self._engine_index_for_identity(engine),)
+
+    def _can_reserve_pending_indices(self, engine_indices: Sequence[int]) -> bool:
+        if not self.frontend_dispatch_queue_enabled:
+            return True
+        return all(
+            self.engine_pending_request_counts[idx]
+            < self.max_pending_requests_per_engine
+            for idx in engine_indices
+        )
+
+    def _reserve_pending_indices(self, engine_indices: Sequence[int]) -> None:
+        if not self.frontend_dispatch_queue_enabled:
+            return
+        for idx in engine_indices:
+            self.engine_pending_request_counts[idx] += 1
+
+    def _release_pending_indices(self, engine_indices: Sequence[int]) -> None:
+        if not self.frontend_dispatch_queue_enabled:
+            return
+        for idx in engine_indices:
+            if self.engine_pending_request_counts[idx] > 0:
+                self.engine_pending_request_counts[idx] -= 1
+
+    def _ensure_dispatch_queue_task(self) -> None:
+        if not self.frontend_dispatch_queue_enabled:
+            return
+        task = self.dispatch_queue_task
+        if task is None or task.done():
+            self.dispatch_queue_task = asyncio.create_task(
+                self._drain_dispatch_queue(),
+                name="FrontendDispatchQueue",
+            )
+
+    async def _drain_dispatch_queue(self) -> None:
+        while True:
+            item: QueuedDispatchRequest | None = None
+            async with self.dispatch_queue_lock:
+                while self.queued_dispatch_requests:
+                    head = self.queued_dispatch_requests[0]
+                    if not head.cancelled:
+                        break
+                    self.queued_dispatch_requests.popleft()
+                    self.queued_dispatch_by_request_id.pop(
+                        head.request.request_id, None
+                    )
+                if not self.queued_dispatch_requests:
+                    self.dispatch_queue_task = None
+                    return
+
+                item = self.queued_dispatch_requests[0]
+
+            assert item is not None
+            if item.cancelled:
+                continue
+
+            chosen_engine = await self._select_core_engine_for_request_async(
+                item.request
+            )
+            pending_engine_indices = self._pending_engine_indices_for_engine(
+                chosen_engine
+            )
+
+            async with self.dispatch_queue_lock:
+                while self.queued_dispatch_requests:
+                    head = self.queued_dispatch_requests[0]
+                    if not head.cancelled:
+                        break
+                    self.queued_dispatch_requests.popleft()
+                    self.queued_dispatch_by_request_id.pop(
+                        head.request.request_id, None
+                    )
+
+                if (
+                    not self.queued_dispatch_requests
+                    or self.queued_dispatch_requests[0] is not item
+                    or item.cancelled
+                ):
+                    continue
+
+                if not self._can_reserve_pending_indices(pending_engine_indices):
+                    self.dispatch_queue_task = None
+                    return
+
+                self.queued_dispatch_requests.popleft()
+                self.queued_dispatch_by_request_id.pop(item.request.request_id, None)
+                self._reserve_pending_indices(pending_engine_indices)
+
+            try:
+                await self._dispatch_request_to_engine(
+                    item.request,
+                    chosen_engine,
+                    pending_engine_indices,
+                )
+            except Exception as exc:
+                async with self.dispatch_queue_lock:
+                    self._release_pending_indices(pending_engine_indices)
+                if not item.dispatched.done():
+                    item.dispatched.set_exception(exc)
+            else:
+                if not item.dispatched.done():
+                    item.dispatched.set_result(None)
+
+    async def _release_pending_slots_for_request(self, request_id: str) -> None:
+        if not self.frontend_dispatch_queue_enabled:
+            return
+
+        request_info = self.reqs_in_flight.get(request_id)
+        if request_info is None:
+            return
+        if request_info.is_shadow:
+            primary_request_id = request_info.primary_request_id
+            if primary_request_id is None:
+                return
+            request_id = primary_request_id
+
+        async with self.dispatch_queue_lock:
+            current = self.reqs_in_flight.get(request_id)
+            if current is None or current.pending_slot_released:
+                return
+            self._release_pending_indices(current.pending_engine_indices)
+            current.pending_slot_released = True
+
+        self._ensure_dispatch_queue_task()
+
+    async def _select_core_engine_for_request_async(
+        self,
+        request: EngineCoreRequest,
+    ) -> EngineIdentity:
+        if (eng_index := request.data_parallel_rank) is None and (
+            eng_index := get_late_interaction_engine_index(
+                request.pooling_params, len(self.core_engines)
+            )
+        ) is None:
+            if self.coordinator_routing_enabled:
+                self._ensure_route_reply_task()
+                route_socket = self.resources.route_socket
+                assert route_socket is not None
+                loop = asyncio.get_running_loop()
+                call_id = self.route_call_id
+                self.route_call_id += 1
+                route_request = self._build_coordinator_route_request(call_id, request)
+                future = loop.create_future()
+                self.route_request_futures[call_id] = future
+                try:
+                    if self.load_balancer_debug:
+                        logger.warning(
+                            "LB route query send request_id=%s call_id=%d",
+                            request.request_id,
+                            call_id,
+                        )
+                    async with self.route_send_lock:
+                        await asyncio.wait_for(
+                            route_socket.send(msgspec.msgpack.encode(route_request)),
+                            timeout=1.0,
+                        )
+                    if self.load_balancer_debug:
+                        logger.warning(
+                            "LB route query sent request_id=%s call_id=%d",
+                            request.request_id,
+                            call_id,
+                        )
+                    response = await asyncio.wait_for(future, timeout=5.0)
+                except Exception as exc:
+                    self.route_request_futures.pop(call_id, None)
+                    logger.warning(
+                        "Coordinator route query failed for request_id=%s; "
+                        "falling back to local scoring. error=%s",
+                        request.request_id,
+                        exc,
+                    )
+                    return self._select_core_engine_for_request(request)
+                eng_index = response.engine_index
+            else:
+                return self._select_core_engine_for_request(request)
+
+        return self.core_engines[eng_index]
+
+    def _select_core_engine_for_request(
+        self,
+        request: EngineCoreRequest,
+    ) -> EngineIdentity:
+        # Engines are in rank order.
+        if (eng_index := request.data_parallel_rank) is None and (
+            eng_index := get_late_interaction_engine_index(
+                request.pooling_params, len(self.core_engines)
+            )
+        ) is None:
+            expert_scores = (
+                self._get_expert_affinity_scores(request.prompt_token_ids)
+                if self.expert_affinity_weight > 0.0
+                else {}
+            )
+            kv_scores = (
+                self._get_kv_block_prefix_scores(request)
+                if self.kv_block_prefix_weight > 0.0
+                else {}
+            )
+            load_scores = (
+                self._get_load_scores()
+                if self.load_score_weight > 0.0
+                else {}
+            )
+            score_by_index: dict[int, float] = {}
+            if self.expert_affinity_weight > 0.0:
+                for idx, score in expert_scores.items():
+                    score_by_index[idx] = score_by_index.get(idx, 0.0) + (
+                        self.expert_affinity_weight * score
+                    )
+            if self.kv_block_prefix_weight > 0.0:
+                for idx, score in kv_scores.items():
+                    score_by_index[idx] = score_by_index.get(idx, 0.0) + (
+                        self.kv_block_prefix_weight * score
+                    )
+            if self.load_score_weight > 0.0:
+                for idx, score in load_scores.items():
+                    score_by_index[idx] = score_by_index.get(idx, 0.0) + (
+                        self.load_score_weight * score
+                    )
+
+            if score_by_index:
+                best_score = max(score_by_index.values())
+                matched_indices = [
+                    idx for idx, score in score_by_index.items() if score == best_score
+                ]
+                eng_index = self._choose_engine_by_load(matched_indices)
+                if self.load_balancer_debug:
+                    logger.warning(
+                        "LB route request_id=%s expert_scores=%s kv_scores=%s "
+                        "load_scores=%s final_scores=%s chosen_engine=%d best_score=%.4f",
+                        request.request_id,
+                        self._format_score_map(expert_scores),
+                        self._format_score_map(kv_scores),
+                        self._format_score_map(load_scores),
+                        self._format_score_map(score_by_index),
+                        eng_index,
+                        best_score,
+                    )
+            else:
+                eng_index = self._choose_engine_by_load()
+                if self.load_balancer_debug:
+                    logger.warning(
+                        "LB route request_id=%s expert_scores=%s kv_scores=%s "
+                        "load_scores=%s final_scores={} chosen_engine=%d fallback=load_only",
+                        request.request_id,
+                        self._format_score_map(expert_scores),
+                        self._format_score_map(kv_scores),
+                        self._format_score_map(load_scores),
+                        eng_index,
+                    )
+
+        return self.core_engines[eng_index]
 
     def _make_shadow_request_id(self, request_id: str, eng_idx: int) -> str:
         return f"{request_id}::shadow::{eng_idx}"
@@ -1958,151 +2247,45 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self,
         request: EngineCoreRequest,
     ) -> EngineIdentity:
-        if (eng_index := request.data_parallel_rank) is None and (
-            eng_index := get_late_interaction_engine_index(
-                request.pooling_params, len(self.core_engines)
-            )
-        ) is None:
-            if self.coordinator_routing_enabled:
-                self._ensure_route_reply_task()
-                route_socket = self.resources.route_socket
-                assert route_socket is not None
-                loop = asyncio.get_running_loop()
-                call_id = self.route_call_id
-                self.route_call_id += 1
-                route_request = self._build_coordinator_route_request(call_id, request)
-                future = loop.create_future()
-                self.route_request_futures[call_id] = future
-                try:
-                    if self.load_balancer_debug:
-                        logger.warning(
-                            "LB route query send request_id=%s call_id=%d",
-                            request.request_id,
-                            call_id,
-                        )
-                    async with self.route_send_lock:
-                        await asyncio.wait_for(
-                            route_socket.send(msgspec.msgpack.encode(route_request)),
-                            timeout=1.0,
-                        )
-                    if self.load_balancer_debug:
-                        logger.warning(
-                            "LB route query sent request_id=%s call_id=%d",
-                            request.request_id,
-                            call_id,
-                        )
-                    response = await asyncio.wait_for(future, timeout=5.0)
-                except Exception as exc:
-                    self.route_request_futures.pop(call_id, None)
-                    logger.warning(
-                        "Coordinator route query failed for request_id=%s; "
-                        "falling back to local scoring. error=%s",
-                        request.request_id,
-                        exc,
-                    )
-                    return self.get_core_engine_for_request(request)
-                eng_index = response.engine_index
-            else:
-                return self.get_core_engine_for_request(request)
-
-        chosen_engine = self.core_engines[eng_index]
+        chosen_engine = await self._select_core_engine_for_request_async(request)
+        pending_engine_indices = self._pending_engine_indices_for_engine(chosen_engine)
         self.reqs_in_flight[request.request_id] = InFlightRequestInfo(
             request_id=request.request_id,
             engine=chosen_engine,
             prompt_token_ids=request.prompt_token_ids,
+            pending_engine_indices=pending_engine_indices,
         )
         return chosen_engine
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
-        # Engines are in rank order.
-        if (eng_index := request.data_parallel_rank) is None and (
-            eng_index := get_late_interaction_engine_index(
-                request.pooling_params, len(self.core_engines)
-            )
-        ) is None:
-            expert_scores = (
-                self._get_expert_affinity_scores(request.prompt_token_ids)
-                if self.expert_affinity_weight > 0.0
-                else {}
-            )
-            kv_scores = (
-                self._get_kv_block_prefix_scores(request)
-                if self.kv_block_prefix_weight > 0.0
-                else {}
-            )
-            load_scores = (
-                self._get_load_scores()
-                if self.load_score_weight > 0.0
-                else {}
-            )
-            score_by_index: dict[int, float] = {}
-            if self.expert_affinity_weight > 0.0:
-                for idx, score in expert_scores.items():
-                    score_by_index[idx] = score_by_index.get(idx, 0.0) + (
-                        self.expert_affinity_weight * score
-                    )
-            if self.kv_block_prefix_weight > 0.0:
-                for idx, score in kv_scores.items():
-                    score_by_index[idx] = score_by_index.get(idx, 0.0) + (
-                        self.kv_block_prefix_weight * score
-                    )
-            if self.load_score_weight > 0.0:
-                for idx, score in load_scores.items():
-                    score_by_index[idx] = score_by_index.get(idx, 0.0) + (
-                        self.load_score_weight * score
-                    )
-
-            if score_by_index:
-                best_score = max(score_by_index.values())
-                matched_indices = [
-                    idx for idx, score in score_by_index.items() if score == best_score
-                ]
-                eng_index = self._choose_engine_by_load(matched_indices)
-                if self.load_balancer_debug:
-                    logger.warning(
-                        "LB route request_id=%s expert_scores=%s kv_scores=%s "
-                        "load_scores=%s final_scores=%s chosen_engine=%d best_score=%.4f",
-                        request.request_id,
-                        self._format_score_map(expert_scores),
-                        self._format_score_map(kv_scores),
-                        self._format_score_map(load_scores),
-                        self._format_score_map(score_by_index),
-                        eng_index,
-                        best_score,
-                    )
-            else:
-                eng_index = self._choose_engine_by_load()
-                if self.load_balancer_debug:
-                    logger.warning(
-                        "LB route request_id=%s expert_scores=%s kv_scores=%s "
-                        "load_scores=%s final_scores={} chosen_engine=%d fallback=load_only",
-                        request.request_id,
-                        self._format_score_map(expert_scores),
-                        self._format_score_map(kv_scores),
-                        self._format_score_map(load_scores),
-                        eng_index,
-                    )
-
-        chosen_engine = self.core_engines[eng_index]
+        chosen_engine = self._select_core_engine_for_request(request)
+        pending_engine_indices = self._pending_engine_indices_for_engine(chosen_engine)
         # Record which engine is chosen for this request, to handle aborts.
         self.reqs_in_flight[request.request_id] = InFlightRequestInfo(
             request_id=request.request_id,
             engine=chosen_engine,
             prompt_token_ids=request.prompt_token_ids,
+            pending_engine_indices=pending_engine_indices,
         )
         return chosen_engine
 
-    async def add_request_async(self, request: EngineCoreRequest) -> None:
-        self._ensure_stats_update_task()
-        if self.coordinator_routing_enabled:
-            self._ensure_route_reply_task()
-
+    async def _dispatch_request_to_engine(
+        self,
+        request: EngineCoreRequest,
+        chosen_engine: EngineIdentity,
+        pending_engine_indices: Sequence[int] = (),
+    ) -> None:
         request.current_wave = self.current_wave
         request.client_index = self.client_index
-
-        chosen_engine = await self._get_core_engine_for_request_async(request)
+        self.reqs_in_flight[request.request_id] = InFlightRequestInfo(
+            request_id=request.request_id,
+            engine=chosen_engine,
+            prompt_token_ids=request.prompt_token_ids,
+            pending_engine_indices=tuple(pending_engine_indices),
+        )
         if self._should_broadcast_ep_request():
             send_ops: list[Awaitable[Any]] = []
+            created_shadow_request_ids: list[str] = []
             for eng_idx, engine in enumerate(self.core_engines):
                 if engine == chosen_engine:
                     send_ops.append(
@@ -2126,6 +2309,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     )
                     shadow_request.pooling_params.skip_reading_prefix_cache = True
                     shadow_request.pooling_params.skip_writing_prefix_cache = True
+                created_shadow_request_ids.append(shadow_request.request_id)
                 self._register_shadow_request(
                     request.request_id,
                     shadow_request.request_id,
@@ -2139,6 +2323,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 )
             to_await = asyncio.gather(*send_ops)
         else:
+            created_shadow_request_ids = []
             to_await = self._send_input(
                 EngineCoreRequestType.ADD, request, chosen_engine
             )
@@ -2148,7 +2333,46 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             req_msg = msgspec.msgpack.encode(("FIRST_REQ", wake_exclude))
             await self.first_req_send_socket.send(req_msg)
 
-        await to_await
+        try:
+            await to_await
+        except Exception:
+            self.reqs_in_flight.pop(request.request_id, None)
+            self.primary_req_to_shadows.pop(request.request_id, None)
+            for shadow_request_id in created_shadow_request_ids:
+                self.shadow_req_to_primary.pop(shadow_request_id, None)
+                self.reqs_in_flight.pop(shadow_request_id, None)
+            raise
+
+    async def add_request_async(self, request: EngineCoreRequest) -> None:
+        self._ensure_stats_update_task()
+        if self.coordinator_routing_enabled:
+            self._ensure_route_reply_task()
+
+        if not self.frontend_dispatch_queue_enabled:
+            chosen_engine = await self._select_core_engine_for_request_async(request)
+            pending_engine_indices = self._pending_engine_indices_for_engine(
+                chosen_engine
+            )
+            await self._dispatch_request_to_engine(
+                request,
+                chosen_engine,
+                pending_engine_indices,
+            )
+            self._ensure_output_queue_task()
+            return
+
+        loop = asyncio.get_running_loop()
+        queued_request = QueuedDispatchRequest(
+            request=request,
+            dispatched=loop.create_future(),
+        )
+        async with self.dispatch_queue_lock:
+            self.queued_dispatch_requests.append(queued_request)
+            self.queued_dispatch_by_request_id[request.request_id] = queued_request
+        self._ensure_dispatch_queue_task()
+        await queued_request.dispatched
+        if queued_request.cancelled:
+            return
 
         self._ensure_output_queue_task()
 
@@ -2179,6 +2403,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     continue
                 filtered_outputs.append(output)
             outputs.outputs = filtered_outputs
+
+        if outputs.outputs:
+            for output in outputs.outputs:
+                await self._release_pending_slots_for_request(output.request_id)
 
         if self.expert_affinity_enabled and outputs.outputs:
             for output in outputs.outputs:
@@ -2236,6 +2464,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                         primary_ids_to_abort.add(request_info.primary_request_id)
                     self._cleanup_shadow_request(req_id)
                     continue
+                await self._release_pending_slots_for_request(req_id)
                 filtered_finished_requests.add(req_id)
                 self.reqs_in_flight.pop(req_id, None)
             outputs.finished_requests = filtered_finished_requests or None
@@ -2313,21 +2542,45 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         if not request_ids or self.resources.engine_dead:
             return
 
-        if len(request_ids) == 1:
+        remaining_request_ids = request_ids
+        if self.frontend_dispatch_queue_enabled:
+            cancelled_request_ids = set[str]()
+            async with self.dispatch_queue_lock:
+                for req_id in request_ids:
+                    queued_request = self.queued_dispatch_by_request_id.pop(req_id, None)
+                    if queued_request is None:
+                        continue
+                    queued_request.cancelled = True
+                    cancelled_request_ids.add(req_id)
+                    if not queued_request.dispatched.done():
+                        queued_request.dispatched.set_result(None)
+
+            if cancelled_request_ids:
+                self._ensure_dispatch_queue_task()
+                remaining_request_ids = [
+                    req_id
+                    for req_id in request_ids
+                    if req_id not in cancelled_request_ids
+                ]
+                if not remaining_request_ids:
+                    return
+
+        if len(remaining_request_ids) == 1:
             # Fast-path common case.
-            if request_info := self.reqs_in_flight.get(request_ids[0]):
+            request_id = remaining_request_ids[0]
+            if request_info := self.reqs_in_flight.get(request_id):
                 primary_request_id = (
                     request_info.primary_request_id
                     if request_info.is_shadow
-                    else request_ids[0]
+                    else request_id
                 )
-                await self._abort_requests(request_ids, request_info.engine)
+                await self._abort_requests([request_id], request_info.engine)
                 await self._abort_shadow_requests(primary_request_id)
             return
 
         by_engine = defaultdict[EngineIdentity, list[str]](list)
         primary_request_ids = set[str]()
-        for req_id in request_ids:
+        for req_id in remaining_request_ids:
             if request_info := self.reqs_in_flight.get(req_id):
                 by_engine[request_info.engine].append(req_id)
                 primary_request_ids.add(

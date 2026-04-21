@@ -65,6 +65,8 @@ Main flags are in `vllm/config/model.py` and `vllm/engine/arg_utils.py`.
 
 `--expert-affinity-routing-weight`, `--kv-block-prefix-routing-weight`, and `--load-score-routing-weight` set the weighted sum.
 
+`--max-pending-requests-per-engine` enables frontend-side admission queueing and caps how many requests can be pending at an engine before dispatch waits.
+
 `--placement-callback-path` and `--placement-callback-func` register the online EPLB custom placement callback.
 
 `--enable-return-routed-experts` is used for expert-affinity learning and is auto-enabled by prefix-affinity routing.

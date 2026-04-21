@@ -389,6 +389,9 @@ class EngineArgs:
     )
     load_score_routing_weight: float = ModelConfig.load_score_routing_weight
     load_balancer_debug: bool = ModelConfig.load_balancer_debug
+    max_pending_requests_per_engine: int = (
+        ModelConfig.max_pending_requests_per_engine
+    )
     placement_callback_path: str | None = ModelConfig.placement_callback_path
     placement_callback_func: str = ModelConfig.placement_callback_func
     # ///////////// Expert-based load balancing
@@ -768,6 +771,10 @@ class EngineArgs:
         model_group.add_argument(
             "--load-balancer-debug",
             **model_kwargs["load_balancer_debug"],
+        )
+        model_group.add_argument(
+            "--max-pending-requests-per-engine",
+            **model_kwargs["max_pending_requests_per_engine"],
         )
         model_group.add_argument(
             "--placement-callback-path",
@@ -1486,6 +1493,9 @@ class EngineArgs:
             kv_block_prefix_routing_weight=self.kv_block_prefix_routing_weight,
             load_score_routing_weight=self.load_score_routing_weight,
             load_balancer_debug=self.load_balancer_debug,
+            max_pending_requests_per_engine=(
+                self.max_pending_requests_per_engine
+            ),
             placement_callback_path=self.placement_callback_path,
             placement_callback_func=self.placement_callback_func,
             enable_return_routed_experts=(
