@@ -28,6 +28,7 @@ VLLM_USE_PRECOMPILED=1 uv pip install -e .
 uv pip uninstall nvidia-nvshmem-cu12 nvidia-nvshmem-cu13
 uv pip install nvidia-nvshmem-cu13==3.6.5
 uv pip install packaging
+uv pip install pymetis
 
 cd ./DeepEP-SM8x
 ./install-deepep.sh

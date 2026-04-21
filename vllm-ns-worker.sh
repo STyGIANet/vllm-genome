@@ -32,11 +32,11 @@ vllm serve $MODEL \
 	  --data-parallel-rpc-port 18000 \
 	  ${EXTRA_ARGS} \
 	  ${VLLM_EXTRA_ARGS} \
-      --expert-affinity-routing-weight 0.1 \
+      --expert-affinity-routing-weight 0 \
       --kv-block-prefix-routing-weight 0.1 \
       --load-score-routing-weight 0.1 \
       --enable-eplb \
-      --eplb-config '{"policy":"custom","use_async":true,"step_interval":3000,"window_size":1000}' \
+      --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000}' \
 	  --placement-callback-path ${PLACEMENT_PATH} \
 	  --placement-callback-func compute_placement \
 	  --load-balancer-debug \
