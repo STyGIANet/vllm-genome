@@ -10,10 +10,19 @@ import msgspec.msgpack
 import zmq
 
 from vllm.config import ParallelConfig
+# ///////////// Expert-based load balancing
+from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved, BlockStored, KVEventBatch
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_tcp_uri, make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
-from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
+from vllm.v1.engine import (
+    CoordinatorRouteRequest,
+    CoordinatorRouteResponse,
+    EngineCoreOutputs,
+    EngineCoreRequestType,
+)
+from vllm.v1.prefix_router import ExactBlockPrefixIndex, TokenRadixTree
+# ///////////// Expert-based load balancing
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
@@ -56,7 +65,7 @@ class DPCoordinator:
     request wave / running state changes.
     """
 
-    def _wait_for_zmq_addrs(self, zmq_addr_pipe) -> tuple[str, str, str]:
+    def _wait_for_zmq_addrs(self, zmq_addr_pipe) -> tuple[str, str, str, str]:
         try:
             ready = multiprocessing.connection.wait(
                 [zmq_addr_pipe, self.proc.sentinel], timeout=30
@@ -76,7 +85,19 @@ class DPCoordinator:
             zmq_addr_pipe.close()
 
     def __init__(
-        self, parallel_config: ParallelConfig, enable_wave_coordination: bool = True
+        self,
+        parallel_config: ParallelConfig,
+        enable_wave_coordination: bool = True,
+        # ///////////// Expert-based load balancing
+        enable_prefix_affinity_routing: bool = False,
+        enable_kv_block_prefix_routing: bool = False,
+        enable_load_score_routing: bool = False,
+        expert_affinity_routing_weight: float = 1.0,
+        kv_block_prefix_routing_weight: float = 1.0,
+        load_score_routing_weight: float = 1.0,
+        load_balancer_debug: bool = False,
+        kv_block_prefix_block_size: int = 0,
+        # ///////////// Expert-based load balancing
     ):
         dp_size = parallel_config.data_parallel_size
         assert dp_size > 1, "Coordinator only used for data parallel"
@@ -99,6 +120,8 @@ class DPCoordinator:
             )
 
         front_publish_address = bind_address(local_only)
+        # ///////////// Expert-based load balancing
+        front_route_address = bind_address(local_only)
         back_publish_address = bind_address(local_only_eng)
         back_output_address = bind_address(local_only_eng)
 
@@ -110,10 +133,21 @@ class DPCoordinator:
             kwargs={
                 "engine_count": parallel_config.data_parallel_size,
                 "front_publish_address": front_publish_address,
+                "front_route_address": front_route_address,
                 "back_output_address": back_output_address,
                 "back_publish_address": back_publish_address,
                 "zmq_addr_pipe": child_zmq_addr_pipe,
                 "enable_wave_coordination": enable_wave_coordination,
+                # ///////////// Expert-based load balancing
+                "enable_prefix_affinity_routing": enable_prefix_affinity_routing,
+                "enable_kv_block_prefix_routing": enable_kv_block_prefix_routing,
+                "enable_load_score_routing": enable_load_score_routing,
+                "expert_affinity_routing_weight": expert_affinity_routing_weight,
+                "kv_block_prefix_routing_weight": kv_block_prefix_routing_weight,
+                "load_score_routing_weight": load_score_routing_weight,
+                "load_balancer_debug": load_balancer_debug,
+                "kv_block_prefix_block_size": kv_block_prefix_block_size,
+                # ///////////// Expert-based load balancing
             },
             daemon=True,
         )
@@ -121,11 +155,14 @@ class DPCoordinator:
         child_zmq_addr_pipe.close()
         (
             front_publish_address,
+            front_route_address,
             back_output_address,
             back_publish_address,
         ) = self._wait_for_zmq_addrs(parent_zmq_addr_pipe)
 
         self.stats_publish_address = front_publish_address
+        # ///////////// Expert-based load balancing
+        self.route_query_address = front_route_address
         self.coord_in_address = back_publish_address
         self.coord_out_address = back_output_address
         self._finalizer = weakref.finalize(self, shutdown, [self.proc])
@@ -136,6 +173,11 @@ class DPCoordinator:
     def get_engine_socket_addresses(self) -> tuple[str, str]:
         """Returns tuple of ZMQ input address, output address."""
         return self.coord_in_address, self.coord_out_address
+
+    # ///////////// Expert-based load balancing
+    def get_route_query_address(self) -> str:
+        return self.route_query_address
+    # ///////////// Expert-based load balancing
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown coordinator process with configurable timeout."""
@@ -149,11 +191,20 @@ class EngineState:
 
 
 class DPCoordinatorProc:
+    # ///////////// Expert-based load balancing
     def __init__(
         self,
         engine_count: int,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
+        enable_prefix_affinity_routing: bool = False,
+        enable_kv_block_prefix_routing: bool = False,
+        enable_load_score_routing: bool = False,
+        expert_affinity_routing_weight: float = 1.0,
+        kv_block_prefix_routing_weight: float = 1.0,
+        load_score_routing_weight: float = 1.0,
+        load_balancer_debug: bool = False,
+        kv_block_prefix_block_size: int = 0,
     ):
         set_process_title("DPCoordinator")
         self.ctx = zmq.Context()
@@ -162,29 +213,308 @@ class DPCoordinatorProc:
 
         self.stats_update_interval_ms = min_stats_update_interval_ms
         self.enable_wave_coordination = enable_wave_coordination
+        self.expert_affinity_enabled = enable_prefix_affinity_routing
+        self.kv_block_prefix_enabled = (
+            enable_kv_block_prefix_routing and kv_block_prefix_block_size > 0
+        )
+        self.load_score_enabled = enable_load_score_routing
+        self.expert_affinity_weight = (
+            expert_affinity_routing_weight if self.expert_affinity_enabled else 0.0
+        )
+        self.kv_block_prefix_weight = (
+            kv_block_prefix_routing_weight if self.kv_block_prefix_enabled else 0.0
+        )
+        self.load_score_weight = (
+            load_score_routing_weight if self.load_score_enabled else 0.0
+        )
+        self.load_balancer_debug = load_balancer_debug
+        self.kv_block_prefix_block_size = kv_block_prefix_block_size
+        self.expert_affinity_epoch = 0
+        self.expert_affinity_trees = {
+            rank: TokenRadixTree() for rank in range(engine_count)
+        }
+        self.kv_block_prefix_indices = {
+            rank: ExactBlockPrefixIndex() for rank in range(engine_count)
+        }
+
+    def _clear_prefix_router_state(self, epoch: int) -> None:
+        for tree in self.expert_affinity_trees.values():
+            tree.clear()
+        self.expert_affinity_epoch = epoch
+
+    def _apply_prefix_router_update(
+        self,
+        target_rank: int,
+        epoch: int,
+        prompt_token_ids: list[int],
+    ) -> None:
+        if not self.expert_affinity_enabled or not prompt_token_ids:
+            return
+        if epoch > self.expert_affinity_epoch:
+            self._clear_prefix_router_state(epoch)
+        elif epoch < self.expert_affinity_epoch:
+            return
+
+        tree = self.expert_affinity_trees.get(target_rank)
+        if tree is None:
+            tree = self.expert_affinity_trees[target_rank] = TokenRadixTree()
+        tree.insert(prompt_token_ids)
+
+    def _apply_kv_prefix_event_batch(
+        self,
+        target_rank: int,
+        batch: KVEventBatch,
+    ) -> None:
+        if not self.kv_block_prefix_enabled:
+            return
+
+        index = self.kv_block_prefix_indices.get(target_rank)
+        if index is None:
+            index = ExactBlockPrefixIndex()
+            self.kv_block_prefix_indices[target_rank] = index
+
+        for event in batch.events:
+            if isinstance(event, BlockStored):
+                index.store_blocks(
+                    block_hashes=event.block_hashes,
+                    token_ids=event.token_ids,
+                    block_size=int(event.block_size),
+                    parent_block_hash=event.parent_block_hash,
+                    extra_keys=event.extra_keys,
+                )
+            elif isinstance(event, BlockRemoved):
+                index.remove_blocks(event.block_hashes)
+            elif isinstance(event, AllBlocksCleared):
+                index.clear()
+
+    def _get_expert_affinity_scores(
+        self,
+        prompt_token_ids: list[int] | None,
+    ) -> dict[int, float]:
+        if not self.expert_affinity_enabled or not prompt_token_ids:
+            return {}
+
+        total_tokens = len(prompt_token_ids)
+        if total_tokens <= 0:
+            return {}
+
+        scores: dict[int, float] = {}
+        for rank, tree in self.expert_affinity_trees.items():
+            prefix_len = tree.longest_prefix_length(prompt_token_ids)
+            if prefix_len > 0:
+                scores[rank] = prefix_len / total_tokens
+        return scores
+
+    def _get_kv_block_prefix_scores(
+        self,
+        query: CoordinatorRouteRequest,
+    ) -> dict[int, float]:
+        if not self.kv_block_prefix_enabled or query.kv_total_blocks <= 0:
+            return {}
+
+        zero_block = (
+            (0,) * self.kv_block_prefix_block_size if query.kv_use_zero_tokens else None
+        )
+        scores: dict[int, float] = {}
+        for rank, index in self.kv_block_prefix_indices.items():
+            matched_blocks = index.longest_prefix_blocks_from_parts(
+                token_ids=query.prompt_token_ids,
+                total_blocks=query.kv_total_blocks,
+                block_size=self.kv_block_prefix_block_size,
+                extra_keys=query.kv_extra_keys,
+                zero_block=zero_block,
+            )
+            if matched_blocks > 0:
+                scores[rank] = matched_blocks / query.kv_total_blocks
+        return scores
+
+    def _get_load_scores(self) -> dict[int, float]:
+        if not self.load_score_enabled or not self.engines:
+            return {}
+
+        raw_scores = [
+            (state.request_counts[0] * 4) + state.request_counts[1]
+            for state in self.engines
+        ]
+        min_raw = min(raw_scores)
+        max_raw = max(raw_scores)
+        if max_raw == min_raw:
+            return {idx: 1.0 for idx in range(len(raw_scores))}
+
+        span = float(max_raw - min_raw)
+        return {
+            idx: (max_raw - raw_score) / span
+            for idx, raw_score in enumerate(raw_scores)
+        }
+
+    # ///////////// Expert-based load balancing
+    @staticmethod
+    def _format_score_map(scores: dict[int, float]) -> str:
+        if not scores:
+            return "{}"
+        items = ", ".join(
+            f"{idx}:{score:.4f}" for idx, score in sorted(scores.items())
+        )
+        return "{" + items + "}"
+    # ///////////// Expert-based load balancing
+
+    def _choose_engine_by_load(
+        self,
+        client_index: int,
+        client_count: int,
+        candidate_indices: list[int] | None = None,
+    ) -> int:
+        indices = candidate_indices or list(range(len(self.engines)))
+        if not indices:
+            return 0
+
+        min_score = float("inf")
+        chosen_index = 0
+        eng_start_index = 0
+        if client_count > 0:
+            eng_start_index = (len(self.engines) * client_index) // client_count
+
+        for i in range(len(indices)):
+            idx = indices[(eng_start_index + i) % len(indices)]
+            waiting, running = self.engines[idx].request_counts
+            score = (waiting * 4) + running
+            if score < min_score:
+                min_score = score
+                chosen_index = idx
+
+        self.engines[chosen_index].request_counts[0] += 1
+        return chosen_index
+
+    def _route_request(
+        self,
+        query: CoordinatorRouteRequest,
+    ) -> CoordinatorRouteResponse:
+        expert_scores = (
+            self._get_expert_affinity_scores(query.prompt_token_ids)
+            if self.expert_affinity_weight > 0.0
+            else {}
+        )
+        kv_scores = (
+            self._get_kv_block_prefix_scores(query)
+            if self.kv_block_prefix_weight > 0.0
+            else {}
+        )
+        load_scores = (
+            self._get_load_scores()
+            if self.load_score_weight > 0.0
+            else {}
+        )
+        score_by_index: dict[int, float] = {}
+
+        if self.expert_affinity_weight > 0.0:
+            for idx, score in expert_scores.items():
+                score_by_index[idx] = score_by_index.get(idx, 0.0) + (
+                    self.expert_affinity_weight * score
+                )
+
+        if self.kv_block_prefix_weight > 0.0:
+            for idx, score in kv_scores.items():
+                score_by_index[idx] = score_by_index.get(idx, 0.0) + (
+                    self.kv_block_prefix_weight * score
+                )
+
+        if self.load_score_weight > 0.0:
+            for idx, score in load_scores.items():
+                score_by_index[idx] = score_by_index.get(idx, 0.0) + (
+                    self.load_score_weight * score
+                )
+
+        if score_by_index:
+            best_score = max(score_by_index.values())
+            matched_indices = [
+                idx for idx, score in score_by_index.items() if score == best_score
+            ]
+            chosen_index = self._choose_engine_by_load(
+                query.client_index,
+                query.client_count,
+                matched_indices,
+            )
+            if self.load_balancer_debug:
+                logger.warning(
+                    "LB route request_id=%s expert_scores=%s kv_scores=%s "
+                    "load_scores=%s final_scores=%s chosen_engine=%d best_score=%.4f",
+                    query.request_id,
+                    self._format_score_map(expert_scores),
+                    self._format_score_map(kv_scores),
+                    self._format_score_map(load_scores),
+                    self._format_score_map(score_by_index),
+                    chosen_index,
+                    best_score,
+                )
+            return CoordinatorRouteResponse(
+                call_id=query.call_id,
+                engine_index=chosen_index,
+                score=best_score,
+            )
+
+        chosen_index = self._choose_engine_by_load(
+            query.client_index,
+            query.client_count,
+        )
+        if self.load_balancer_debug:
+            logger.warning(
+                "LB route request_id=%s expert_scores=%s kv_scores=%s "
+                "load_scores=%s final_scores={} chosen_engine=%d fallback=load_only",
+                query.request_id,
+                self._format_score_map(expert_scores),
+                self._format_score_map(kv_scores),
+                self._format_score_map(load_scores),
+                chosen_index,
+            )
+        return CoordinatorRouteResponse(
+            call_id=query.call_id,
+            engine_index=chosen_index,
+        )
+    # ///////////// Expert-based load balancing
 
     @staticmethod
     def run_coordinator(
         engine_count: int,
         front_publish_address: str,
+        # ///////////// Expert-based load balancing
+        front_route_address: str,
         back_output_address: str,
         back_publish_address: str,
         zmq_addr_pipe=None,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
+        enable_prefix_affinity_routing: bool = False,
+        enable_kv_block_prefix_routing: bool = False,
+        enable_load_score_routing: bool = False,
+        expert_affinity_routing_weight: float = 1.0,
+        kv_block_prefix_routing_weight: float = 1.0,
+        load_score_routing_weight: float = 1.0,
+        load_balancer_debug: bool = False,
+        kv_block_prefix_block_size: int = 0,
+        # ///////////// Expert-based load balancing
     ):
         coordinator = DPCoordinatorProc(
             engine_count=engine_count,
             min_stats_update_interval_ms=min_stats_update_interval_ms,
             enable_wave_coordination=enable_wave_coordination,
+            enable_prefix_affinity_routing=enable_prefix_affinity_routing,
+            enable_kv_block_prefix_routing=enable_kv_block_prefix_routing,
+            enable_load_score_routing=enable_load_score_routing,
+            expert_affinity_routing_weight=expert_affinity_routing_weight,
+            kv_block_prefix_routing_weight=kv_block_prefix_routing_weight,
+            load_score_routing_weight=load_score_routing_weight,
+            load_balancer_debug=load_balancer_debug,
+            kv_block_prefix_block_size=kv_block_prefix_block_size,
         )
         try:
             coordinator.process_input_socket(
                 front_publish_address,
+                front_route_address,
                 back_output_address,
                 back_publish_address,
                 zmq_addr_pipe,
             )
+            # ///////////// Expert-based load balancing
         except KeyboardInterrupt:
             logger.info("DP Coordinator process exiting")
         finally:
@@ -194,11 +524,14 @@ class DPCoordinatorProc:
     def process_input_socket(
         self,
         front_publish_address: str,
+        # ///////////// Expert-based load balancing
+        front_route_address: str,
         back_output_address: str,
         back_publish_address: str,
         zmq_addr_pipe=None,
     ):
         decoder = MsgpackDecoder(EngineCoreOutputs)
+        route_decoder = MsgpackDecoder(CoordinatorRouteRequest)
 
         # For tracking request wave progression.
         current_wave = 0
@@ -218,6 +551,12 @@ class DPCoordinatorProc:
                 bind=True,
             ) as publish_front,
             make_zmq_socket(
+                path=front_route_address,  # IPC
+                ctx=self.ctx,
+                socket_type=zmq.ROUTER,
+                bind=True,
+            ) as route_front,
+            make_zmq_socket(
                 path=back_output_address,  # IPC or TCP
                 ctx=self.ctx,
                 socket_type=zmq.PULL,
@@ -235,6 +574,7 @@ class DPCoordinatorProc:
                     zmq_addr_pipe.send(
                         (
                             publish_front.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                            route_front.getsockopt(zmq.LAST_ENDPOINT).decode(),
                             output_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
                             publish_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
                         )
@@ -256,6 +596,7 @@ class DPCoordinatorProc:
 
             poller = zmq.Poller()
             poller.register(publish_front, zmq.POLLIN)
+            poller.register(route_front, zmq.POLLIN)
             poller.register(publish_back, zmq.POLLIN)
             poller.register(output_back, zmq.POLLIN)
             last_publish_time = 0
@@ -321,6 +662,11 @@ class DPCoordinatorProc:
                         if new_engine_count > current_count:
                             for _ in range(new_engine_count - current_count):
                                 self.engines.append(EngineState())
+                            for rank in range(current_count, new_engine_count):
+                                self.expert_affinity_trees[rank] = TokenRadixTree()
+                                self.kv_block_prefix_indices[rank] = (
+                                    ExactBlockPrefixIndex()
+                                )
                             # NOTE(yongji): handle the case
                             # where newly started engines have current_wave = 0
                             # if existing engines just finished a wave
@@ -338,12 +684,35 @@ class DPCoordinatorProc:
                             )
                         else:
                             self.engines = self.engines[:new_engine_count]
+                            self.expert_affinity_trees = {
+                                rank: tree
+                                for rank, tree in self.expert_affinity_trees.items()
+                                if rank < new_engine_count
+                            }
+                            self.kv_block_prefix_indices = {
+                                rank: index
+                                for rank, index in self.kv_block_prefix_indices.items()
+                                if rank < new_engine_count
+                            }
                             logger.info(
                                 "DPCoordinator scaled down from %s to %s engines",
                                 current_count,
                                 new_engine_count,
                             )
                         continue  # Skip normal engine notification processing
+
+                    if (
+                        isinstance(decoded, (list, tuple))
+                        and len(decoded) == 5
+                        and decoded[0] == "PREFIX_ROUTER_UPDATE"
+                    ):
+                        _, _, target_rank, epoch, prompt_token_ids = decoded
+                        self._apply_prefix_router_update(
+                            int(target_rank),
+                            int(epoch),
+                            list(prompt_token_ids),
+                        )
+                        continue
 
                     # Wave coordination: handle new-request messages from front-end.
                     # Only process these when wave coordination is enabled
@@ -365,6 +734,16 @@ class DPCoordinatorProc:
                                 publish_back, current_wave, engine_to_exclude
                             )
 
+                if route_front in events:
+                    frames = route_front.recv_multipart()
+                    if len(frames) >= 2:
+                        identity = frames[0]
+                        route_request = route_decoder.decode(frames[-1])
+                        route_response = self._route_request(route_request)
+                        route_front.send_multipart(
+                            (identity, msgspec.msgpack.encode(route_response))
+                        )
+
                 if output_back in events:
                     # We received a message from one of the engines.
 
@@ -375,6 +754,13 @@ class DPCoordinatorProc:
                     assert outputs.utility_output is None
 
                     eng_index = outputs.engine_index
+                    if outputs.kv_cache_event_batch is not None:
+                        self._apply_kv_prefix_event_batch(
+                            eng_index,
+                            outputs.kv_cache_event_batch,
+                        )
+                    # ///////////// Expert-based load balancing
+
                     scheduler_stats = outputs.scheduler_stats
                     if scheduler_stats:
                         # 1. Updated request load stats - update our local

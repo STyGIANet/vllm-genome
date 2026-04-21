@@ -10,6 +10,9 @@ import msgspec
 import numpy as np
 import torch
 
+# ///////////// Expert-based load balancing
+from vllm.distributed.kv_events import KVEventBatch
+# ///////////// Expert-based load balancing
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -208,6 +211,11 @@ class EngineCoreOutputs(
     # In DP case, used to signal that a request was received for an
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
+    # ///////////// Expert-based load balancing
+    # In internal-DP LB mode, exact KV prefix-cache updates are relayed to the
+    # coordinator so it can maintain global cached-prefix state for routing.
+    kv_cache_event_batch: KVEventBatch | None = None
+    # ///////////// Expert-based load balancing
 
     def __post_init__(self):
         if self.timestamp == 0.0:
@@ -228,6 +236,35 @@ class EngineCoreRequestType(enum.Enum):
     EXECUTOR_FAILED = b"\x04"
     # Sentinel to wake up input_queue.get() during shutdown.
     WAKEUP = b"\x05"
+
+
+# ///////////// Expert-based load balancing
+class CoordinatorRouteRequest(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    call_id: int
+    client_index: int
+    client_count: int
+    prompt_token_ids: list[int] | None
+    kv_total_blocks: int = 0
+    kv_extra_keys: list[tuple[Any, ...] | None] | None = None
+    kv_use_zero_tokens: bool = False
+    request_id: str | None = None
+
+
+class CoordinatorRouteResponse(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    call_id: int
+    engine_index: int
+    score: float | None = None
+# ///////////// Expert-based load balancing
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):

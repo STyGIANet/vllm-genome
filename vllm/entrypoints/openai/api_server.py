@@ -144,6 +144,10 @@ async def build_async_engine_client_from_engine_args(
             client_index=client_index,
         )
 
+        # ///////////// Expert-based load balancing
+        await async_llm.maybe_register_placement_callback()
+        # ///////////// Expert-based load balancing
+
         # Don't keep the dummy data in memory
         assert async_llm is not None
         await async_llm.reset_mm_cache()

@@ -734,6 +734,30 @@ class EngineCore:
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
+    # ///////////// Expert-based load balancing
+    def prefix_router_compute_owner(
+        self,
+        routed_experts: list,
+        prompt_token_count: int,
+    ) -> dict[str, int] | None:
+        # Execute on worker processes, where the prefix-router owner cache lives.
+        return self.model_executor.collective_rpc(
+            "prefix_router_compute_owner",
+            args=(routed_experts, prompt_token_count),
+        )[0]
+
+    def prefix_router_upsert(
+        self,
+        prompt_token_ids: list[int],
+        epoch: int,
+    ) -> None:
+        # Update the target engine's worker-local prefix trees.
+        self.model_executor.collective_rpc(
+            "prefix_router_upsert",
+            args=(prompt_token_ids, epoch),
+        )
+    # ///////////// Expert-based load balancing
+
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
 

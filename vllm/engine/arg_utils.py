@@ -374,6 +374,24 @@ class EngineArgs:
     """Arguments for vLLM engine."""
 
     model: str = ModelConfig.model
+    # ///////////// Expert-based load balancing
+    enable_prefix_affinity_routing: bool = ModelConfig.enable_prefix_affinity_routing
+    enable_kv_block_prefix_routing: bool = (
+        ModelConfig.enable_kv_block_prefix_routing
+    )
+    enable_load_score_routing: bool = ModelConfig.enable_load_score_routing
+    expert_affinity_routing_weight: float = (
+        ModelConfig.expert_affinity_routing_weight
+    )
+    prefix_affinity_only_prefill: bool = ModelConfig.prefix_affinity_only_prefill
+    kv_block_prefix_routing_weight: float = (
+        ModelConfig.kv_block_prefix_routing_weight
+    )
+    load_score_routing_weight: float = ModelConfig.load_score_routing_weight
+    load_balancer_debug: bool = ModelConfig.load_balancer_debug
+    placement_callback_path: str | None = ModelConfig.placement_callback_path
+    placement_callback_func: str = ModelConfig.placement_callback_func
+    # ///////////// Expert-based load balancing
     enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
     model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
@@ -718,6 +736,48 @@ class EngineArgs:
             **model_kwargs["allow_deprecated_quantization"],
         )
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
+        # ///////////// Expert-based load balancing
+        model_group.add_argument(
+            "--enable-prefix-affinity-routing",
+            **model_kwargs["enable_prefix_affinity_routing"],
+        )
+        model_group.add_argument(
+            "--enable-kv-block-prefix-routing",
+            **model_kwargs["enable_kv_block_prefix_routing"],
+        )
+        model_group.add_argument(
+            "--enable-load-score-routing",
+            **model_kwargs["enable_load_score_routing"],
+        )
+        model_group.add_argument(
+            "--expert-affinity-routing-weight",
+            **model_kwargs["expert_affinity_routing_weight"],
+        )
+        model_group.add_argument(
+            "--prefix-affinity-only-prefill",
+            **model_kwargs["prefix_affinity_only_prefill"],
+        )
+        model_group.add_argument(
+            "--kv-block-prefix-routing-weight",
+            **model_kwargs["kv_block_prefix_routing_weight"],
+        )
+        model_group.add_argument(
+            "--load-score-routing-weight",
+            **model_kwargs["load_score_routing_weight"],
+        )
+        model_group.add_argument(
+            "--load-balancer-debug",
+            **model_kwargs["load_balancer_debug"],
+        )
+        model_group.add_argument(
+            "--placement-callback-path",
+            **model_kwargs["placement_callback_path"],
+        )
+        model_group.add_argument(
+            "--placement-callback-func",
+            **model_kwargs["placement_callback_func"],
+        )
+        # ///////////// Expert-based load balancing
         model_group.add_argument(
             "--enable-return-routed-experts",
             **model_kwargs["enable_return_routed_experts"],
@@ -1417,7 +1477,22 @@ class EngineArgs:
             quantization=self.quantization,
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
-            enable_return_routed_experts=self.enable_return_routed_experts,
+            # ///////////// Expert-based load balancing
+            enable_prefix_affinity_routing=self.enable_prefix_affinity_routing,
+            enable_kv_block_prefix_routing=self.enable_kv_block_prefix_routing,
+            enable_load_score_routing=self.enable_load_score_routing,
+            expert_affinity_routing_weight=self.expert_affinity_routing_weight,
+            prefix_affinity_only_prefill=self.prefix_affinity_only_prefill,
+            kv_block_prefix_routing_weight=self.kv_block_prefix_routing_weight,
+            load_score_routing_weight=self.load_score_routing_weight,
+            load_balancer_debug=self.load_balancer_debug,
+            placement_callback_path=self.placement_callback_path,
+            placement_callback_func=self.placement_callback_func,
+            enable_return_routed_experts=(
+                self.enable_return_routed_experts
+                or self.enable_prefix_affinity_routing
+            ),
+            # ///////////// Expert-based load balancing
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             disable_sliding_window=self.disable_sliding_window,

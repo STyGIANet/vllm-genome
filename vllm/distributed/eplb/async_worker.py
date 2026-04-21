@@ -72,6 +72,13 @@ def run_rebalance_experts(
 
     # Move the global expert load window to CPU for computation.
     global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
+    if hasattr(eplb_state.policy, "set_graph_metadata") and eplb_stats.coactivation_edges is not None:
+        eplb_state.policy.set_graph_metadata({
+            "coactivation_edges": eplb_stats.coactivation_edges.cpu(),
+            "num_layers": model_state.model.num_moe_layers,
+            "num_experts": model_state.model.num_logical_experts,
+            "num_gpus": eplb_stats.num_gpus,
+        })
     # Compute new expert mappings for the model
     new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
         global_expert_load_window,

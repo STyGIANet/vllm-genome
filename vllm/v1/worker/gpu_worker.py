@@ -341,6 +341,23 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        if os.getenv("VLLM_SKIP_DEEPEP_PROFILE", "0") == "1":
+            conservative_budget = min(
+                self.init_snapshot.free_memory // 2,
+                2 * GiB_bytes,
+            )
+            conservative_budget = max(conservative_budget, GiB_bytes)
+            self.available_kv_cache_memory_bytes = conservative_budget
+            self.non_torch_memory = 0
+            self.peak_activation_memory = 0
+            self.cudagraph_memory_estimate = 0
+            logger.warning(
+                "Skipping GPU profile_run due to VLLM_SKIP_DEEPEP_PROFILE=1; "
+                "using conservative KV cache budget %s GiB for bring-up.",
+                format_gib(conservative_budget),
+            )
+            return int(conservative_budget)
+
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
@@ -548,6 +565,13 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> float:
+        if os.getenv("VLLM_SKIP_DEEPEP_WARMUP", "0") == "1":
+            logger.warning(
+                "Skipping GPU warmup due to VLLM_SKIP_DEEPEP_WARMUP=1; "
+                "this is a bring-up shortcut and may reduce first-request performance."
+            )
+            return 0
+
         warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
@@ -563,6 +587,7 @@ class Worker(WorkerBase):
                 cg_capture_sizes = [] if cg_sizes is None else cg_sizes
                 warmup_sizes = [x for x in warmup_sizes if x not in cg_capture_sizes]
 
+            warmup_sizes = [size for size in warmup_sizes if size <= 64]
             compile_ranges = self.vllm_config.compilation_config.get_compile_ranges()
             # For each compile_range, if none of the batch sizes
             # in warmup_sizes or cudagraph_capture_sizes are in the range,
@@ -573,6 +598,7 @@ class Worker(WorkerBase):
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
 
+        warmup_sizes = [size for size in warmup_sizes if size <= 64]
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
@@ -887,6 +913,12 @@ class Worker(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
+        if os.getenv("VLLM_SKIP_DEEPEP_DUMMY_BATCH") == "1":
+            logger.warning(
+                "Skipping execute_dummy_batch due to "
+                "VLLM_SKIP_DEEPEP_DUMMY_BATCH=1; this is a bring-up shortcut."
+            )
+            return
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 

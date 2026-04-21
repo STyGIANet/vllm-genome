@@ -318,8 +318,8 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         num_qps_per_rank = None
 
         # With DISABLE_SM90_FEATURES builds (is_sm90_compiled() == False,
-        # NUM_MAX_NVL_PEERS=1), NVLink is disabled and ALL multi-rank
-        # communication routes through RDMA regardless of node topology.
+        # NUM_MAX_NVL_PEERS=1), all multi-rank communication routes through
+        # RDMA regardless of node topology.
         # Detect this and always allocate an RDMA buffer for multi-rank groups.
         try:
             import deep_ep_cpp  # type: ignore[import-not-found]
@@ -349,6 +349,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=False,
             num_qps_per_rank=num_qps_per_rank,
+            allow_nvlink_for_low_latency_mode=not non_sm90_rdma_needed,
         )
         if not current_platform.is_rocm():
             kwargs.update(

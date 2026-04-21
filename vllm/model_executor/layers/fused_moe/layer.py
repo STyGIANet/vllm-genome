@@ -57,6 +57,17 @@ def _is_tracking_enabled() -> bool:
     return bool(int(os.getenv("VLLM_TRACK_ROUTING", "0")))
 
 
+def _is_placement_capture_enabled() -> bool:
+    """Check if routing capture for placement is enabled."""
+    import os
+    return bool(int(os.getenv("VLLM_CAPTURE_ROUTING_FOR_PLACEMENT", "0")))
+
+
+def _is_any_routing_capture_enabled() -> bool:
+    """Check if either offline tracking or placement capture is enabled."""
+    return _is_tracking_enabled() or _is_placement_capture_enabled()
+
+
 def get_routing_data() -> dict[int, list[dict]]:
     """Return current step's routing data (all MoE layers)."""
     return _ROUTING_DATA

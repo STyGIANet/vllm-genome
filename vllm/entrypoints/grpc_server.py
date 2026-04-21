@@ -75,6 +75,9 @@ async def serve_grpc(args: argparse.Namespace):
         enable_log_requests=args.enable_log_requests,
         disable_log_stats=args.disable_log_stats,
     )
+    # ///////////// Expert-based load balancing
+    await async_llm.maybe_register_placement_callback()
+    # ///////////// Expert-based load balancing
 
     # Create servicer
     servicer = VllmEngineServicer(async_llm, start_time)

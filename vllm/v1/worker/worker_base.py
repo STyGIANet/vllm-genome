@@ -15,6 +15,9 @@ from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
+# ///////////// Expert-based load balancing
+from vllm.v1.prefix_router import TokenRadixTree
+# ///////////// Expert-based load balancing
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -81,6 +84,161 @@ class WorkerBase:
         # Device and model state
         self.device: torch.device | None = None
         self.model_runner: nn.Module | None = None
+        # ///////////// Expert-based load balancing
+        self._prefix_router_tree = TokenRadixTree()
+        self._prefix_router_tree_epoch = 0
+        self._prefix_router_owner_cache: list[list[tuple[int, ...]]] | None = None
+        self._prefix_router_owner_cache_epoch: int | None = None
+        # ///////////// Expert-based load balancing
+
+    # ///////////// Expert-based load balancing
+    def _prefix_router_enabled(self) -> bool:
+        if not self.model_config.enable_prefix_affinity_routing:
+            return False
+
+        unsupported_reasons = []
+        if self.parallel_config.data_parallel_size <= 1:
+            unsupported_reasons.append("data_parallel_size must be greater than 1")
+        if not self.parallel_config.enable_expert_parallel:
+            unsupported_reasons.append("expert parallelism must be enabled")
+        if self.parallel_config.tensor_parallel_size != 1:
+            unsupported_reasons.append("tensor_parallel_size must equal 1")
+        if self.parallel_config.pipeline_parallel_size != 1:
+            unsupported_reasons.append("pipeline_parallel_size must equal 1")
+        if self.parallel_config.local_engines_only:
+            unsupported_reasons.append(
+                "internal DP load balancing must manage all ranks"
+            )
+
+        if unsupported_reasons:
+            logger.warning_once(
+                "Prefix affinity routing is enabled but unsupported for this "
+                "serving topology; leaving existing routing unchanged. %s",
+                "; ".join(unsupported_reasons),
+            )
+            return False
+        return True
+
+    def _get_prefix_router_epoch(self) -> int:
+        try:
+            from vllm.distributed.eplb.policy.custom_policy import StaticPlacementPolicy
+
+            return StaticPlacementPolicy.get_prefix_router_epoch()
+        except Exception:
+            return 0
+
+    def _build_prefix_router_owner_cache(self) -> list[list[tuple[int, ...]]]:
+        from vllm.model_executor.models.interfaces import is_mixture_of_experts
+
+        model = self.get_model()
+        if not is_mixture_of_experts(model):
+            return []
+
+        num_layers = model.num_moe_layers
+        num_logical_experts = model.num_logical_experts
+        num_ranks = self.parallel_config.data_parallel_size
+
+        owner_sets = [
+            [set() for _ in range(num_logical_experts)] for _ in range(num_layers)
+        ]
+
+        model_runner = self.model_runner
+        eplb_state = getattr(model_runner, "eplb_state", None)
+        if eplb_state is not None and eplb_state.model_states:
+            model_state = next(iter(eplb_state.model_states.values()))
+            physical_to_logical = model_state.physical_to_logical_map.detach().cpu()
+            slots_per_rank = max(physical_to_logical.shape[1] // num_ranks, 1)
+            for layer_idx, logical_ids in enumerate(physical_to_logical.tolist()):
+                for physical_idx, logical_id in enumerate(logical_ids):
+                    if logical_id < 0:
+                        continue
+                    owner_rank = min(physical_idx // slots_per_rank, num_ranks - 1)
+                    owner_sets[layer_idx][logical_id].add(owner_rank)
+        else:
+            strategy = self.parallel_config.expert_placement_strategy
+            if strategy == "round_robin":
+                for layer_idx in range(num_layers):
+                    for expert_id in range(num_logical_experts):
+                        owner_sets[layer_idx][expert_id].add(expert_id % num_ranks)
+            else:
+                base = num_logical_experts // num_ranks
+                remainder = num_logical_experts % num_ranks
+                start_idx = 0
+                for rank_idx in range(num_ranks):
+                    count = base + (1 if rank_idx < remainder else 0)
+                    for expert_id in range(start_idx, start_idx + count):
+                        for layer_idx in range(num_layers):
+                            owner_sets[layer_idx][expert_id].add(rank_idx)
+                    start_idx += count
+
+        return [
+            [tuple(sorted(rank_ids)) for rank_ids in layer_sets]
+            for layer_sets in owner_sets
+        ]
+
+    def _get_prefix_router_owner_cache(self) -> list[list[tuple[int, ...]]]:
+        epoch = self._get_prefix_router_epoch()
+        if (
+            self._prefix_router_owner_cache is None
+            or self._prefix_router_owner_cache_epoch != epoch
+        ):
+            self._prefix_router_owner_cache = self._build_prefix_router_owner_cache()
+            self._prefix_router_owner_cache_epoch = epoch
+        return self._prefix_router_owner_cache
+
+    def prefix_router_compute_owner(
+        self,
+        routed_experts: list,
+        prompt_token_count: int,
+    ) -> dict[str, int] | None:
+        if not self._prefix_router_enabled():
+            return None
+        if not routed_experts or prompt_token_count <= 0:
+            return None
+
+        owner_cache = self._get_prefix_router_owner_cache()
+        if not owner_cache:
+            return None
+
+        num_ranks = self.parallel_config.data_parallel_size
+        num_prompt_tokens = min(prompt_token_count, len(routed_experts))
+        scores = [0] * num_ranks
+        seen_pairs: set[tuple[int, int]] = set()
+
+        for token_layers in routed_experts[:num_prompt_tokens]:
+            for layer_idx, layer_experts in enumerate(token_layers[: len(owner_cache)]):
+                for raw_expert_id in layer_experts:
+                    expert_id = int(raw_expert_id)
+                    if expert_id < 0 or expert_id >= len(owner_cache[layer_idx]):
+                        continue
+                    layer_expert = (layer_idx, expert_id)
+                    if layer_expert in seen_pairs:
+                        continue
+                    seen_pairs.add(layer_expert)
+                    for owner_rank in owner_cache[layer_idx][expert_id]:
+                        scores[owner_rank] += 1
+
+        if not seen_pairs:
+            return None
+
+        target_rank = max(range(num_ranks), key=lambda rank: (scores[rank], -rank))
+        return {
+            "target_rank": target_rank,
+            "epoch": self._get_prefix_router_epoch(),
+        }
+
+    def prefix_router_upsert(self, prompt_token_ids: list[int], epoch: int) -> None:
+        if not self._prefix_router_enabled() or not prompt_token_ids:
+            return
+
+        if epoch > self._prefix_router_tree_epoch:
+            self._prefix_router_tree.clear()
+            self._prefix_router_tree_epoch = epoch
+        elif epoch < self._prefix_router_tree_epoch:
+            return
+
+        self._prefix_router_tree.insert(prompt_token_ids)
+    # ///////////// Expert-based load balancing
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Get specifications for KV cache implementation."""
@@ -222,11 +380,19 @@ class WorkerBase:
             file_path: Absolute path to the Python file containing the function.
             func_name: Name of the callable inside that file.
         """
+        # ///////////// Expert-based load balancing
         import importlib.util
         spec = importlib.util.spec_from_file_location("_placement_callback", file_path)
         mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        self.model_runner._compute_placement_callback = getattr(mod, func_name)
+        callback = getattr(mod, func_name)
+        self.model_runner._compute_placement_callback = callback
+        try:
+            from vllm.distributed.eplb.policy.custom_policy import StaticPlacementPolicy
+            StaticPlacementPolicy.set_compute_placement_callback(callback)
+        except Exception:
+            pass
+        # ///////////// Expert-based load balancing
 
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""

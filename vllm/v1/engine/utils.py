@@ -66,6 +66,11 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+    # ///////////// Expert-based load balancing
+    # ZMQ socket for front-end request/reply routing queries to the DP
+    # coordinator.
+    frontend_route_query_address: str | None = None
+    # ///////////// Expert-based load balancing
 
 
 @dataclass
@@ -899,9 +904,30 @@ def launch_core_engines(
     )
 
     if run_coordinator:
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        # ///////////// Expert-based load balancing
         coordinator = DPCoordinator(
             parallel_config,
             enable_wave_coordination=vllm_config.model_config.is_moe,
+            enable_prefix_affinity_routing=model_config.enable_prefix_affinity_routing,
+            enable_kv_block_prefix_routing=(
+                model_config.enable_kv_block_prefix_routing
+            ),
+            enable_load_score_routing=model_config.enable_load_score_routing,
+            expert_affinity_routing_weight=(
+                model_config.expert_affinity_routing_weight
+            ),
+            kv_block_prefix_routing_weight=(
+                model_config.kv_block_prefix_routing_weight
+            ),
+            load_score_routing_weight=model_config.load_score_routing_weight,
+            load_balancer_debug=model_config.load_balancer_debug,
+            kv_block_prefix_block_size=(
+                cache_config.block_size
+                * parallel_config.decode_context_parallel_size
+                * parallel_config.prefill_context_parallel_size
+            ),
         )
 
         addresses.coordinator_input, addresses.coordinator_output = (
@@ -910,6 +936,10 @@ def launch_core_engines(
         addresses.frontend_stats_publish_address = (
             coordinator.get_stats_publish_address()
         )
+        addresses.frontend_route_query_address = (
+            coordinator.get_route_query_address()
+        )
+        # ///////////// Expert-based load balancing
 
         logger.info("Started DP Coordinator process (PID: %d)", coordinator.proc.pid)
     else:

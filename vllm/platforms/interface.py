@@ -128,7 +128,8 @@ class Platform:
     # the same behavior as PyTorch.
     # NOTE: for the forward part of the model, vLLM has another separate
     # compilation strategy.
-    simple_compile_backend: str = "inductor"
+    simple_compile_backend: str = os.getenv("VLLM_SIMPLE_COMPILE_BACKEND",
+                                            "inductor")
 
     # The backend used for distributed communication.
     dist_backend: str = ""

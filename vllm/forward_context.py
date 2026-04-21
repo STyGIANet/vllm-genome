@@ -315,6 +315,7 @@ def set_forward_context(
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
+    additional_forward_context: dict[str, Any] | None = None,
     skip_compiled: bool = False,
 ):
     """A context manager that stores the current forward context,
@@ -364,6 +365,11 @@ def set_forward_context(
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
     )
+    if additional_forward_context:
+        additional_kwargs = {
+            **(additional_kwargs or {}),
+            **additional_forward_context,
+        }
 
     forward_context = create_forward_context(
         attn_metadata,

@@ -83,6 +83,12 @@ class EplbStats:
     """
     Number of GPUs.
     """
+    coactivation_edges: torch.Tensor | None = None
+    """
+    Compact upper-triangular co-activation edge counts over unique
+    (layer, expert) nodes for the interval since the previous rearrangement.
+    Shape: [num_nodes * (num_nodes - 1) // 2]
+    """
 
 
 @dataclass
@@ -167,6 +173,11 @@ class EplbModelState:
     https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
     """
     model_name: str
+    coactivation_edge_pass: torch.Tensor
+    """
+    Co-activation edge counts accumulated since the previous rearrangement.
+    Shape: [num_nodes * (num_nodes - 1) // 2]
+    """
     model: MixtureOfExperts
     expert_buffer: list[torch.Tensor]
     """
@@ -435,6 +446,12 @@ class EplbState:
             dtype=torch.int32,
             device=self.device,
         )
+        num_nodes = model.num_moe_layers * model.num_logical_experts
+        coactivation_edge_pass = torch.zeros(
+            (num_nodes * (num_nodes - 1) // 2,),
+            dtype=torch.int32,
+            device=self.device,
+        )
         self.expert_load_window_size = self.parallel_config.eplb_config.window_size
         expert_load_window = torch.zeros(
             (
@@ -472,6 +489,7 @@ class EplbState:
             expert_load_pass=expert_load_pass,
             expert_load_window=expert_load_window,
             model_name=model_config.model,
+            coactivation_edge_pass=coactivation_edge_pass,
             model=model,
             expert_buffer=expert_buffer,
             buffer_lock=threading.Lock(),
@@ -530,6 +548,7 @@ class EplbState:
             # Do not record load metrics for dummy steps
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
+                eplb_model_state.coactivation_edge_pass.zero_()
 
         if (
             log_stats
@@ -603,9 +622,9 @@ class EplbState:
                 all_ranks_buffer_ready = False
                 if eplb_model_state.pending_global_ready_check:
                     if hasattr(self.policy, 'snapshot_for_rebalance'):
-                        # Custom policy: all EP ranks always advance in lock-step
-                        # (guaranteed by the _aggregate_routing_load all_reduce in
-                        # gpu_model_runner).  Skip the extra NCCL all_reduce here.
+                        # Custom policy: once a rebalance is in progress, readiness
+                        # is driven by the EPLB rebalance state itself. Skip the
+                        # extra NCCL all_reduce here.
                         all_ranks_buffer_ready = bool(eplb_model_state.ep_buffer_ready)
                     else:
                         all_ranks_buffer_ready = self._all_ranks_buffer_ready(
@@ -662,7 +681,12 @@ class EplbState:
             )
 
         # Map the physical expert load to global logical experts
+        callback_graph_required = bool(
+            hasattr(self.policy, "requires_callback_graph")
+            and self.policy.requires_callback_graph()
+        )
         global_expert_load_windows = []
+        coactivation_edge_passes = []
         for eplb_model_state in self.model_states.values():
             expert_load_window = eplb_model_state.expert_load_window[
                 :, :, : self.num_valid_physical_experts
@@ -687,8 +711,18 @@ class EplbState:
 
             global_expert_load_window = logical_expert_load_window.sum(dim=0)
             global_expert_load_windows.append(global_expert_load_window)
+            if callback_graph_required:
+                coactivation_edge_passes.append(
+                    eplb_model_state.coactivation_edge_pass.clone()
+                )
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
+        if callback_graph_required:
+            global_coactivation_edge_passes = self._allreduce_vector_list(
+                coactivation_edge_passes
+            )
+        else:
+            global_coactivation_edge_passes = [None] * len(self.model_states)
 
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
@@ -721,8 +755,10 @@ class EplbState:
             )
 
         # Get new expert mappings
-        for eplb_model_state, global_expert_load_window in zip(
-            self.model_states.values(), global_expert_load_windows
+        for eplb_model_state, global_expert_load_window, global_coactivation_edges in zip(
+            self.model_states.values(),
+            global_expert_load_windows,
+            global_coactivation_edge_passes,
         ):
             if not self.is_async or is_profile:
                 # Get new expert mappings for the model.
@@ -731,6 +767,17 @@ class EplbState:
                 _saved_policy_step = None
                 if is_profile and hasattr(self.policy, '_step'):
                     _saved_policy_step = self.policy._step
+
+                if (
+                    global_coactivation_edges is not None
+                    and hasattr(self.policy, "set_graph_metadata")
+                ):
+                    self.policy.set_graph_metadata({
+                        "coactivation_edges": global_coactivation_edges.cpu(),
+                        "num_layers": eplb_model_state.model.num_moe_layers,
+                        "num_experts": eplb_model_state.model.num_logical_experts,
+                        "num_gpus": num_gpus,
+                    })
 
                 new_physical_to_logical_map = self.policy.rebalance_experts(
                     global_expert_load_window.cpu(),
@@ -789,6 +836,11 @@ class EplbState:
                     num_groups=num_groups,
                     num_nodes=num_nodes,
                     num_gpus=num_gpus,
+                    coactivation_edges=(
+                        global_coactivation_edges.clone()
+                        if global_coactivation_edges is not None
+                        else None
+                    ),
                 )
                 # Record event after clone to signal async worker
                 # that load stats data is ready
@@ -799,6 +851,8 @@ class EplbState:
                 eplb_model_state.rebalanced = True
                 eplb_model_state.layer_to_transfer = 0
                 eplb_model_state.pending_global_ready_check = True
+            if not is_profile:
+                eplb_model_state.coactivation_edge_pass.zero_()
         # Signal async thread to start transferring layers.
         # For custom policy, snapshot _dynamic_config → _pending_rebalance before
         # waking the worker so it reads the config that was current at rearrange()
@@ -969,6 +1023,39 @@ class EplbState:
         for eplb_model_state in self.model_states.values():
             load_pass_list.append(eplb_model_state.expert_load_pass.clone())
         return self._allreduce_list(load_pass_list)
+
+    def _allreduce_vector_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
+        """All-reduce a list of 1D tensors with potentially different lengths."""
+        if len(tensor_list) == 1:
+            all_reduce(tensor_list[0], group=get_ep_group().device_group)
+            return tensor_list
+        assert all(t.dim() == 1 for t in tensor_list), "All tensors must be 1D."
+        shapes = [t.shape[0] for t in tensor_list]
+        concat_tensor = torch.cat(tensor_list, dim=0)
+        ep_group = get_ep_group().device_group
+        all_reduce(concat_tensor, group=ep_group)
+        all_reduce_list = []
+        offset = 0
+        for size in shapes:
+            all_reduce_list.append(concat_tensor[offset : offset + size])
+            offset += size
+        return all_reduce_list
+
+    def record_coactivation_edges(self, coactivation_edges: torch.Tensor) -> None:
+        """Accumulate local co-activation edge counts on the forward path."""
+        if not self.model_states:
+            return
+        model_state = next(iter(self.model_states.values()))
+        if model_state.coactivation_edge_pass.shape != coactivation_edges.shape:
+            logger.warning(
+                "Skipping co-activation accumulation due to shape mismatch: %s vs %s",
+                tuple(model_state.coactivation_edge_pass.shape),
+                tuple(coactivation_edges.shape),
+            )
+            return
+        model_state.coactivation_edge_pass.add_(
+            coactivation_edges.to(model_state.coactivation_edge_pass)
+        )
 
     @classmethod
     def from_mapping(

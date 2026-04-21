@@ -297,6 +297,11 @@ def run_multi_api_server(args: argparse.Namespace):
             stats_update_address=coordinator.get_stats_publish_address()
             if coordinator
             else None,
+            # ///////////// Expert-based load balancing
+            route_query_address=coordinator.get_route_query_address()
+            if coordinator
+            else None,
+            # ///////////// Expert-based load balancing
             tensor_queue=tensor_queue,
         )
 
@@ -313,6 +318,9 @@ def run_multi_api_server(args: argparse.Namespace):
     if api_server_manager is None:
         api_server_manager_kwargs["stats_update_address"] = (
             addresses.frontend_stats_publish_address
+        )
+        api_server_manager_kwargs["route_query_address"] = (
+            addresses.frontend_route_query_address
         )
         api_server_manager = APIServerProcessManager(**api_server_manager_kwargs)
 

@@ -175,6 +175,9 @@ class APIServerProcessManager:
         output_addresses: list[str],
         target_server_fn: Callable | None = None,
         stats_update_address: str | None = None,
+        # ///////////// Expert-based load balancing
+        route_query_address: str | None = None,
+        # ///////////// Expert-based load balancing
         tensor_queue: Queue | None = None,
     ):
         """Initialize and start API server worker processes.
@@ -209,6 +212,10 @@ class APIServerProcessManager:
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
+            # ///////////// Expert-based load balancing
+            if route_query_address is not None:
+                client_config["route_query_address"] = route_query_address
+            # ///////////// Expert-based load balancing
             if tensor_queue is not None:
                 client_config["tensor_queue"] = tensor_queue
 

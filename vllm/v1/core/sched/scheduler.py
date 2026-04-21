@@ -113,6 +113,21 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
         )
+        # ///////////// Expert-based load balancing
+        self.emit_internal_kv_prefix_routing_events = (
+            vllm_config.model_config.enable_kv_block_prefix_routing
+            and self.parallel_config.data_parallel_size > 1
+            and not self.parallel_config.local_engines_only
+            and self.parallel_config.tensor_parallel_size == 1
+            and self.parallel_config.pipeline_parallel_size == 1
+            and self.cache_config.enable_prefix_caching
+            and self.cache_config.sliding_window is None
+            and not self.is_encoder_decoder
+        )
+        self.enable_kv_cache_events = (
+            self.enable_kv_cache_events or self.emit_internal_kv_prefix_routing_events
+        )
+        # ///////////// Expert-based load balancing
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -1388,6 +1403,10 @@ class Scheduler(SchedulerInterface):
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             status_before_stop = request.status
+            emit_prefill_routed_experts = bool(
+                self.vllm_config.model_config.prefix_affinity_only_prefill
+                and request.num_output_tokens == 0
+            )
 
             # Check for stop and update request status.
             if new_token_ids:
@@ -1415,6 +1434,8 @@ class Scheduler(SchedulerInterface):
                     stopped_running_reqs.add(request)
                 else:
                     stopped_preempted_reqs.add(request)
+            elif emit_prefill_routed_experts and new_token_ids:
+                routed_experts = self._get_routed_experts(request)
 
             # Extract sample logprobs if needed.
             if (
@@ -1496,22 +1517,22 @@ class Scheduler(SchedulerInterface):
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
 
-        # collect KV cache events from KV cache manager
-        events = self.kv_cache_manager.take_events()
+        # ///////////// Expert-based load balancing
+        # collect local GPU KV cache events from KV cache manager
+        local_events = self.kv_cache_manager.take_events()
+        events = list(local_events) if local_events else []
 
         # collect KV cache events from connector
         if self.connector is not None:
             connector_events = self.connector.take_events()
             if connector_events:
-                if events is None:
-                    events = list(connector_events)
-                else:
-                    events.extend(connector_events)
+                events.extend(connector_events)
 
         # publish collected KV cache events
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
+        # ///////////// Expert-based load balancing
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -1545,6 +1566,15 @@ class Scheduler(SchedulerInterface):
                 # outputs this step.
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
             eco.scheduler_stats = stats
+
+        if local_events and self.emit_internal_kv_prefix_routing_events:
+            engine_core_outputs[-1] = EngineCoreOutputs(
+                kv_cache_event_batch=KVEventBatch(
+                    ts=time.time(),
+                    events=local_events,
+                )
+            )
+        # ///////////// Expert-based load balancing
 
         return engine_core_outputs
 

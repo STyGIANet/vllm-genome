@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -14,9 +15,8 @@ from vllm.platforms import current_platform
 if current_platform.is_cuda_alike():
 
     @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-    def eplb_map_to_physical_and_record(
+    def eplb_map_to_physical(
         topk_ids: torch.Tensor,
-        expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
     ) -> torch.Tensor:
@@ -29,7 +29,6 @@ if current_platform.is_cuda_alike():
 
         Args:
             topk_ids: The logical expert ids.
-            expert_load_view: The expert load view.
             logical_to_physical_map: The logical to physical map.
             logical_replica_count: The logical replica count.
 
@@ -59,41 +58,41 @@ if current_platform.is_cuda_alike():
         )
 
         topk_ids = physical_ids
-
-        # 2. Record expert load metrics.
-
-        # TODO(bowen): When using `FusedMoEModularKernel`, this
-        # can be done in a more unified way, since
-        # `FusedMoEPrepareAndFinalizeModular` will return the expert
-        # token count, in some cases directly from the kernel.
-        # However, now there are many code paths not using
-        # the modular kernel, e.g. calling `fused_experts`,
-        # so we decide to keep the logic here.
-        #
-        # If later refactor moved all the MoE kernel calls
-        # to the modular kernel, we can move this logic there
-        # to achieve better efficiency.
-
-        # `expert_load_view`: (num_physical_experts,)
-
-        # `torch.bincount` is not compilable, so use `scatter_add_` instead.
-        topk_ids_flatten = topk_ids.flatten()
-        expert_load_view.scatter_add_(
-            dim=0,
-            index=topk_ids_flatten.long(),
-            src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
-        )
         return topk_ids
 else:
 
-    def eplb_map_to_physical_and_record(
+    def eplb_map_to_physical(
         topk_ids: torch.Tensor,
-        expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
     ) -> torch.Tensor:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
+
+
+def record_expert_load(
+    topk_ids: torch.Tensor,
+    expert_load_view: torch.Tensor,
+) -> None:
+    """Record expert load metrics for the selected physical expert ids."""
+    topk_ids_flatten = topk_ids.flatten()
+    expert_load_view.scatter_add_(
+        dim=0,
+        index=topk_ids_flatten.long(),
+        src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
+    )
+
+
+def record_expert_load_ranges(
+    topk_ids: torch.Tensor,
+    expert_load_view: torch.Tensor,
+    record_ranges: list[tuple[int, int]],
+) -> None:
+    """Record expert load metrics for selected token ranges only."""
+    for start, end in record_ranges:
+        if end <= start:
+            continue
+        record_expert_load(topk_ids[start:end], expert_load_view)
 
 
 class BaseRouter(FusedMoERouter):
@@ -159,12 +158,44 @@ class BaseRouter(FusedMoERouter):
             assert self.eplb_state.expert_load_view is not None
             assert self.eplb_state.logical_to_physical_map is not None
             assert self.eplb_state.logical_replica_count is not None
-            return eplb_map_to_physical_and_record(
+            physical_topk_ids = eplb_map_to_physical(
                 topk_ids=topk_ids,
-                expert_load_view=self.eplb_state.expert_load_view,
                 logical_to_physical_map=self.eplb_state.logical_to_physical_map,
                 logical_replica_count=self.eplb_state.logical_replica_count,
             )
+
+            prefill_record_ranges: list[tuple[int, int]] | None = None
+            if is_forward_context_available():
+                forward_context = get_forward_context()
+                if bool(
+                    forward_context.additional_kwargs.get(
+                        "routing_capture_skip_expert_load", False
+                    )
+                ):
+                    return physical_topk_ids
+                capture_prefill_only = bool(
+                    forward_context.additional_kwargs.get(
+                        "routing_capture_prefill_only_for_placement", False
+                    )
+                )
+                if capture_prefill_only:
+                    prefill_record_ranges = list(
+                        forward_context.additional_kwargs.get(
+                            "routing_capture_prefill_ranges", []
+                        )
+                    )
+
+            if prefill_record_ranges is None:
+                record_expert_load(
+                    physical_topk_ids, self.eplb_state.expert_load_view
+                )
+            else:
+                record_expert_load_ranges(
+                    physical_topk_ids,
+                    self.eplb_state.expert_load_view,
+                    prefill_record_ranges,
+                )
+            return physical_topk_ids
         return topk_ids
 
     def _convert_indices_dtype(

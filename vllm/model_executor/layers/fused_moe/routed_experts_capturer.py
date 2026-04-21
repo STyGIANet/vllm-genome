@@ -171,23 +171,14 @@ class RoutedExpertsCapturer:
             raise RuntimeError("Buffer not initialized. Call init_buffer() first.")
 
         ctx = get_forward_context()
-        if ctx.dp_metadata is None:  # single dp
-            start_loc = 0
-            end_loc = topk_ids.shape[0]
-            token_num_per_dp = topk_ids.shape[0]
-        else:  # multi dp
-            token_num_per_dp = ctx.dp_metadata.num_tokens_across_dp_cpu[self.dp_rank]
-            cumsum = torch.cumsum(ctx.dp_metadata.num_tokens_across_dp_cpu, dim=0)
-            assert cumsum[-1] == topk_ids.shape[0]
-            end_loc = cumsum[self.dp_rank]
-            start_loc = end_loc - token_num_per_dp
+        if ctx.additional_kwargs.get("skip_routed_experts_capture", False):
+            return
+        token_num_per_dp = topk_ids.shape[0]
 
         if layer_id >= self._device_buffer.shape[1]:
             return
 
-        self._device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[
-            start_loc:end_loc, :
-        ]
+        self._device_buffer[:token_num_per_dp, layer_id, :] = topk_ids
 
     def clear_buffer(self) -> None:
         """Clear the device buffer."""

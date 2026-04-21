@@ -29,6 +29,7 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
     Expert movement between steps is logged at INFO level.
     """
 
+    # ///////////// Expert-based load balancing
     _step: int = 0  # incremented each time rebalance_experts is called
 
     # When set via set_dynamic_config(), this dict is used instead of reading
@@ -42,6 +43,9 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
     # async worker wakes up) so the worker always reads the config that was
     # current at the time rearrange() fired, not a later update.
     _pending_rebalance: dict | None = None
+    _graph_metadata: dict | None = None
+    _compute_placement_callback = None
+    _placement_epoch: int = 0
     _config_lock: threading.Lock = threading.Lock()
 
     @classmethod
@@ -60,6 +64,21 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
             cls._dynamic_config = config
 
     @classmethod
+    def set_compute_placement_callback(cls, callback) -> None:
+        with cls._config_lock:
+            cls._compute_placement_callback = callback
+
+    @classmethod
+    def set_graph_metadata(cls, graph_metadata: dict) -> None:
+        with cls._config_lock:
+            cls._graph_metadata = graph_metadata
+
+    @classmethod
+    def requires_callback_graph(cls) -> bool:
+        with cls._config_lock:
+            return cls._compute_placement_callback is not None
+
+    @classmethod
     def snapshot_for_rebalance(cls) -> None:
         """Atomically move _dynamic_config → _pending_rebalance.
 
@@ -73,7 +92,23 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
             cls._dynamic_config = None
 
     @classmethod
-    def _build_map_from_config(cls, config_path, num_layers, num_physical_experts, num_gpus, step=0):
+    def get_prefix_router_epoch(cls) -> int:
+        with cls._config_lock:
+            return cls._placement_epoch
+    # ///////////// Expert-based load balancing
+
+    @classmethod
+    def _build_map_from_config(
+        cls,
+        config_path,
+        num_layers,
+        num_physical_experts,
+        num_gpus,
+        step=0,
+        global_expert_load: torch.Tensor | None = None,
+    ):
+        user_config = None
+        # ///////////// Expert-based load balancing
         # 0a. Async snapshot (set by snapshot_for_rebalance() on the main thread
         #     before the async worker wakes up — takes highest priority).
         if cls._pending_rebalance is not None:
@@ -83,12 +118,27 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
         elif cls._dynamic_config is not None:
             user_config = cls._dynamic_config
             cls._dynamic_config = None  # consume: one-shot per rebalance cycle
+        elif cls._compute_placement_callback is not None and cls._graph_metadata is not None:
+            graph_metadata = cls._graph_metadata
+            cls._graph_metadata = None
+            routing = {
+                layer_idx: [{
+                    "expert_load": global_expert_load[layer_idx],
+                    "num_gpus": num_gpus,
+                }]
+                for layer_idx in range(num_layers)
+            }
+            routing["__graph__"] = graph_metadata
+            user_config = cls._compute_placement_callback(routing)
+            if not user_config:
+                user_config = None
+        # ///////////// Expert-based load balancing
         # 1. Fallback: If no config, return standard sequential mapping
-        elif not config_path or not os.path.exists(config_path):
+        if user_config is None and (not config_path or not os.path.exists(config_path)):
             logger.warning(f"Config path {config_path} not found. Falling back to default.")
             new_map = torch.arange(num_physical_experts, dtype=torch.int32)
             return new_map.unsqueeze(0).expand(num_layers, -1).contiguous()
-        else:
+        elif user_config is None:
             with open(config_path, 'r') as f:
                 user_config = json.load(f)
 
@@ -222,7 +272,12 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
         config_path = os.getenv("VLLM_EXPERT_CONFIG_PATH")
 
         new_physical_to_logical_map = cls._build_map_from_config(
-            config_path, num_layers, num_replicas, num_gpus, step=cls._step
+            config_path,
+            num_layers,
+            num_replicas,
+            num_gpus,
+            step=cls._step,
+            global_expert_load=global_expert_load,
         )
 
         if is_rank0:
@@ -241,6 +296,18 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
                 for g in range(num_gpus)
             )
             logger.info("[EPLB step %d] %s", cls._step, mapping_str)
+
+        maps_changed = (
+            current_physical_to_logical_map is None
+            or not torch.equal(
+                current_physical_to_logical_map.cpu(), new_physical_to_logical_map
+            )
+        )
+        if maps_changed:
+            # ///////////// Expert-based load balancing
+            with cls._config_lock:
+                cls._placement_epoch += 1
+            # ///////////// Expert-based load balancing
 
         cls._step += 1
         return new_physical_to_logical_map

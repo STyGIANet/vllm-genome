@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import copy
 import contextlib
 import multiprocessing
 import queue
@@ -21,6 +22,8 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
+# ///////////// Expert-based load balancing
+from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved, BlockStored, KVEventBatch
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -33,6 +36,8 @@ from vllm.utils.network_utils import (
     make_zmq_socket,
 )
 from vllm.v1.engine import (
+    CoordinatorRouteRequest,
+    CoordinatorRouteResponse,
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
     EngineCoreOutputs,
@@ -54,6 +59,13 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.prefix_router import (
+    build_query_block_extra_keys,
+    ExactBlockPrefixIndex,
+    TokenRadixTree,
+    prepare_block_prefix_query,
+)
+# ///////////// Expert-based load balancing
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
@@ -124,6 +136,17 @@ class EngineCoreClient(ABC):
         if parallel_config.data_parallel_size > 1:
             if parallel_config.data_parallel_external_lb:
                 # External load balancer - client per DP rank.
+                # ///////////// Expert-based load balancing
+                if (
+                    vllm_config.model_config.enable_prefix_affinity_routing
+                    or vllm_config.model_config.enable_kv_block_prefix_routing
+                    or vllm_config.model_config.enable_load_score_routing
+                ):
+                    logger.warning_once(
+                        "Internal routing preference scoring is enabled but external DP "
+                        "load balancing is active; leaving existing routing unchanged."
+                    )
+                # ///////////// Expert-based load balancing
                 return DPAsyncMPClient(*client_args)
             # Internal load balancer - client balances to all DP ranks.
             return DPLBAsyncMPClient(*client_args)
@@ -379,8 +402,12 @@ class BackgroundResources:
     first_req_send_socket: zmq.asyncio.Socket | None = None
     first_req_rcv_socket: zmq.asyncio.Socket | None = None
     stats_update_socket: zmq.asyncio.Socket | None = None
+    # ///////////// Expert-based load balancing
+    route_socket: zmq.asyncio.Socket | None = None
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
+    route_reply_task: asyncio.Task | None = None
+    # ///////////// Expert-based load balancing
     shutdown_path: str | None = None
 
     # Set if any of the engines are dead. Here so that the output
@@ -406,9 +433,14 @@ class BackgroundResources:
                 self.first_req_send_socket,
                 self.first_req_rcv_socket,
                 self.stats_update_socket,
+                self.route_socket,
             )
 
-            tasks = (self.output_queue_task, self.stats_update_task)
+            tasks = (
+                self.output_queue_task,
+                self.stats_update_task,
+                self.route_reply_task,
+            )
 
             def close_sockets_and_tasks():
                 close_sockets(sockets)
@@ -457,6 +489,18 @@ class ElasticScalingCache:
     pending_notifications: dict[EEPNotificationType, set[int]]
 
 
+# ///////////// Expert-based load balancing
+@dataclass
+class InFlightRequestInfo:
+    request_id: str
+    engine: EngineIdentity
+    prompt_token_ids: list[int] | None
+    is_shadow: bool = False
+    primary_request_id: str | None = None
+    expert_affinity_prefill_learned: bool = False
+# ///////////// Expert-based load balancing
+
+
 class MPClient(EngineCoreClient):
     """
     MPClient: base client for multi-proc EngineCore.
@@ -500,12 +544,16 @@ class MPClient(EngineCoreClient):
             enable_input_socket_handover = parallel_config.enable_elastic_ep
 
             self.stats_update_address: str | None = None
+            # ///////////// Expert-based load balancing
+            self.route_query_address: str | None = None
             tensor_queue: Queue | None = None
             if client_addresses:
                 # Engines are managed externally to this client.
                 input_address = client_addresses["input_address"]
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
+                self.route_query_address = client_addresses.get("route_query_address")
+                # ///////////// Expert-based load balancing
                 # Tensor queues passed via client_addresses for multi-API-server case
                 tensor_queue = client_addresses.get("tensor_queue")  # type: ignore[assignment]
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
@@ -539,10 +587,13 @@ class MPClient(EngineCoreClient):
                     self.resources.engine_manager = engine_manager
 
                 self.stats_update_address = addresses.frontend_stats_publish_address
+                # ///////////// Expert-based load balancing
+                self.route_query_address = addresses.frontend_route_query_address
                 if coordinator is not None:
                     assert self.stats_update_address == (
                         coordinator.get_stats_publish_address()
                     )
+                # ///////////// Expert-based load balancing
 
             # Serialization setup with tensor queues for multimodal tensor IPC.
             tensor_ipc_sender: TensorIpcSender | None = None
@@ -1261,7 +1312,27 @@ class DPAsyncMPClient(AsyncMPClient):
                         continue
 
                     # Update local load-balancing state.
-                    counts, wave, running = msgspec.msgpack.decode(buf)
+                    # ///////////// Expert-based load balancing
+                    decoded = msgspec.msgpack.decode(buf)
+                    if (
+                        isinstance(decoded, (list, tuple))
+                        and len(decoded) == 5
+                        and decoded[0] == "PREFIX_ROUTER_UPDATE"
+                    ):
+                        if hasattr(self, "_handle_prefix_router_coordinator_update"):
+                            self._handle_prefix_router_coordinator_update(decoded)
+                        continue
+                    if (
+                        isinstance(decoded, (list, tuple))
+                        and len(decoded) == 3
+                        and decoded[0] == "KV_PREFIX_EVENT_BATCH"
+                    ):
+                        if hasattr(self, "_handle_kv_prefix_coordinator_update"):
+                            self._handle_kv_prefix_coordinator_update(decoded)
+                        continue
+                    # ///////////// Expert-based load balancing
+
+                    counts, wave, running = decoded
                     self.current_wave = wave
                     self.engines_running = running
                     if counts is not None:
@@ -1305,6 +1376,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
     EngineCore. Load-balances between multiple engine processes."""
 
+    # ///////////// Expert-based load balancing
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1317,7 +1389,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.client_count = client_count
 
         # To route aborts to the correct engine.
-        self.reqs_in_flight: dict[str, EngineIdentity] = {}
+        self.reqs_in_flight: dict[str, InFlightRequestInfo] = {}
+        self.shadow_req_to_primary: dict[str, str] = {}
+        self.primary_req_to_shadows: dict[str, list[str]] = {}
 
         super().__init__(
             vllm_config,
@@ -1333,6 +1407,611 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.eng_start_index = (
             len(self.core_engines) * self.client_index
         ) // client_count
+        self.rank_to_engine_index = {
+            rank: idx for idx, rank in enumerate(self.engine_ranks_managed)
+        }
+        self.expert_affinity_enabled = self._is_prefix_router_supported()
+        self.expert_affinity_update_tasks: set[asyncio.Task] = set()
+        self.expert_affinity_send_lock = asyncio.Lock()
+        self.kv_block_prefix_enabled = self._is_kv_block_prefix_supported()
+        model_config = self.vllm_config.model_config
+        self.expert_affinity_weight = (
+            model_config.expert_affinity_routing_weight
+            if self.expert_affinity_enabled
+            else 0.0
+        )
+        self.prefix_affinity_only_prefill = (
+            model_config.prefix_affinity_only_prefill
+            if self.expert_affinity_enabled
+            else False
+        )
+        self.kv_block_prefix_weight = (
+            model_config.kv_block_prefix_routing_weight
+            if self.kv_block_prefix_enabled
+            else 0.0
+        )
+        self.load_score_enabled = model_config.enable_load_score_routing
+        self.load_score_weight = (
+            model_config.load_score_routing_weight
+            if self.load_score_enabled
+            else 0.0
+        )
+        self.load_balancer_debug = model_config.load_balancer_debug
+        self.coordinator_routing_enabled = (
+            self.route_query_address is not None
+            and (
+                self.expert_affinity_weight > 0.0
+                or self.kv_block_prefix_weight > 0.0
+            )
+        )
+        if self.load_balancer_debug:
+            logger.warning(
+                "LB debug enabled expert_affinity_enabled=%s kv_block_prefix_enabled=%s "
+                "load_score_enabled=%s coordinator_routing_enabled=%s route_query_address=%s",
+                self.expert_affinity_enabled,
+                self.kv_block_prefix_enabled,
+                self.load_score_enabled,
+                self.coordinator_routing_enabled,
+                self.route_query_address,
+            )
+        self.expert_affinity_epoch = 0
+        self.expert_affinity_trees: dict[int, TokenRadixTree] = (
+            {}
+            if self.coordinator_routing_enabled
+            else {
+                rank: TokenRadixTree() for rank in self.engine_ranks_managed
+            }
+        )
+        self.kv_block_prefix_indices: dict[int, ExactBlockPrefixIndex] = (
+            {}
+            if self.coordinator_routing_enabled
+            else {
+                rank: ExactBlockPrefixIndex() for rank in self.engine_ranks_managed
+            }
+        )
+        self.kv_block_prefix_decoder = MsgpackDecoder(KVEventBatch)
+        scheduler_block_size = self.vllm_config.cache_config.block_size
+        scheduler_block_size *= (
+            self.vllm_config.parallel_config.decode_context_parallel_size
+        )
+        scheduler_block_size *= (
+            self.vllm_config.parallel_config.prefill_context_parallel_size
+        )
+        self.kv_block_prefix_block_size = scheduler_block_size
+        self.route_reply_decoder = MsgpackDecoder(CoordinatorRouteResponse)
+        self.route_request_futures: dict[int, asyncio.Future[CoordinatorRouteResponse]] = {}
+        self.route_call_id = 0
+        self.route_send_lock = asyncio.Lock()
+
+        if self.coordinator_routing_enabled:
+            assert self.route_query_address is not None
+            self.resources.route_socket = make_zmq_socket(
+                self.ctx,
+                self.route_query_address,
+                zmq.DEALER,
+                bind=False,
+            )
+            try:
+                asyncio.get_running_loop()
+                self._ensure_route_reply_task()
+            except RuntimeError:
+                pass
+
+    def _should_broadcast_ep_request(self) -> bool:
+        parallel_config = self.vllm_config.parallel_config
+        return (
+            parallel_config.enable_expert_parallel
+            and parallel_config.data_parallel_size > 1
+        )
+
+    def _make_shadow_request_id(self, request_id: str, eng_idx: int) -> str:
+        return f"{request_id}::shadow::{eng_idx}"
+
+    def _register_shadow_request(
+        self,
+        primary_request_id: str,
+        shadow_request_id: str,
+        engine: EngineIdentity,
+        prompt_token_ids: list[int] | None,
+    ) -> None:
+        self.shadow_req_to_primary[shadow_request_id] = primary_request_id
+        self.primary_req_to_shadows.setdefault(primary_request_id, []).append(
+            shadow_request_id
+        )
+        self.reqs_in_flight[shadow_request_id] = InFlightRequestInfo(
+            request_id=shadow_request_id,
+            engine=engine,
+            prompt_token_ids=prompt_token_ids,
+            is_shadow=True,
+            primary_request_id=primary_request_id,
+        )
+
+    def _cleanup_shadow_request(self, shadow_request_id: str) -> None:
+        primary_request_id = self.shadow_req_to_primary.pop(shadow_request_id, None)
+        self.reqs_in_flight.pop(shadow_request_id, None)
+        if primary_request_id is None:
+            return
+        shadow_ids = self.primary_req_to_shadows.get(primary_request_id)
+        if not shadow_ids:
+            return
+        remaining_shadow_ids = [
+            req_id for req_id in shadow_ids if req_id != shadow_request_id
+        ]
+        if remaining_shadow_ids:
+            self.primary_req_to_shadows[primary_request_id] = remaining_shadow_ids
+        else:
+            self.primary_req_to_shadows.pop(primary_request_id, None)
+
+    async def _abort_shadow_requests(self, primary_request_id: str) -> None:
+        shadow_ids = self.primary_req_to_shadows.pop(primary_request_id, [])
+        if not shadow_ids:
+            return
+
+        by_engine = defaultdict[EngineIdentity, list[str]](list)
+        for shadow_req_id in shadow_ids:
+            if request_info := self.reqs_in_flight.get(shadow_req_id):
+                by_engine[request_info.engine].append(shadow_req_id)
+            self.shadow_req_to_primary.pop(shadow_req_id, None)
+            self.reqs_in_flight.pop(shadow_req_id, None)
+
+        if by_engine:
+            await asyncio.gather(
+                *[
+                    self._abort_requests(req_ids, engine)
+                    for engine, req_ids in by_engine.items()
+                ]
+            )
+
+    def _is_prefix_router_supported(self) -> bool:
+        if not self.vllm_config.model_config.enable_prefix_affinity_routing:
+            return False
+
+        parallel_config = self.vllm_config.parallel_config
+        unsupported_reasons = []
+        if parallel_config.data_parallel_size <= 1:
+            unsupported_reasons.append("data_parallel_size must be greater than 1")
+        if not parallel_config.enable_expert_parallel:
+            unsupported_reasons.append("expert parallelism must be enabled")
+        if parallel_config.tensor_parallel_size != 1:
+            unsupported_reasons.append("tensor_parallel_size must equal 1")
+        if parallel_config.pipeline_parallel_size != 1:
+            unsupported_reasons.append("pipeline_parallel_size must equal 1")
+        if parallel_config.local_engines_only:
+            unsupported_reasons.append(
+                "internal DP load balancing must manage all ranks"
+            )
+
+        if unsupported_reasons:
+            logger.warning_once(
+                "Prefix affinity routing is enabled but unsupported for this "
+                "serving topology; leaving existing load balancing unchanged. %s",
+                "; ".join(unsupported_reasons),
+            )
+            return False
+        return True
+
+    def _is_kv_block_prefix_supported(self) -> bool:
+        if not self.vllm_config.model_config.enable_kv_block_prefix_routing:
+            return False
+
+        parallel_config = self.vllm_config.parallel_config
+        cache_config = self.vllm_config.cache_config
+        model_config = self.vllm_config.model_config
+        unsupported_reasons = []
+        if parallel_config.data_parallel_size <= 1:
+            unsupported_reasons.append("data_parallel_size must be greater than 1")
+        if parallel_config.tensor_parallel_size != 1:
+            unsupported_reasons.append("tensor_parallel_size must equal 1")
+        if parallel_config.pipeline_parallel_size != 1:
+            unsupported_reasons.append("pipeline_parallel_size must equal 1")
+        if parallel_config.local_engines_only:
+            unsupported_reasons.append(
+                "internal DP load balancing must manage all ranks"
+            )
+        if not cache_config.enable_prefix_caching:
+            unsupported_reasons.append("prefix caching must be enabled")
+        if cache_config.sliding_window is not None:
+            unsupported_reasons.append("sliding-window attention is not supported")
+        if model_config.is_encoder_decoder:
+            unsupported_reasons.append("encoder-decoder models are not supported")
+
+        if unsupported_reasons:
+            logger.warning_once(
+                "KV block-prefix routing is enabled but unsupported for this "
+                "serving topology; leaving existing load balancing unchanged. %s",
+                "; ".join(unsupported_reasons),
+            )
+            return False
+        return True
+
+    def _ensure_route_reply_task(self) -> None:
+        resources = self.resources
+        if not self.coordinator_routing_enabled or resources.route_reply_task is not None:
+            return
+
+        route_socket = resources.route_socket
+        assert route_socket is not None
+        assert isinstance(route_socket, zmq.asyncio.Socket)
+
+        async def process_route_replies():
+            try:
+                while True:
+                    buffer = await route_socket.recv()
+                    response = self.route_reply_decoder.decode(buffer)
+                    future = self.route_request_futures.pop(response.call_id, None)
+                    if future is not None and not future.done():
+                        future.set_result(response)
+            except asyncio.CancelledError:
+                for future in self.route_request_futures.values():
+                    if not future.done():
+                        future.set_exception(EngineDeadError())
+                self.route_request_futures.clear()
+            except Exception as exc:
+                for future in self.route_request_futures.values():
+                    if not future.done():
+                        future.set_exception(exc)
+                self.route_request_futures.clear()
+
+        resources.route_reply_task = asyncio.create_task(
+            process_route_replies(),
+            name="CoordinatorRouteReplyTask",
+        )
+
+    def _clear_prefix_router_state(self, epoch: int) -> None:
+        for tree in self.expert_affinity_trees.values():
+            tree.clear()
+        self.expert_affinity_epoch = epoch
+
+    def _apply_prefix_router_update(
+        self,
+        target_rank: int,
+        epoch: int,
+        prompt_token_ids: list[int],
+    ) -> None:
+        if not self.expert_affinity_enabled or not prompt_token_ids:
+            return
+        if epoch > self.expert_affinity_epoch:
+            self._clear_prefix_router_state(epoch)
+        elif epoch < self.expert_affinity_epoch:
+            return
+        if target_rank not in self.expert_affinity_trees:
+            self.expert_affinity_trees[target_rank] = TokenRadixTree()
+        self.expert_affinity_trees[target_rank].insert(prompt_token_ids)
+
+    def _handle_prefix_router_coordinator_update(self, decoded: Sequence[Any]) -> None:
+        if not self.expert_affinity_enabled:
+            return
+
+        _, source_client_index, target_rank, epoch, prompt_token_ids = decoded
+        if int(source_client_index) == self.client_index:
+            return
+        self._apply_prefix_router_update(
+            int(target_rank),
+            int(epoch),
+            list(prompt_token_ids),
+        )
+
+    def _apply_kv_prefix_event_batch(
+        self,
+        target_rank: int,
+        batch: KVEventBatch,
+    ) -> None:
+        if not self.kv_block_prefix_enabled:
+            return
+
+        index = self.kv_block_prefix_indices.get(target_rank)
+        if index is None:
+            index = ExactBlockPrefixIndex()
+            self.kv_block_prefix_indices[target_rank] = index
+
+        for event in batch.events:
+            if isinstance(event, BlockStored):
+                if int(event.block_size) != self.kv_block_prefix_block_size:
+                    logger.warning_once(
+                        "KV block-prefix routing observed block_size=%d, expected %d; "
+                        "disabling exact KV block-prefix routing.",
+                        int(event.block_size),
+                        self.kv_block_prefix_block_size,
+                    )
+                    self.kv_block_prefix_enabled = False
+                    self.kv_block_prefix_indices.clear()
+                    return
+                index.store_blocks(
+                    block_hashes=event.block_hashes,
+                    token_ids=event.token_ids,
+                    block_size=int(event.block_size),
+                    parent_block_hash=event.parent_block_hash,
+                    extra_keys=event.extra_keys,
+                )
+            elif isinstance(event, BlockRemoved):
+                index.remove_blocks(event.block_hashes)
+            elif isinstance(event, AllBlocksCleared):
+                index.clear()
+
+    def _handle_kv_prefix_coordinator_update(self, decoded: Sequence[Any]) -> None:
+        if not self.kv_block_prefix_enabled:
+            return
+
+        _, target_rank, payload = decoded
+        batch = self.kv_block_prefix_decoder.decode(payload)
+        self._apply_kv_prefix_event_batch(int(target_rank), batch)
+
+    def _choose_engine_by_load(self, candidate_indices: list[int] | None = None) -> int:
+        current_counts = self.lb_engines
+        min_score = sys.maxsize
+        chosen_index = 0
+        indices = candidate_indices or list(range(len(current_counts)))
+        for i in range(len(indices)):
+            idx = indices[(self.eng_start_index + i) % len(indices)]
+            waiting, running = current_counts[idx]
+            score = waiting * 4 + running
+            if score < min_score:
+                min_score = score
+                chosen_index = idx
+        current_counts[chosen_index][0] += self.client_count
+        return chosen_index
+
+    async def _send_prefix_router_update(
+        self,
+        target_rank: int,
+        epoch: int,
+        prompt_token_ids: list[int],
+    ) -> None:
+        self._ensure_stats_update_task()
+        socket = self.resources.stats_update_socket
+        if socket is None:
+            return
+        update = (
+            "PREFIX_ROUTER_UPDATE",
+            self.client_index,
+            target_rank,
+            epoch,
+            prompt_token_ids,
+        )
+        async with self.expert_affinity_send_lock:
+            await socket.send(msgspec.msgpack.encode(update))
+
+    async def _learn_prefix_router_update(
+        self,
+        request_info: InFlightRequestInfo,
+        routed_experts,
+    ) -> None:
+        if not self.expert_affinity_enabled:
+            return
+
+        prompt_token_ids = request_info.prompt_token_ids
+        if not prompt_token_ids or routed_experts is None:
+            return
+
+        routed_experts_list = (
+            routed_experts.tolist()
+            if hasattr(routed_experts, "tolist")
+            else routed_experts
+        )
+        owner = await self._call_utility_async(
+            "prefix_router_compute_owner",
+            routed_experts_list,
+            len(prompt_token_ids),
+            engine=request_info.engine,
+        )
+        if not owner:
+            return
+
+        target_rank = int(owner["target_rank"])
+        epoch = int(owner["epoch"])
+        if target_rank < 0 or target_rank >= len(self.core_engines):
+            return
+        if self.load_balancer_debug:
+            routed_shape = (
+                tuple(routed_experts.shape)
+                if hasattr(routed_experts, "shape")
+                else None
+            )
+            logger.info(
+                "Prefix affinity update request_id=%s target_rank=%d epoch=%d "
+                "prompt_tokens=%d routed_experts_shape=%s",
+                request_info.request_id,
+                target_rank,
+                epoch,
+                len(prompt_token_ids),
+                routed_shape,
+            )
+        self._apply_prefix_router_update(target_rank, epoch, prompt_token_ids)
+        await self._call_utility_async(
+            "prefix_router_upsert",
+            prompt_token_ids,
+            epoch,
+            engine=self.core_engines[target_rank],
+        )
+        await self._send_prefix_router_update(target_rank, epoch, prompt_token_ids)
+
+    def _finish_prefix_router_task(self, task: asyncio.Task) -> None:
+        self.expert_affinity_update_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(
+                "Prefix affinity routing update failed: %s",
+                exc,
+            )
+
+    def _get_expert_affinity_scores(
+        self,
+        prompt_token_ids: list[int] | None,
+    ) -> dict[int, float]:
+        if not self.expert_affinity_enabled or not prompt_token_ids:
+            return {}
+
+        total_tokens = len(prompt_token_ids)
+        if total_tokens <= 0:
+            return {}
+
+        scores: dict[int, float] = {}
+        for rank, tree in self.expert_affinity_trees.items():
+            prefix_len = tree.longest_prefix_length(prompt_token_ids)
+            if prefix_len <= 0:
+                continue
+            engine_index = self.rank_to_engine_index.get(rank)
+            if engine_index is None:
+                continue
+            scores[engine_index] = prefix_len / total_tokens
+        return scores
+
+    def _get_kv_block_prefix_scores(
+        self,
+        request: EngineCoreRequest,
+    ) -> dict[int, float]:
+        if not self.kv_block_prefix_enabled:
+            return {}
+
+        query = prepare_block_prefix_query(
+            token_ids=request.prompt_token_ids,
+            prompt_embeds=request.prompt_embeds,
+            mm_features=request.mm_features,
+            lora_request=request.lora_request,
+            cache_salt=request.cache_salt,
+            block_size=self.kv_block_prefix_block_size,
+        )
+        if query is None:
+            return {}
+
+        scores: dict[int, float] = {}
+        for rank, index in self.kv_block_prefix_indices.items():
+            matched_blocks = index.longest_prefix_blocks_for_query(query)
+            if matched_blocks <= 0:
+                continue
+            engine_index = self.rank_to_engine_index.get(rank)
+            if engine_index is None:
+                continue
+            scores[engine_index] = matched_blocks / query.total_blocks
+        return scores
+
+    def _get_load_scores(self) -> dict[int, float]:
+        if not self.load_score_enabled:
+            return {}
+
+        current_counts = self.lb_engines
+        if not current_counts:
+            return {}
+
+        raw_scores = [
+            (waiting * 4) + running for waiting, running in current_counts
+        ]
+        min_raw = min(raw_scores)
+        max_raw = max(raw_scores)
+        if max_raw == min_raw:
+            return {idx: 1.0 for idx in range(len(raw_scores))}
+
+        span = float(max_raw - min_raw)
+        return {
+            idx: (max_raw - raw_score) / span
+            for idx, raw_score in enumerate(raw_scores)
+        }
+
+    # ///////////// Expert-based load balancing
+    @staticmethod
+    def _format_score_map(scores: dict[int, float]) -> str:
+        if not scores:
+            return "{}"
+        items = ", ".join(
+            f"{idx}:{score:.4f}" for idx, score in sorted(scores.items())
+        )
+        return "{" + items + "}"
+    # ///////////// Expert-based load balancing
+
+    def _build_coordinator_route_request(
+        self,
+        call_id: int,
+        request: EngineCoreRequest,
+    ) -> CoordinatorRouteRequest:
+        kv_total_blocks = 0
+        kv_extra_keys = None
+        kv_use_zero_tokens = False
+
+        if self.kv_block_prefix_weight > 0.0:
+            query = prepare_block_prefix_query(
+                token_ids=request.prompt_token_ids,
+                prompt_embeds=request.prompt_embeds,
+                mm_features=request.mm_features,
+                lora_request=request.lora_request,
+                cache_salt=request.cache_salt,
+                block_size=self.kv_block_prefix_block_size,
+            )
+            if query is not None:
+                kv_total_blocks = query.total_blocks
+                kv_extra_keys = build_query_block_extra_keys(query)
+                kv_use_zero_tokens = query.zero_block is not None
+
+        return CoordinatorRouteRequest(
+            call_id=call_id,
+            request_id=request.request_id,
+            client_index=self.client_index,
+            client_count=self.client_count,
+            prompt_token_ids=request.prompt_token_ids,
+            kv_total_blocks=kv_total_blocks,
+            kv_extra_keys=kv_extra_keys,
+            kv_use_zero_tokens=kv_use_zero_tokens,
+        )
+
+    async def _get_core_engine_for_request_async(
+        self,
+        request: EngineCoreRequest,
+    ) -> EngineIdentity:
+        if (eng_index := request.data_parallel_rank) is None and (
+            eng_index := get_late_interaction_engine_index(
+                request.pooling_params, len(self.core_engines)
+            )
+        ) is None:
+            if self.coordinator_routing_enabled:
+                self._ensure_route_reply_task()
+                route_socket = self.resources.route_socket
+                assert route_socket is not None
+                loop = asyncio.get_running_loop()
+                call_id = self.route_call_id
+                self.route_call_id += 1
+                route_request = self._build_coordinator_route_request(call_id, request)
+                future = loop.create_future()
+                self.route_request_futures[call_id] = future
+                try:
+                    if self.load_balancer_debug:
+                        logger.warning(
+                            "LB route query send request_id=%s call_id=%d",
+                            request.request_id,
+                            call_id,
+                        )
+                    async with self.route_send_lock:
+                        await asyncio.wait_for(
+                            route_socket.send(msgspec.msgpack.encode(route_request)),
+                            timeout=1.0,
+                        )
+                    if self.load_balancer_debug:
+                        logger.warning(
+                            "LB route query sent request_id=%s call_id=%d",
+                            request.request_id,
+                            call_id,
+                        )
+                    response = await asyncio.wait_for(future, timeout=5.0)
+                except Exception as exc:
+                    self.route_request_futures.pop(call_id, None)
+                    logger.warning(
+                        "Coordinator route query failed for request_id=%s; "
+                        "falling back to local scoring. error=%s",
+                        request.request_id,
+                        exc,
+                    )
+                    return self.get_core_engine_for_request(request)
+                eng_index = response.engine_index
+            else:
+                return self.get_core_engine_for_request(request)
+
+        chosen_engine = self.core_engines[eng_index]
+        self.reqs_in_flight[request.request_id] = InFlightRequestInfo(
+            request_id=request.request_id,
+            engine=chosen_engine,
+            prompt_token_ids=request.prompt_token_ids,
+        )
+        return chosen_engine
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
@@ -1341,28 +2020,125 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 request.pooling_params, len(self.core_engines)
             )
         ) is None:
-            current_counts = self.lb_engines
-            # TODO use P2C alg for larger DP sizes
-            num_engines = len(current_counts)
-            min_score = sys.maxsize
-            eng_index = 0
-            for i in range(num_engines):
-                # Start from client_index to help with balancing when engines
-                # are empty.
-                idx = (self.eng_start_index + i) % num_engines
-                waiting, running = current_counts[idx]
-                score = waiting * 4 + running
-                if score < min_score:
-                    min_score = score
-                    eng_index = idx
-            # Increment local waiting count for better balancing between stats
-            # updates from the coordinator (which happen every 100ms).
-            current_counts[eng_index][0] += self.client_count
+            expert_scores = (
+                self._get_expert_affinity_scores(request.prompt_token_ids)
+                if self.expert_affinity_weight > 0.0
+                else {}
+            )
+            kv_scores = (
+                self._get_kv_block_prefix_scores(request)
+                if self.kv_block_prefix_weight > 0.0
+                else {}
+            )
+            load_scores = (
+                self._get_load_scores()
+                if self.load_score_weight > 0.0
+                else {}
+            )
+            score_by_index: dict[int, float] = {}
+            if self.expert_affinity_weight > 0.0:
+                for idx, score in expert_scores.items():
+                    score_by_index[idx] = score_by_index.get(idx, 0.0) + (
+                        self.expert_affinity_weight * score
+                    )
+            if self.kv_block_prefix_weight > 0.0:
+                for idx, score in kv_scores.items():
+                    score_by_index[idx] = score_by_index.get(idx, 0.0) + (
+                        self.kv_block_prefix_weight * score
+                    )
+            if self.load_score_weight > 0.0:
+                for idx, score in load_scores.items():
+                    score_by_index[idx] = score_by_index.get(idx, 0.0) + (
+                        self.load_score_weight * score
+                    )
+
+            if score_by_index:
+                best_score = max(score_by_index.values())
+                matched_indices = [
+                    idx for idx, score in score_by_index.items() if score == best_score
+                ]
+                eng_index = self._choose_engine_by_load(matched_indices)
+                if self.load_balancer_debug:
+                    logger.warning(
+                        "LB route request_id=%s expert_scores=%s kv_scores=%s "
+                        "load_scores=%s final_scores=%s chosen_engine=%d best_score=%.4f",
+                        request.request_id,
+                        self._format_score_map(expert_scores),
+                        self._format_score_map(kv_scores),
+                        self._format_score_map(load_scores),
+                        self._format_score_map(score_by_index),
+                        eng_index,
+                        best_score,
+                    )
+            else:
+                eng_index = self._choose_engine_by_load()
+                if self.load_balancer_debug:
+                    logger.warning(
+                        "LB route request_id=%s expert_scores=%s kv_scores=%s "
+                        "load_scores=%s final_scores={} chosen_engine=%d fallback=load_only",
+                        request.request_id,
+                        self._format_score_map(expert_scores),
+                        self._format_score_map(kv_scores),
+                        self._format_score_map(load_scores),
+                        eng_index,
+                    )
 
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
-        self.reqs_in_flight[request.request_id] = chosen_engine
+        self.reqs_in_flight[request.request_id] = InFlightRequestInfo(
+            request_id=request.request_id,
+            engine=chosen_engine,
+            prompt_token_ids=request.prompt_token_ids,
+        )
         return chosen_engine
+
+    async def add_request_async(self, request: EngineCoreRequest) -> None:
+        self._ensure_stats_update_task()
+        if self.coordinator_routing_enabled:
+            self._ensure_route_reply_task()
+
+        request.current_wave = self.current_wave
+        request.client_index = self.client_index
+
+        chosen_engine = await self._get_core_engine_for_request_async(request)
+        if self._should_broadcast_ep_request():
+            send_ops: list[Awaitable[Any]] = []
+            for eng_idx, engine in enumerate(self.core_engines):
+                if engine == chosen_engine:
+                    send_ops.append(
+                        self._send_input(EngineCoreRequestType.ADD, request, engine)
+                    )
+                    continue
+
+                shadow_request = copy.copy(request)
+                shadow_request.request_id = self._make_shadow_request_id(
+                    request.request_id, eng_idx
+                )
+                self._register_shadow_request(
+                    request.request_id,
+                    shadow_request.request_id,
+                    engine,
+                    request.prompt_token_ids,
+                )
+                send_ops.append(
+                    self._send_input(
+                        EngineCoreRequestType.ADD, shadow_request, engine
+                    )
+                )
+            to_await = asyncio.gather(*send_ops)
+        else:
+            to_await = self._send_input(
+                EngineCoreRequestType.ADD, request, chosen_engine
+            )
+
+        if not self.engines_running:
+            wake_exclude = None if self._should_broadcast_ep_request() else chosen_engine
+            req_msg = msgspec.msgpack.encode(("FIRST_REQ", wake_exclude))
+            await self.first_req_send_socket.send(req_msg)
+
+        await to_await
+
+        self._ensure_output_queue_task()
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
@@ -1379,9 +2155,86 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     async def process_engine_outputs(
         self: "DPLBAsyncMPClient", outputs: EngineCoreOutputs
     ):
+        primary_ids_to_abort: set[str] = set()
+
+        if outputs.outputs:
+            filtered_outputs = []
+            for output in outputs.outputs:
+                request_info = self.reqs_in_flight.get(output.request_id)
+                if request_info is not None and request_info.is_shadow:
+                    if request_info.primary_request_id is not None:
+                        primary_ids_to_abort.add(request_info.primary_request_id)
+                    continue
+                filtered_outputs.append(output)
+            outputs.outputs = filtered_outputs
+
+        if self.expert_affinity_enabled and outputs.outputs:
+            for output in outputs.outputs:
+                request_info = self.reqs_in_flight.get(output.request_id)
+                if request_info is None:
+                    continue
+                if self.prefix_affinity_only_prefill:
+                    if request_info.expert_affinity_prefill_learned:
+                        continue
+                    if output.routed_experts is None:
+                        continue
+                    if self.load_balancer_debug:
+                        routed_shape = (
+                            tuple(output.routed_experts.shape)
+                            if hasattr(output.routed_experts, "shape")
+                            else None
+                        )
+                        logger.warning(
+                            "Routed experts captured request_id=%s phase=prefill "
+                            "shape=%s",
+                            output.request_id,
+                            routed_shape,
+                        )
+                    request_info.expert_affinity_prefill_learned = True
+                else:
+                    if output.finish_reason is None:
+                        continue
+                    if self.load_balancer_debug and output.routed_experts is not None:
+                        routed_shape = (
+                            tuple(output.routed_experts.shape)
+                            if hasattr(output.routed_experts, "shape")
+                            else None
+                        )
+                        logger.warning(
+                            "Routed experts captured request_id=%s phase=finish "
+                            "shape=%s",
+                            output.request_id,
+                            routed_shape,
+                        )
+                task = asyncio.create_task(
+                    self._learn_prefix_router_update(
+                        request_info, output.routed_experts
+                    )
+                )
+                self.expert_affinity_update_tasks.add(task)
+                task.add_done_callback(self._finish_prefix_router_task)
+    # ///////////// Expert-based load balancing
+
         if outputs.finished_requests and self.reqs_in_flight:
+            filtered_finished_requests = set[str]()
             for req_id in outputs.finished_requests:
+                request_info = self.reqs_in_flight.get(req_id)
+                if request_info is not None and request_info.is_shadow:
+                    if request_info.primary_request_id is not None:
+                        primary_ids_to_abort.add(request_info.primary_request_id)
+                    self._cleanup_shadow_request(req_id)
+                    continue
+                filtered_finished_requests.add(req_id)
                 self.reqs_in_flight.pop(req_id, None)
+            outputs.finished_requests = filtered_finished_requests or None
+
+        if outputs.outputs:
+            for output in outputs.outputs:
+                if output.finish_reason is not None:
+                    primary_ids_to_abort.add(output.request_id)
+
+        for primary_request_id in primary_ids_to_abort:
+            await self._abort_shadow_requests(primary_request_id)
 
     @staticmethod
     async def eep_process_engine_core_notification(
@@ -1450,16 +2303,30 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         if len(request_ids) == 1:
             # Fast-path common case.
-            if engine := self.reqs_in_flight.get(request_ids[0]):
-                await self._abort_requests(request_ids, engine)
+            if request_info := self.reqs_in_flight.get(request_ids[0]):
+                primary_request_id = (
+                    request_info.primary_request_id
+                    if request_info.is_shadow
+                    else request_ids[0]
+                )
+                await self._abort_requests(request_ids, request_info.engine)
+                await self._abort_shadow_requests(primary_request_id)
             return
 
         by_engine = defaultdict[EngineIdentity, list[str]](list)
+        primary_request_ids = set[str]()
         for req_id in request_ids:
-            if engine := self.reqs_in_flight.get(req_id):
-                by_engine[engine].append(req_id)
+            if request_info := self.reqs_in_flight.get(req_id):
+                by_engine[request_info.engine].append(req_id)
+                primary_request_ids.add(
+                    request_info.primary_request_id
+                    if request_info.is_shadow and request_info.primary_request_id
+                    else req_id
+                )
         for engine, req_ids in by_engine.items():
             await self._abort_requests(req_ids, engine)
+        for primary_request_id in primary_request_ids:
+            await self._abort_shadow_requests(primary_request_id)
 
     async def _abort_requests(
         self, request_ids: list[str], engine: EngineIdentity

@@ -2092,13 +2092,21 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         slot_mappings: dict[int, torch.Tensor] | None = None,
-    ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
+    ) -> tuple[
+        PerLayerAttnMetadata,
+        CommonAttentionMetadata | None,
+        list[tuple[int, int]],
+    ]:
         """
-        :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
+        :return: tuple[
+            attn_metadata,
+            spec_decode_common_attn_metadata,
+            prefill_capture_ranges,
+        ]
         """
         # Attention metadata is not needed for attention free models
         if len(self.kv_cache_config.kv_cache_groups) == 0:
-            return {}, None
+            return {}, None, []
 
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
@@ -2334,7 +2342,22 @@ class GPUModelRunner(
                 spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
             )
 
-        return attn_metadata, spec_decode_common_attn_metadata
+        prefill_capture_ranges: list[tuple[int, int]] = []
+        if cm_base.is_prefilling is not None:
+            query_start_loc_cpu = cm_base.query_start_loc_cpu
+            num_capture_reqs = min(
+                len(cm_base.is_prefilling),
+                query_start_loc_cpu.shape[0] - 1,
+            )
+            for req_idx in range(num_capture_reqs):
+                if not bool(cm_base.is_prefilling[req_idx].item()):
+                    continue
+                start = int(query_start_loc_cpu[req_idx].item())
+                end = int(query_start_loc_cpu[req_idx + 1].item())
+                if end > start:
+                    prefill_capture_ranges.append((start, end))
+
+        return attn_metadata, spec_decode_common_attn_metadata, prefill_capture_ranges
 
     def _compute_cascade_attn_prefix_lens(
         self,
@@ -3068,142 +3091,168 @@ class GPUModelRunner(
         )
 
     # Optional user callback: compute_placement(routing_snapshot) -> dict
-    # Set this on the model runner to enable live expert redistribution.
-    #
-    # Signature::
-    #   def compute_placement(routing: dict) -> dict:
-    #       # routing: {layer_id: [{'topk_ids': Tensor, 'topk_weights': Tensor, 'num_tokens': int}]}
-    #       # returns: {"expert_to_gpu": {"0": gpu_id, "1": gpu_id, ...}}
-    #
-    # When set AND enable_eplb=True AND policy="custom", the returned mapping
-    # is fed into StaticPlacementPolicy before each eplb_step() call so
-    # expert positions update after every forward pass.
+    # Set this on the model runner to enable custom placement on EPLB
+    # rearrangement steps. The forward path does not compute placement; it only
+    # contributes prefill-only co-activation edge counts to the current EPLB
+    # window, and the callback runs later from StaticPlacementPolicy during the
+    # normal rearrange() cadence.
     _compute_placement_callback: object = None
 
-    def _aggregate_routing_load(self, routing_snapshot: dict) -> dict:
-        """All-reduce per-expert token counts across all EP ranks.
+    def _uses_graph_only_callback_placement(self) -> bool:
+        return bool(
+            self._compute_placement_callback
+            and self.parallel_config.enable_eplb
+            and self.parallel_config.eplb_config.policy == "custom"
+        )
 
-        Each DP rank captures only its own tokens.  Before passing routing data
-        to compute_placement() we sum the per-expert counts across every EP rank
-        with a single NCCL all-reduce so every worker sees the **global** load.
+    def _filter_routing_snapshot_to_prefill(self, routing_snapshot: dict) -> dict:
+        """Build a prefill-only routing snapshot from full-step captures."""
+        filtered_snapshot: dict[int, list[dict[str, Any]]] = {}
+        for layer_id, captures in routing_snapshot.items():
+            filtered_captures: list[dict[str, Any]] = []
+            for capture in captures:
+                prefill_ranges = capture.get("prefill_ranges")
+                if not prefill_ranges:
+                    continue
 
-        IMPORTANT — all ranks must call this every step:
-            ep_group.all_reduce() is an NCCL collective and acts as a barrier.
-            If any rank skips it (e.g. because its routing_snapshot is empty on
-            a dummy-batch step) while other ranks call it, all participating
-            ranks block forever (NCCL deadlock).  To avoid this, we always build
-            a [num_layers, num_experts] tensor — zeros when routing_snapshot is
-            empty — and always call all_reduce.  We return {} only after the
-            collective if the global sum is zero (nothing to place).
+                topk_ids_parts = []
+                num_tokens = 0
+                for start, end in prefill_ranges:
+                    if end <= start:
+                        continue
+                    topk_ids_parts.append(capture["topk_ids"][start:end])
+                    num_tokens += end - start
 
-        Returns a dict with the same structure as routing_snapshot plus:
-            expert_load: Tensor[num_logical_experts]  — global token counts
-            num_gpus:    int  — EP group size (= dp_size × tp_size)
-        Returns {} when the cluster-wide token sum is zero (skip callback).
+                if not topk_ids_parts:
+                    continue
+
+                filtered_captures.append(
+                    {
+                        "topk_ids": torch.cat(topk_ids_parts, dim=0),
+                        "num_tokens": num_tokens,
+                    }
+                )
+
+            if filtered_captures:
+                filtered_snapshot[layer_id] = filtered_captures
+        return filtered_snapshot
+
+    def _build_local_coactivation_edges(
+        self,
+        routing_snapshot: dict,
+        num_layers: int,
+        num_experts: int,
+    ) -> tuple[torch.Tensor, list[int], int]:
+        """Build compact upper-triangular edge counts for local token co-activation.
+
+        Returns:
+            edge_weights: Tensor[num_nodes * (num_nodes - 1) // 2]
+            layer_ids:    Sorted layer ids present in routing_snapshot.
+            num_nodes:    num_layers * num_experts
         """
-        ep_group = get_ep_group()
-        num_gpus = ep_group.world_size
+        num_nodes = num_layers * num_experts
+        num_edges = num_nodes * (num_nodes - 1) // 2
+        edge_weights = torch.zeros(num_edges, dtype=torch.int64, device=self.device)
 
-        # Determine tensor shape.  Prefer eplb_state (authoritative, no GPU
-        # sync needed); fall back to scanning topk_ids only if not yet ready.
-        num_layers = 0
-        num_experts = 0
-        if self.eplb_state is not None and self.eplb_state.model_states:
-            first = next(iter(self.eplb_state.model_states.values()))
-            num_layers = first.model.num_moe_layers
-            num_experts = first.model.num_logical_experts
+        if not routing_snapshot:
+            return edge_weights, list(range(num_layers)), num_nodes
 
-        if routing_snapshot:
-            layer_ids = sorted(routing_snapshot.keys())
-            if num_layers == 0:
-                num_layers = len(layer_ids)
-            if num_experts == 0:
-                for caps in routing_snapshot.values():
-                    for cap in caps:
-                        top = int(cap['topk_ids'].max().item()) + 1
-                        if top > num_experts:
-                            num_experts = top
-        else:
-            layer_ids = []
+        layer_ids = sorted(routing_snapshot.keys())
+        per_layer_ids: list[torch.Tensor] = []
+        total_tokens = None
+        top_k = None
 
-        if num_layers == 0 or num_experts == 0:
-            # EPLB state not yet initialised — callback cannot be active yet,
-            # so this branch is unreachable in practice.  Guard only.
-            return {}
+        for layer_id in layer_ids:
+            captures = routing_snapshot[layer_id]
+            if not captures:
+                return edge_weights, layer_ids, num_nodes
+            layer_tensor = torch.cat(
+                [cap["topk_ids"] for cap in captures], dim=0
+            ).to(torch.int64)
+            if total_tokens is None:
+                total_tokens = layer_tensor.shape[0]
+                top_k = layer_tensor.shape[1]
+            elif (layer_tensor.shape[0] != total_tokens
+                  or layer_tensor.shape[1] != top_k):
+                logger.warning(
+                    "Skipping co-activation graph build due to inconsistent "
+                    "routing tensor shapes across layers."
+                )
+                return edge_weights, layer_ids, num_nodes
+            per_layer_ids.append(layer_tensor)
 
-        # Build load[num_layers, num_experts] — zeros for empty-snapshot ranks.
-        load = torch.zeros(num_layers, num_experts,
-                           dtype=torch.int64, device=self.device)
-        if routing_snapshot:
-            for i, layer_id in enumerate(layer_ids):
-                for cap in routing_snapshot[layer_id]:
-                    flat = cap['topk_ids'].reshape(-1).long()
-                    load[i].scatter_add_(0, flat, torch.ones_like(flat))
+        if total_tokens is None or total_tokens == 0:
+            return edge_weights, layer_ids, num_nodes
 
-        # Every rank calls this — even those with no local tokens.
-        load = ep_group.all_reduce(load)
+        expert_ids = torch.stack(per_layer_ids, dim=1)  # [tokens, layers, top_k]
+        layer_offsets = (
+            torch.tensor(layer_ids, dtype=torch.int64, device=self.device)
+            .view(len(layer_ids), 1) * num_experts
+        )
+        flat_nodes = (expert_ids + layer_offsets).reshape(total_tokens, -1)
+        if flat_nodes.shape[1] < 2:
+            return edge_weights, layer_ids, num_nodes
 
-        # If no real tokens anywhere in the cluster this step, skip callback.
-        if load.sum().item() == 0:
-            return {}
+        row_idx, col_idx = torch.triu_indices(
+            flat_nodes.shape[1], flat_nodes.shape[1], offset=1, device=self.device
+        )
+        src_nodes = flat_nodes[:, row_idx]
+        dst_nodes = flat_nodes[:, col_idx]
+        lo = torch.minimum(src_nodes, dst_nodes)
+        hi = torch.maximum(src_nodes, dst_nodes)
+        edge_ids = lo * (2 * num_nodes - lo - 1) // 2 + (hi - lo - 1)
+        edge_weights = torch.bincount(edge_ids.reshape(-1), minlength=num_edges)
 
-        # Attach global load and num_gpus to a copy of the snapshot and return.
-        # On ranks with no local tokens layer_ids is empty; use range(num_layers)
-        # so every rank returns a result with the same keys (required for placement
-        # consistency — compute_placement() reads only expert_load, not topk_ids).
-        ids_to_iterate = layer_ids if routing_snapshot else range(num_layers)
-        result: dict = {}
-        for i, layer_id in enumerate(ids_to_iterate):
-            captures = routing_snapshot.get(layer_id, [{}])
-            result[layer_id] = [
-                {**cap, 'expert_load': load[i], 'num_gpus': num_gpus}
-                for cap in captures
-            ]
-        return result
+        return edge_weights, layer_ids, num_nodes
 
     def _on_routing_step(self) -> None:
         """Called after each model forward pass, immediately before eplb_step().
 
-        1. Snapshots the current step's routing data into the per-step queue.
-        2. Clears _ROUTING_DATA so the next forward pass starts fresh.
-        3. If ``_compute_placement_callback`` is set AND EPLB is active with
-           policy="custom", all-reduces expert load across EP ranks, calls the
-           callback with the globally aggregated snapshot, and feeds the result
-           into StaticPlacementPolicy for the next eplb_step().
+        1. Reads the current step's routing data.
+        2. Optionally converts prefill-only top-k ids into compact graph edge
+           increments for the current EPLB window.
+        3. Optionally snapshots the full-step routing data for offline tracking.
+        4. Clears _ROUTING_DATA so the next forward pass starts fresh.
         """
         from vllm.model_executor.layers.fused_moe.layer import (
+            _is_any_routing_capture_enabled,
+            _is_placement_capture_enabled,
             _is_tracking_enabled,
-            push_step_snapshot,
-            clear_routing_data,
             get_routing_data,
+            clear_routing_data,
+            push_step_snapshot,
         )
+        if not _is_any_routing_capture_enabled():
+            return
+
+        callback = self._compute_placement_callback
+        routing_snapshot = get_routing_data()
+        placement_routing_snapshot = routing_snapshot
+        if _is_placement_capture_enabled() or callback is not None:
+            placement_routing_snapshot = self._filter_routing_snapshot_to_prefill(
+                routing_snapshot
+            )
+
+        if self._uses_graph_only_callback_placement():
+            try:
+                if self.eplb_state is not None and self.eplb_state.model_states:
+                    first = next(iter(self.eplb_state.model_states.values()))
+                    num_layers = first.model.num_moe_layers
+                    num_experts = first.model.num_logical_experts
+                    coactivation_edges, _, _ = self._build_local_coactivation_edges(
+                        placement_routing_snapshot, num_layers, num_experts
+                    )
+                    self.eplb_state.record_coactivation_edges(coactivation_edges)
+            except Exception as exc:
+                logger.warning(
+                    "local co-activation recording raised an exception: %s",
+                    exc,
+                )
+
         if _is_tracking_enabled():
-            routing_snapshot = get_routing_data()
-
-            callback = self._compute_placement_callback
-            if (
-                callback is not None
-                and self.parallel_config.enable_eplb
-                and self.parallel_config.eplb_config.policy == "custom"
-            ):
-                try:
-                    global_snapshot = self._aggregate_routing_load(
-                        routing_snapshot
-                    )
-                    placement = callback(global_snapshot)
-                    if placement:
-                        from vllm.distributed.eplb.policy.custom_policy import (
-                            StaticPlacementPolicy,
-                        )
-                        StaticPlacementPolicy.set_dynamic_config(placement)
-                except Exception as exc:
-                    logger.warning(
-                        "compute_placement callback raised an exception: %s",
-                        exc,
-                    )
-
             push_step_snapshot()
-            clear_routing_data()
+
+        clear_routing_data()
 
     def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
         """
@@ -3218,7 +3267,10 @@ class GPUModelRunner(
         self.eplb_state.step(
             is_dummy,
             is_profile,
-            log_stats=self.parallel_config.eplb_config.log_balancedness,
+            log_stats=(
+                self.parallel_config.eplb_config.log_balancedness
+                and not self._uses_graph_only_callback_placement()
+            ),
         )
 
     def setup_eplb_from_mapping(
@@ -4098,7 +4150,11 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
             )
 
-            attn_metadata, spec_decode_common_attn_metadata = (
+            (
+                attn_metadata,
+                spec_decode_common_attn_metadata,
+                prefill_capture_ranges,
+            ) = (
                 self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
                     num_tokens_padded=num_tokens_padded if pad_attn else None,
@@ -4155,6 +4211,15 @@ class GPUModelRunner(
                 batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
+                additional_forward_context={
+                    "routing_capture_prefill_ranges": prefill_capture_ranges,
+                    "routing_capture_prefill_only_for_placement": bool(
+                        self._compute_placement_callback
+                    ),
+                    "routing_capture_skip_expert_load": (
+                        self._uses_graph_only_callback_placement()
+                    ),
+                },
                 skip_compiled=has_encoder_input,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
@@ -5488,6 +5553,7 @@ class GPUModelRunner(
         )
 
         attn_metadata: PerLayerAttnMetadata | None = None
+        prefill_capture_ranges: list[tuple[int, int]] = []
 
         slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
             num_tokens_padded=num_tokens,
@@ -5533,7 +5599,7 @@ class GPUModelRunner(
                 self.input_batch.block_table.commit_block_table(num_reqs_padded)
 
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
-                attn_metadata, _ = self._build_attention_metadata(
+                attn_metadata, _, prefill_capture_ranges = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
                     num_tokens_padded=num_tokens_padded if pad_attn else None,
                     num_reqs=num_reqs_padded,
@@ -5611,6 +5677,16 @@ class GPUModelRunner(
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
+                    additional_forward_context={
+                        "routing_capture_prefill_ranges": prefill_capture_ranges,
+                        "routing_capture_prefill_only_for_placement": bool(
+                            self._compute_placement_callback
+                        ),
+                        "routing_capture_skip_expert_load": (
+                            self._uses_graph_only_callback_placement()
+                        ),
+                        "skip_routed_experts_capture": True,
+                    },
                 ),
             ):
                 outputs = self.model(
@@ -5687,9 +5763,8 @@ class GPUModelRunner(
         # ranks execute the rearrangement in synchronization.
         if not skip_eplb:
             # _on_routing_step MUST be called before eplb_step on every forward
-            # pass — real or dummy — because _aggregate_routing_load() contains
-            # an NCCL ep_group.all_reduce() that acts as a barrier.  Skipping
-            # it on dummy-batch ranks while real-batch ranks call it deadlocks.
+            # pass so routing snapshots and local co-activation stats stay
+            # consistent with the upcoming EPLB step.
             self._on_routing_step()
             self.eplb_step(is_dummy=True, is_profile=is_profile)
 
@@ -5925,8 +6000,9 @@ class GPUModelRunner(
                             self.encoder_cache[f"tmp_{i}"] = output
 
         # Add `is_profile` here to pre-allocate communication buffers
+        profile_tokens = min(self.max_num_tokens, 64)
         hidden_states, last_hidden_states = self._dummy_run(
-            self.max_num_tokens, is_profile=True
+            profile_tokens, is_profile=True
         )
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:

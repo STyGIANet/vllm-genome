@@ -113,6 +113,13 @@ class AsyncLLM(EngineClient):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.observability_config = vllm_config.observability_config
+        # ///////////// Expert-based load balancing
+        self._placement_callback_registered = False
+        placement_capture_enabled = bool(self.model_config.placement_callback_path)
+        os.environ["VLLM_CAPTURE_ROUTING_FOR_PLACEMENT"] = (
+            "1" if placement_capture_enabled else "0"
+        )
+        # ///////////// Expert-based load balancing
 
         tracing_endpoint = self.observability_config.otlp_traces_endpoint
         if tracing_endpoint is not None:
@@ -891,6 +898,42 @@ class AsyncLLM(EngineClient):
     async def reset_mm_cache(self) -> None:
         await self.renderer.clear_mm_cache_async()
         await self.engine_core.reset_mm_cache_async()
+
+    # ///////////// Expert-based load balancing
+    async def maybe_register_placement_callback(self) -> None:
+        callback_path = self.model_config.placement_callback_path
+        if not callback_path or self._placement_callback_registered:
+            return
+
+        parallel_config = self.vllm_config.parallel_config
+        if not parallel_config.enable_eplb:
+            raise ValueError(
+                "--placement-callback-path requires --enable-eplb for online serving."
+            )
+        if parallel_config.eplb_config.policy != "custom":
+            raise ValueError(
+                "--placement-callback-path requires --eplb-config "
+                '\'{"policy":"custom", ...}\' so the custom policy can consume '
+                "the METIS placement callback."
+            )
+
+        abs_callback_path = os.path.abspath(callback_path)
+        if not os.path.isfile(abs_callback_path):
+            raise FileNotFoundError(
+                f"Placement callback file not found: {abs_callback_path}"
+            )
+
+        await self.collective_rpc(
+            "register_placement_callback",
+            args=(abs_callback_path, self.model_config.placement_callback_func),
+        )
+        self._placement_callback_registered = True
+        logger.info(
+            "Registered placement callback %s:%s for online EPLB placement.",
+            abs_callback_path,
+            self.model_config.placement_callback_func,
+        )
+    # ///////////// Expert-based load balancing
 
     async def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

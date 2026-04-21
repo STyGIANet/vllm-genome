@@ -1,150 +1,241 @@
 """
-placement_fns.py — Expert placement callback for combined_launch.py.
+placement_fns.py - Expert placement callback for combined_launch.py.
 
 Registered via:
     llm.collective_rpc("register_placement_callback",
                        args=(path_to_this_file, "compute_placement"))
 
-The callback runs after every forward pass (when routing data is available).
-Edit `compute_placement()` to implement your own placement algorithm.
-See OVERVIEW.md for the full API contract.
+The callback runs on the normal EPLB rearrangement cadence.
 """
 
-import sys
-import heapq
-import torch
 import logging
+import sys
+
+import torch
 from vllm.logger import init_logger
 
-# Use a "vllm." prefix so it inherits vLLM's logging configuration,
-# formatting, and log-level settings from the parent processes!
+try:
+    import pymetis
+except ImportError:
+    pymetis = None
+
+
 logger = init_logger("vllm.genome.placement")
 
-# Skip rebalancing if the optimal per-GPU load spread is below this fraction of
-# the mean GPU load.  At 5%, a cluster where GPUs carry 95–105% of the average
-# load is left alone — unnecessary movement avoided.
-IMBALANCE_THRESHOLD = 0.05
+
+def _get_layer_items(routing: dict) -> list[tuple[int, list[dict]]]:
+    return sorted(
+        (layer_id, captures)
+        for layer_id, captures in routing.items()
+        if isinstance(layer_id, int)
+    )
 
 
 def _greedy_pack(loads: list[float], num_gpus: int) -> dict[str, int]:
-    """Assign experts to GPUs minimising max GPU load (greedy bin-packing).
-
-    Args:
-        loads:    Per-expert token counts (index = expert_id).
-        num_gpus: Number of GPU slots to pack into.
-
-    Returns:
-        {"<expert_id>": <gpu_id>, ...} for every expert.
-    """
-    gpu_heap = [(0.0, g) for g in range(num_gpus)]
-    heapq.heapify(gpu_heap)
+    gpu_loads = [0.0] * num_gpus
+    gpu_counts = [0] * num_gpus
+    slots_per_gpu = max(1, len(loads) // num_gpus)
     assignment: dict[str, int] = {}
+
     for expert_id in sorted(range(len(loads)), key=lambda e: -loads[e]):
-        gpu_load, gpu_id = heapq.heappop(gpu_heap)
+        candidates = [
+            gpu_id for gpu_id in range(num_gpus)
+            if gpu_counts[gpu_id] < slots_per_gpu
+        ] or list(range(num_gpus))
+        gpu_id = min(candidates, key=lambda g: (gpu_loads[g], gpu_counts[g], g))
         assignment[str(expert_id)] = gpu_id
-        heapq.heappush(gpu_heap, (gpu_load + loads[expert_id], gpu_id))
+        gpu_counts[gpu_id] += 1
+        gpu_loads[gpu_id] += loads[expert_id]
     return assignment
 
 
-def _is_balanced(loads: list[float], num_gpus: int) -> bool:
-    """Return True if the optimal GPU load spread is within IMBALANCE_THRESHOLD.
+def _build_layer_loads(
+    layer_items: list[tuple[int, list[dict]]],
+) -> dict[int, list[int]]:
+    layer_loads: dict[int, list[int]] = {}
+    for layer_id, captures in layer_items:
+        layer_tensor = torch.stack([cap["expert_load"] for cap in captures]).sum(dim=0)
+        layer_loads[layer_id] = [int(v) for v in layer_tensor.tolist()]
+    return layer_loads
 
-    Runs the same greedy pack and checks whether moving experts would produce
-    a measurably unbalanced result.  If even the best packing is nearly flat,
-    the current placement is probably fine — no need to move anything.
-    """
-    if sum(loads) == 0:
-        return True
 
-    # Simulate the greedy result to get per-GPU loads.
-    gpu_heap = [(0.0, g) for g in range(num_gpus)]
-    heapq.heapify(gpu_heap)
-    for expert_load in sorted(loads, reverse=True):
-        gpu_load, gpu_id = heapq.heappop(gpu_heap)
-        heapq.heappush(gpu_heap, (gpu_load + expert_load, gpu_id))
+def _build_metis_inputs(
+    coactivation_edges: torch.Tensor,
+    num_nodes: int,
+) -> tuple[list[int], list[int], list[int]]:
+    pair_rows, pair_cols = torch.triu_indices(num_nodes, num_nodes, offset=1)
+    weights = coactivation_edges.cpu()
+    nonzero_mask = weights > 0
 
-    gpu_loads = [load for load, _ in gpu_heap]
-    avg = sum(gpu_loads) / num_gpus
-    if avg == 0:
-        return True
-    spread = (max(gpu_loads) - min(gpu_loads)) / avg
-    return spread < IMBALANCE_THRESHOLD
+    adjacency_lists: list[list[int]] = [[] for _ in range(num_nodes)]
+    edge_weight_lists: list[list[int]] = [[] for _ in range(num_nodes)]
+
+    nz_rows = pair_rows[nonzero_mask].tolist()
+    nz_cols = pair_cols[nonzero_mask].tolist()
+    nz_weights = weights[nonzero_mask].tolist()
+
+    for src, dst, weight in zip(nz_rows, nz_cols, nz_weights):
+        w = int(weight)
+        adjacency_lists[src].append(dst)
+        edge_weight_lists[src].append(w)
+        adjacency_lists[dst].append(src)
+        edge_weight_lists[dst].append(w)
+
+    xadj = [0]
+    adjncy: list[int] = []
+    eweights: list[int] = []
+    for neighbors, neighbor_weights in zip(adjacency_lists, edge_weight_lists):
+        adjncy.extend(neighbors)
+        eweights.extend(neighbor_weights)
+        xadj.append(len(adjncy))
+
+    return xadj, adjncy, eweights
+
+
+def _partition_with_metis(
+    coactivation_edges: torch.Tensor,
+    layer_ids: list[int],
+    num_experts: int,
+    num_gpus: int,
+) -> list[int] | None:
+    if pymetis is None:
+        logger.warning("pymetis is not installed; falling back to greedy placement.")
+        return None
+
+    num_nodes = len(layer_ids) * num_experts
+    if num_nodes == 0:
+        return None
+
+    xadj, adjncy, eweights = _build_metis_inputs(coactivation_edges, num_nodes)
+    if not adjncy:
+        return None
+
+    _, membership = pymetis.part_graph(
+        num_gpus,
+        xadj=xadj,
+        adjncy=adjncy,
+        eweights=eweights,
+    )
+    return [int(part_id) for part_id in membership]
+
+
+def _repair_partition_to_layer_configs(
+    membership: list[int],
+    layer_ids: list[int],
+    layer_loads: dict[int, list[int]],
+    num_experts: int,
+    num_gpus: int,
+) -> dict[str, dict[str, int]]:
+    slots_per_gpu = max(1, num_experts // num_gpus)
+    layer_configs: dict[str, dict[str, int]] = {}
+
+    for layer_pos, layer_id in enumerate(layer_ids):
+        gpu_counts = [0] * num_gpus
+        gpu_loads = [0] * num_gpus
+        layer_mapping: dict[str, int] = {}
+        loads = layer_loads[layer_id]
+
+        for expert_id in sorted(range(num_experts), key=lambda e: -loads[e]):
+            node_id = layer_pos * num_experts + expert_id
+            preferred_gpu = membership[node_id]
+
+            if gpu_counts[preferred_gpu] < slots_per_gpu:
+                chosen_gpu = preferred_gpu
+            else:
+                candidates = [
+                    gpu_id for gpu_id in range(num_gpus)
+                    if gpu_counts[gpu_id] < slots_per_gpu
+                ] or list(range(num_gpus))
+                chosen_gpu = min(
+                    candidates,
+                    key=lambda g: (gpu_loads[g], gpu_counts[g], g),
+                )
+
+            layer_mapping[str(expert_id)] = chosen_gpu
+            gpu_counts[chosen_gpu] += 1
+            gpu_loads[chosen_gpu] += loads[expert_id]
+
+        layer_configs[str(layer_id)] = layer_mapping
+
+    return layer_configs
 
 
 def compute_placement(routing: dict) -> dict:
-    """Per-layer load-balancing via greedy bin-packing with imbalance threshold.
-
-    Computes an independent expert→GPU assignment for each MoE layer using
-    that layer's globally aggregated token counts.  Returns per-layer configs
-    so that, for example, layer 5 can put expert 4 on GPU 2 while layer 6
-    puts expert 4 on GPU 7 — whatever minimises that layer's load imbalance.
-
-    Skips the update entirely (returns {}) if the optimal placement for every
-    layer is already within IMBALANCE_THRESHOLD of balanced, avoiding
-    unnecessary NCCL P2P expert transfers.
-
-    Args:
-    routing: {
-        layer_id (int): [   # one entry per MoE layer (0–31 for Mixtral)
-            {
-                'topk_ids':     Tensor[T, K],  # T = tokens on THIS rank, K = 2 for Mixtral
-                'topk_weights': Tensor[T, K],  # gating weights for those experts
-                'num_tokens':   int,           # == T
-                'expert_load':  Tensor[E],     # E = 8 experts; GLOBAL all-reduced counts
-                'num_gpus':     int,           # 8
-            }
-        ]
-    }
-
-    Returns:
-        {"expert_to_gpu": {...}, "layer_configs": {"<layer_id>": {...}, ...}}
-        or {} to skip (keep current placement unchanged).
-    """
+    """Compute per-layer expert placement from a global co-activation graph."""
     if not routing:
         return {}
-    
-    logger.debug("Starting compute placement computation...")
 
-    
+    layer_items = _get_layer_items(routing)
+    if not layer_items:
+        return {}
+
+    first_cap = layer_items[0][1][0]
+    if "expert_load" not in first_cap:
+        return {}
+
+    graph_meta = routing.get("__graph__", {})
+    coactivation_edges = graph_meta.get("coactivation_edges")
+    if coactivation_edges is None:
+        return {}
+
+    layer_ids = [int(layer_id) for layer_id, _ in layer_items]
+    num_experts = int(graph_meta.get("num_experts", len(first_cap["expert_load"])))
+    num_gpus = int(first_cap["num_gpus"])
+    num_nodes = len(layer_ids) * num_experts
+
     if logger.isEnabledFor(logging.INFO):
         total = 0
-        for layer, data in routing.items():
-            # print("LAYER: ", layer)
-            # print("num_tokens", data[0]["num_tokens"])
-            # print('topk_ids', data[0]['topk_ids'])
-            total += data[0]['topk_ids'].nbytes + data[0]['topk_weights'].nbytes + data[0]['expert_load'].nbytes + sys.getsizeof(data[0]['num_tokens']) + sys.getsizeof(data[0]['num_gpus'])
-        
-        logger.info("Total size of routing data: %s bytes", total)
+        for _layer_id, captures in layer_items:
+            total += (
+                captures[0]["expert_load"].nbytes
+                + sys.getsizeof(captures[0]["num_gpus"])
+            )
+            if "num_tokens" in captures[0]:
+                total += sys.getsizeof(captures[0]["num_tokens"])
+        total += coactivation_edges.nbytes
+        logger.info("Total routing payload size: %s bytes", total)
 
-    first_cap = next(iter(routing.values()))[0]
-    if 'expert_load' not in first_cap:
-        return {}
+    layer_loads = _build_layer_loads(layer_items)
 
-    num_gpus: int = first_cap['num_gpus']
+    membership = _partition_with_metis(
+        coactivation_edges=coactivation_edges,
+        layer_ids=layer_ids,
+        num_experts=num_experts,
+        num_gpus=num_gpus,
+    )
 
-    # Build per-layer load vectors (CPU list, used only at rebalance time).
-    layer_loads: dict[int, list[float]] = {}
-    for layer_id, captures in routing.items():
-        layer_tensor = torch.stack([cap['expert_load'] for cap in captures]).sum(dim=0)
-        layer_loads[layer_id] = layer_tensor.tolist()
+    if membership is None:
+        layer_configs = {
+            str(layer_id): _greedy_pack(loads, num_gpus)
+            for layer_id, loads in layer_loads.items()
+        }
+    else:
+        expected_nodes = num_nodes
+        if len(membership) != expected_nodes:
+            logger.warning(
+                "METIS returned %d nodes, expected %d; falling back to greedy.",
+                len(membership),
+                expected_nodes,
+            )
+            layer_configs = {
+                str(layer_id): _greedy_pack(loads, num_gpus)
+                for layer_id, loads in layer_loads.items()
+            }
+        else:
+            layer_configs = _repair_partition_to_layer_configs(
+                membership=membership,
+                layer_ids=layer_ids,
+                layer_loads=layer_loads,
+                num_experts=num_experts,
+                num_gpus=num_gpus,
+            )
 
-    # If every layer is already well-balanced, skip the rebalance entirely.
-    if all(_is_balanced(loads, num_gpus) for loads in layer_loads.values()):
-        return {}
-
-    # Per-layer greedy bin-packing.
-    layer_configs: dict[str, dict[str, int]] = {
-        str(layer_id): _greedy_pack(loads, num_gpus)
-        for layer_id, loads in layer_loads.items()
-    }
-
-    # Global fallback for any layer not present in routing this step (e.g. dense
-    # layers that were skipped).  Use the sum across all observed layers.
-    all_loads_tensor = torch.tensor(list(layer_loads.values()))  # [L, E]
-    global_loads = all_loads_tensor.sum(dim=0).tolist()
-    global_assignment = _greedy_pack(global_loads, num_gpus)
+    global_loads = [0] * num_experts
+    for loads in layer_loads.values():
+        for expert_id, load in enumerate(loads):
+            global_loads[expert_id] += load
 
     return {
-        "expert_to_gpu": global_assignment,
+        "expert_to_gpu": _greedy_pack(global_loads, num_gpus),
         "layer_configs": layer_configs,
     }

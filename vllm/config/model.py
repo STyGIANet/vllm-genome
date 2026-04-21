@@ -206,6 +206,28 @@ class ModelConfig:
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
+    # ///////////// Expert-based load balancing
+    enable_prefix_affinity_routing: bool = False
+    """Whether to enable prompt prefix routing based on expert affinity."""
+    enable_kv_block_prefix_routing: bool = False
+    """Whether to enable exact KV block-prefix routing from live cache state."""
+    enable_load_score_routing: bool = False
+    """Whether to include normalized load as a routing preference score."""
+    expert_affinity_routing_weight: float = 1.0
+    """Linear-combination weight for the expert-affinity routing score."""
+    prefix_affinity_only_prefill: bool = False
+    """Whether expert-affinity learning should happen after prefill only."""
+    kv_block_prefix_routing_weight: float = 1.0
+    """Linear-combination weight for the KV block-prefix routing score."""
+    load_score_routing_weight: float = 1.0
+    """Linear-combination weight for the normalized load routing score."""
+    load_balancer_debug: bool = False
+    """Whether to print expert/KV/load routing diagnostics during serving."""
+    placement_callback_path: str | None = None
+    """Optional Python file that exports the EPLB/METIS placement callback."""
+    placement_callback_func: str = "compute_placement"
+    """Callback symbol name to load from ``placement_callback_path``."""
+    # ///////////// Expert-based load balancing
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
     max_logprobs: int = 20
