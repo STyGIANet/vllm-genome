@@ -2114,6 +2114,18 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 shadow_request.request_id = self._make_shadow_request_id(
                     request.request_id, eng_idx
                 )
+                if shadow_request.sampling_params is not None:
+                    shadow_request.sampling_params = (
+                        shadow_request.sampling_params.clone()
+                    )
+                    shadow_request.sampling_params.skip_reading_prefix_cache = True
+                    shadow_request.sampling_params.skip_writing_prefix_cache = True
+                if shadow_request.pooling_params is not None:
+                    shadow_request.pooling_params = (
+                        shadow_request.pooling_params.clone()
+                    )
+                    shadow_request.pooling_params.skip_reading_prefix_cache = True
+                    shadow_request.pooling_params.skip_writing_prefix_cache = True
                 self._register_shadow_request(
                     request.request_id,
                     shadow_request.request_id,

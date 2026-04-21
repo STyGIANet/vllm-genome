@@ -410,7 +410,11 @@ class KVCacheManager:
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
-        if not self.enable_caching or delay_cache_blocks:
+        if (
+            not self.enable_caching
+            or delay_cache_blocks
+            or request.skip_writing_prefix_cache
+        ):
             return self.create_kv_cache_blocks(new_blocks)
 
         # NOTE(woosuk): We want to commit (cache) up to num_local_computed_tokens
@@ -531,7 +535,7 @@ class KVCacheManager:
             num_computed_tokens: The number of computed tokens, including tokens
                 that are already cached and tokens to be cached.
         """
-        if self.enable_caching:
+        if self.enable_caching and not request.skip_writing_prefix_cache:
             self.coordinator.cache_blocks(request, num_computed_tokens)
 
     def create_kv_cache_blocks(

@@ -65,6 +65,7 @@ class PoolingParams(
     task: PoolingTask | None = None
     requires_token_ids: bool = False
     skip_reading_prefix_cache: bool | None = None
+    skip_writing_prefix_cache: bool | None = None
     late_interaction_params: LateInteractionParams | None = None
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY

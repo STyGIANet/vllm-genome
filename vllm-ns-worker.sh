@@ -33,7 +33,7 @@ vllm serve $MODEL \
 	  ${EXTRA_ARGS} \
 	  ${VLLM_EXTRA_ARGS} \
 	  --disable-custom-all-reduce \
-      --expert-affinity-routing-weight 0.1 \
+      --expert-affinity-routing-weight 1 \
       --prefix-affinity-only-prefill \
       --kv-block-prefix-routing-weight 0.1 \
       --load-score-routing-weight 0.1 \

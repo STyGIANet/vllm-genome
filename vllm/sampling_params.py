@@ -285,6 +285,7 @@ class SamplingParams(
     _bad_words_token_ids: list[list[int]] | None = None
 
     skip_reading_prefix_cache: bool | None = None
+    skip_writing_prefix_cache: bool | None = None
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
 
