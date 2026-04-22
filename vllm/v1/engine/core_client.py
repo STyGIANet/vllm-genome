@@ -61,6 +61,8 @@ from vllm.v1.engine.utils import (
 from vllm.v1.executor import Executor
 from vllm.v1.prefix_router import (
     build_query_block_extra_keys,
+    build_owner_cache_from_physical_to_logical_map,
+    compute_owner_from_routed_experts,
     ExactBlockPrefixIndex,
     TokenRadixTree,
     prepare_block_prefix_query,
@@ -70,6 +72,8 @@ from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
+
+PREFIX_ROUTER_LEARNING_TIMEOUT_S = 2.0
 
 AnyFuture: TypeAlias = asyncio.Future[Any] | Future[Any]
 
@@ -407,6 +411,7 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     route_reply_task: asyncio.Task | None = None
+    prefix_learning_queue_task: asyncio.Task | None = None
     # ///////////// Expert-based load balancing
     shutdown_path: str | None = None
 
@@ -440,6 +445,7 @@ class BackgroundResources:
                 self.output_queue_task,
                 self.stats_update_task,
                 self.route_reply_task,
+                self.prefix_learning_queue_task,
             )
 
             def close_sockets_and_tasks():
@@ -507,6 +513,14 @@ class QueuedDispatchRequest:
     request: EngineCoreRequest
     dispatched: asyncio.Future[None]
     cancelled: bool = False
+
+
+@dataclass
+class PrefixLearningWorkItem:
+    request_id: str
+    engine: EngineIdentity
+    prompt_token_ids: list[int]
+    routed_experts: Any
 # ///////////// Expert-based load balancing
 
 
@@ -1334,6 +1348,18 @@ class DPAsyncMPClient(AsyncMPClient):
                     if (
                         isinstance(decoded, (list, tuple))
                         and len(decoded) == 3
+                        and decoded[0] == "PREFIX_ROUTER_PLACEMENT_UPDATE"
+                    ):
+                        if hasattr(
+                            self, "_handle_prefix_router_placement_coordinator_update"
+                        ):
+                            self._handle_prefix_router_placement_coordinator_update(
+                                decoded
+                            )
+                        continue
+                    if (
+                        isinstance(decoded, (list, tuple))
+                        and len(decoded) == 3
                         and decoded[0] == "KV_PREFIX_EVENT_BATCH"
                     ):
                         if hasattr(self, "_handle_kv_prefix_coordinator_update"):
@@ -1420,7 +1446,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             rank: idx for idx, rank in enumerate(self.engine_ranks_managed)
         }
         self.expert_affinity_enabled = self._is_prefix_router_supported()
-        self.expert_affinity_update_tasks: set[asyncio.Task] = set()
+        self.expert_affinity_learning_enabled = (
+            self._is_prefix_router_learning_supported()
+        )
         self.expert_affinity_send_lock = asyncio.Lock()
         self.kv_block_prefix_enabled = self._is_kv_block_prefix_supported()
         model_config = self.vllm_config.model_config
@@ -1431,7 +1459,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
         self.prefix_affinity_only_prefill = (
             model_config.prefix_affinity_only_prefill
-            if self.expert_affinity_enabled
+            if self.expert_affinity_learning_enabled
             else False
         )
         self.kv_block_prefix_weight = (
@@ -1446,6 +1474,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             else 0.0
         )
         self.load_balancer_debug = model_config.load_balancer_debug
+        self.prefix_affinity_learning_queue_size = max(
+            1, int(model_config.prefix_affinity_learning_queue_size)
+        )
         self.max_pending_requests_per_engine = max(
             0, int(model_config.max_pending_requests_per_engine)
         )
@@ -1467,13 +1498,17 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         if self.load_balancer_debug:
             logger.warning(
                 "LB debug enabled expert_affinity_enabled=%s kv_block_prefix_enabled=%s "
+                "expert_affinity_learning_enabled=%s "
                 "load_score_enabled=%s coordinator_routing_enabled=%s "
+                "prefix_affinity_learning_queue_size=%d "
                 "frontend_dispatch_queue_enabled=%s max_pending_requests_per_engine=%d "
                 "route_query_address=%s",
                 self.expert_affinity_enabled,
                 self.kv_block_prefix_enabled,
+                self.expert_affinity_learning_enabled,
                 self.load_score_enabled,
                 self.coordinator_routing_enabled,
+                self.prefix_affinity_learning_queue_size,
                 self.frontend_dispatch_queue_enabled,
                 self.max_pending_requests_per_engine,
                 self.route_query_address,
@@ -1486,6 +1521,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 rank: TokenRadixTree() for rank in self.engine_ranks_managed
             }
         )
+        self.prefix_router_owner_cache = None
+        self.prefix_router_owner_cache_epoch: int | None = None
         self.kv_block_prefix_indices: dict[int, ExactBlockPrefixIndex] = (
             {}
             if self.coordinator_routing_enabled
@@ -1506,6 +1543,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.route_request_futures: dict[int, asyncio.Future[CoordinatorRouteResponse]] = {}
         self.route_call_id = 0
         self.route_send_lock = asyncio.Lock()
+        self.prefix_learning_queue: deque[PrefixLearningWorkItem] = deque()
+        self.prefix_learning_queue_lock = asyncio.Lock()
 
         if self.coordinator_routing_enabled:
             assert self.route_query_address is not None
@@ -1642,6 +1681,74 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             else:
                 if not item.dispatched.done():
                     item.dispatched.set_result(None)
+
+    def _ensure_prefix_learning_queue_task(self) -> None:
+        if not self.expert_affinity_learning_enabled:
+            return
+        resources = self.resources
+        task = resources.prefix_learning_queue_task
+        if task is None or task.done():
+            resources.prefix_learning_queue_task = asyncio.create_task(
+                self._drain_prefix_learning_queue(),
+                name="PrefixAffinityLearningQueue",
+            )
+
+    async def _enqueue_prefix_learning_work_item(
+        self,
+        item: PrefixLearningWorkItem,
+    ) -> None:
+        if not self.expert_affinity_learning_enabled:
+            return
+
+        dropped_item: PrefixLearningWorkItem | None = None
+        queue_size = 0
+        async with self.prefix_learning_queue_lock:
+            if len(self.prefix_learning_queue) >= self.prefix_affinity_learning_queue_size:
+                dropped_item = self.prefix_learning_queue.pop()
+            self.prefix_learning_queue.appendleft(item)
+            queue_size = len(self.prefix_learning_queue)
+
+        if self.load_balancer_debug:
+            logger.warning(
+                "Prefix affinity learning queue enqueue request_id=%s size=%d/%d",
+                item.request_id,
+                queue_size,
+                self.prefix_affinity_learning_queue_size,
+            )
+            if dropped_item is not None:
+                logger.warning(
+                    "Prefix affinity learning queue dropped_oldest request_id=%s max_size=%d",
+                    dropped_item.request_id,
+                    self.prefix_affinity_learning_queue_size,
+                )
+
+        self._ensure_prefix_learning_queue_task()
+
+    async def _drain_prefix_learning_queue(self) -> None:
+        resources = self.resources
+        while True:
+            item: PrefixLearningWorkItem | None = None
+            async with self.prefix_learning_queue_lock:
+                if self.prefix_learning_queue:
+                    item = self.prefix_learning_queue.popleft()
+                else:
+                    resources.prefix_learning_queue_task = None
+                    return
+
+            assert item is not None
+            try:
+                await self._learn_prefix_router_update(
+                    request_id=item.request_id,
+                    engine=item.engine,
+                    prompt_token_ids=item.prompt_token_ids,
+                    routed_experts=item.routed_experts,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Prefix affinity learning failed request_id=%s error=%s",
+                    item.request_id,
+                    exc,
+                )
 
     async def _release_pending_slots_for_request(self, request_id: str) -> None:
         if not self.frontend_dispatch_queue_enabled:
@@ -1854,6 +1961,14 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     def _is_prefix_router_supported(self) -> bool:
         if not self.vllm_config.model_config.enable_prefix_affinity_routing:
             return False
+        return self._is_prefix_router_learning_supported()
+
+    def _is_prefix_router_learning_supported(self) -> bool:
+        if not (
+            self.vllm_config.model_config.enable_prefix_affinity_routing
+            or self.vllm_config.model_config.enable_return_routed_experts
+        ):
+            return False
 
         parallel_config = self.vllm_config.parallel_config
         unsupported_reasons = []
@@ -1872,8 +1987,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         if unsupported_reasons:
             logger.warning_once(
-                "Prefix affinity routing is enabled but unsupported for this "
-                "serving topology; leaving existing load balancing unchanged. %s",
+                "Prefix affinity learning is enabled but unsupported for this "
+                "serving topology; leaving existing behavior unchanged. %s",
                 "; ".join(unsupported_reasons),
             )
             return False
@@ -1951,13 +2066,30 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             tree.clear()
         self.expert_affinity_epoch = epoch
 
+    def _apply_prefix_router_placement_update(
+        self,
+        epoch: int,
+        physical_to_logical_map: Sequence[Sequence[int]],
+    ) -> None:
+        if not self.expert_affinity_learning_enabled:
+            return
+        if epoch > self.expert_affinity_epoch:
+            self._clear_prefix_router_state(epoch)
+        elif epoch < self.expert_affinity_epoch:
+            return
+        self.prefix_router_owner_cache = build_owner_cache_from_physical_to_logical_map(
+            physical_to_logical_map,
+            len(self.core_engines),
+        )
+        self.prefix_router_owner_cache_epoch = epoch
+
     def _apply_prefix_router_update(
         self,
         target_rank: int,
         epoch: int,
         prompt_token_ids: list[int],
     ) -> None:
-        if not self.expert_affinity_enabled or not prompt_token_ids:
+        if not self.expert_affinity_learning_enabled or not prompt_token_ids:
             return
         if epoch > self.expert_affinity_epoch:
             self._clear_prefix_router_state(epoch)
@@ -1968,7 +2100,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.expert_affinity_trees[target_rank].insert(prompt_token_ids)
 
     def _handle_prefix_router_coordinator_update(self, decoded: Sequence[Any]) -> None:
-        if not self.expert_affinity_enabled:
+        if not self.expert_affinity_learning_enabled:
             return
 
         _, source_client_index, target_rank, epoch, prompt_token_ids = decoded
@@ -1978,6 +2110,18 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             int(target_rank),
             int(epoch),
             list(prompt_token_ids),
+        )
+
+    def _handle_prefix_router_placement_coordinator_update(
+        self, decoded: Sequence[Any]
+    ) -> None:
+        if not self.expert_affinity_learning_enabled:
+            return
+
+        _, epoch, physical_to_logical_map = decoded
+        self._apply_prefix_router_placement_update(
+            int(epoch),
+            list(physical_to_logical_map),
         )
 
     def _apply_kv_prefix_event_batch(
@@ -2058,31 +2202,67 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             prompt_token_ids,
         )
         async with self.expert_affinity_send_lock:
-            await socket.send(msgspec.msgpack.encode(update))
+            await asyncio.wait_for(
+                socket.send(msgspec.msgpack.encode(update)),
+                timeout=PREFIX_ROUTER_LEARNING_TIMEOUT_S,
+            )
 
     async def _learn_prefix_router_update(
         self,
-        request_info: InFlightRequestInfo,
-        routed_experts,
+        request_id: str,
+        engine: EngineIdentity,
+        prompt_token_ids: list[int] | None,
+        routed_experts: Any,
     ) -> None:
-        if not self.expert_affinity_enabled:
+        if not self.expert_affinity_learning_enabled:
             return
 
-        prompt_token_ids = request_info.prompt_token_ids
         if not prompt_token_ids or routed_experts is None:
             return
 
+        engine_index = self._engine_index_for_identity(engine)
+        if self.load_balancer_debug:
+            logger.warning(
+                "Prefix affinity learning start request_id=%s engine_index=%d "
+                "prompt_tokens=%d",
+                request_id,
+                engine_index,
+                len(prompt_token_ids),
+            )
+
+        if self.load_balancer_debug:
+            logger.warning(
+                "Prefix affinity learning request_id=%s step=compute_owner:start",
+                request_id,
+            )
+        owner_cache = self.prefix_router_owner_cache
+        owner_epoch = self.prefix_router_owner_cache_epoch
+        if owner_cache is None or owner_epoch is None:
+            if self.load_balancer_debug:
+                logger.warning(
+                    "Prefix affinity learning request_id=%s step=compute_owner:skipped "
+                    "reason=missing_owner_cache",
+                    request_id,
+                )
+            return
         routed_experts_list = (
             routed_experts.tolist()
             if hasattr(routed_experts, "tolist")
             else routed_experts
         )
-        owner = await self._call_utility_async(
-            "prefix_router_compute_owner",
-            routed_experts_list,
-            len(prompt_token_ids),
-            engine=request_info.engine,
+        owner = compute_owner_from_routed_experts(
+            routed_experts=routed_experts_list,
+            prompt_token_count=len(prompt_token_ids),
+            owner_cache=owner_cache,
+            num_ranks=len(self.core_engines),
+            epoch=owner_epoch,
         )
+        if self.load_balancer_debug:
+            logger.warning(
+                "Prefix affinity learning request_id=%s step=compute_owner:done owner=%s",
+                request_id,
+                owner,
+            )
         if not owner:
             return
 
@@ -2099,30 +2279,44 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             logger.info(
                 "Prefix affinity update request_id=%s target_rank=%d epoch=%d "
                 "prompt_tokens=%d routed_experts_shape=%s",
-                request_info.request_id,
+                request_id,
                 target_rank,
                 epoch,
                 len(prompt_token_ids),
                 routed_shape,
             )
         self._apply_prefix_router_update(target_rank, epoch, prompt_token_ids)
-        await self._call_utility_async(
-            "prefix_router_upsert",
-            prompt_token_ids,
-            epoch,
-            engine=self.core_engines[target_rank],
-        )
-        await self._send_prefix_router_update(target_rank, epoch, prompt_token_ids)
-
-    def _finish_prefix_router_task(self, task: asyncio.Task) -> None:
-        self.expert_affinity_update_tasks.discard(task)
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
+        # Routing consults the frontend/coordinator radix-tree mirrors. The
+        # worker-local prefix tree is not used on the routing path, so avoid a
+        # per-request utility RPC here.
+        if self.load_balancer_debug:
             logger.warning(
-                "Prefix affinity routing update failed: %s",
-                exc,
+                "Prefix affinity learning request_id=%s step=upsert:skipped target_rank=%d",
+                request_id,
+                target_rank,
+            )
+        if self.load_balancer_debug:
+            logger.warning(
+                "Prefix affinity learning request_id=%s step=send_update:start target_rank=%d",
+                request_id,
+                target_rank,
+            )
+        try:
+            await self._send_prefix_router_update(
+                target_rank, epoch, prompt_token_ids
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Prefix affinity learning timed out request_id=%s step=send_update target_rank=%d",
+                request_id,
+                target_rank,
+            )
+            return
+        if self.load_balancer_debug:
+            logger.warning(
+                "Prefix affinity learning request_id=%s step=send_update:done target_rank=%d",
+                request_id,
+                target_rank,
             )
 
     def _get_expert_affinity_scores(
@@ -2393,6 +2587,16 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     ):
         primary_ids_to_abort: set[str] = set()
 
+        if outputs.prefix_router_placement_update is not None:
+            update = outputs.prefix_router_placement_update
+            epoch = update.get("epoch")
+            physical_to_logical_map = update.get("physical_to_logical_map")
+            if isinstance(epoch, int) and physical_to_logical_map is not None:
+                self._apply_prefix_router_placement_update(
+                    epoch,
+                    list(physical_to_logical_map),
+                )
+
         if outputs.outputs:
             filtered_outputs = []
             for output in outputs.outputs:
@@ -2408,7 +2612,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             for output in outputs.outputs:
                 await self._release_pending_slots_for_request(output.request_id)
 
-        if self.expert_affinity_enabled and outputs.outputs:
+        if self.expert_affinity_learning_enabled and outputs.outputs:
             for output in outputs.outputs:
                 request_info = self.reqs_in_flight.get(output.request_id)
                 if request_info is None:
@@ -2434,6 +2638,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 else:
                     if output.finish_reason is None:
                         continue
+                    if output.routed_experts is None:
+                        continue
                     if self.load_balancer_debug and output.routed_experts is not None:
                         routed_shape = (
                             tuple(output.routed_experts.shape)
@@ -2446,13 +2652,14 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                             output.request_id,
                             routed_shape,
                         )
-                task = asyncio.create_task(
-                    self._learn_prefix_router_update(
-                        request_info, output.routed_experts
+                await self._enqueue_prefix_learning_work_item(
+                    PrefixLearningWorkItem(
+                        request_id=output.request_id,
+                        engine=request_info.engine,
+                        prompt_token_ids=list(request_info.prompt_token_ids or []),
+                        routed_experts=output.routed_experts,
                     )
                 )
-                self.expert_affinity_update_tasks.add(task)
-                task.add_done_callback(self._finish_prefix_router_task)
     # ///////////// Expert-based load balancing
 
         if outputs.finished_requests and self.reqs_in_flight:

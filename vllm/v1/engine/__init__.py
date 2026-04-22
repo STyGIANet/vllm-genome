@@ -215,6 +215,9 @@ class EngineCoreOutputs(
     # In internal-DP LB mode, exact KV prefix-cache updates are relayed to the
     # coordinator so it can maintain global cached-prefix state for routing.
     kv_cache_event_batch: KVEventBatch | None = None
+    # Prefix-router placement updates are relayed to the coordinator and
+    # frontends so owner computation can happen locally.
+    prefix_router_placement_update: dict[str, Any] | None = None
     # ///////////// Expert-based load balancing
 
     def __post_init__(self):

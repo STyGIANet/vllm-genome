@@ -116,6 +116,7 @@ class LoggingStatLogger(StatLoggerBase):
                 self.vllm_config.compilation_config.cudagraph_capture_sizes,
             )
         self.last_prompt_throughput: float = 0.0
+        self.last_raw_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
         self.engine_is_idle = False
         self.aggregated = False
@@ -128,6 +129,7 @@ class LoggingStatLogger(StatLoggerBase):
 
         # Tracked stats over current local logging interval.
         self.num_prompt_tokens: int = 0
+        self.num_prompt_tokens_raw: int = 0
         self.num_generation_tokens: int = 0
         self.num_corrupted_reqs: int = 0
         self.num_preemptions: int = 0
@@ -139,6 +141,7 @@ class LoggingStatLogger(StatLoggerBase):
         # Save tracked stats for token counters.
         # Use computed tokens for prompt throughput (excludes cached/transferred)
         self.num_prompt_tokens += iteration_stats.prompt_token_stats.computed
+        self.num_prompt_tokens_raw += iteration_stats.prompt_token_stats.total
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
         self.num_preemptions += iteration_stats.num_preempted_reqs
@@ -192,19 +195,23 @@ class LoggingStatLogger(StatLoggerBase):
     def _update_stats(self):
         now = time.monotonic()
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
+        raw_prompt_throughput = self._get_throughput(self.num_prompt_tokens_raw, now)
         generation_throughput = self._get_throughput(self.num_generation_tokens, now)
 
         self._reset(now)
         self.engine_is_idle = not any(
             (
                 prompt_throughput,
+                raw_prompt_throughput,
                 generation_throughput,
                 self.last_prompt_throughput,
+                self.last_raw_prompt_throughput,
                 self.last_generation_throughput,
             )
         )
         self.last_generation_throughput = generation_throughput
         self.last_prompt_throughput = prompt_throughput
+        self.last_raw_prompt_throughput = raw_prompt_throughput
 
     def aggregate_scheduler_stats(self):
         # noop for per engine loggers
@@ -218,12 +225,14 @@ class LoggingStatLogger(StatLoggerBase):
         # Format and print output.
         log_parts = [
             "Avg prompt throughput: %.1f tokens/s",
+            "Avg prefill throughput: %.1f tokens/s",
             "Avg generation throughput: %.1f tokens/s",
             "Running: %d reqs",
             "Waiting: %d reqs",
         ]
         log_args: list[int | float | str] = [
             self.last_prompt_throughput,
+            self.last_raw_prompt_throughput,
             self.last_generation_throughput,
             self.last_scheduler_stats.num_running_reqs,
             self.last_scheduler_stats.num_waiting_reqs,

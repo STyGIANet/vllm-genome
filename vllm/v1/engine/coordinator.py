@@ -230,6 +230,7 @@ class DPCoordinatorProc:
         self.load_balancer_debug = load_balancer_debug
         self.kv_block_prefix_block_size = kv_block_prefix_block_size
         self.expert_affinity_epoch = 0
+        self.prefix_router_placement_epoch: int | None = None
         self.expert_affinity_trees = {
             rank: TokenRadixTree() for rank in range(engine_count)
         }
@@ -259,6 +260,16 @@ class DPCoordinatorProc:
         if tree is None:
             tree = self.expert_affinity_trees[target_rank] = TokenRadixTree()
         tree.insert(prompt_token_ids)
+
+    def _apply_prefix_router_placement_update(self, epoch: int) -> bool:
+        if not self.expert_affinity_enabled:
+            return False
+        if self.prefix_router_placement_epoch == epoch:
+            return False
+        self.prefix_router_placement_epoch = epoch
+        if epoch > self.expert_affinity_epoch:
+            self._clear_prefix_router_state(epoch)
+        return True
 
     def _apply_kv_prefix_event_batch(
         self,
@@ -754,6 +765,19 @@ class DPCoordinatorProc:
                     assert outputs.utility_output is None
 
                     eng_index = outputs.engine_index
+                    if outputs.prefix_router_placement_update is not None:
+                        update = outputs.prefix_router_placement_update
+                        epoch = int(update["epoch"])
+                        if self._apply_prefix_router_placement_update(epoch):
+                            publish_front.send(
+                                msgspec.msgpack.encode(
+                                    (
+                                        "PREFIX_ROUTER_PLACEMENT_UPDATE",
+                                        epoch,
+                                        update["physical_to_logical_map"],
+                                    )
+                                )
+                            )
                     if outputs.kv_cache_event_batch is not None:
                         self._apply_kv_prefix_event_batch(
                             eng_index,

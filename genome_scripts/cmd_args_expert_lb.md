@@ -12,7 +12,9 @@ Without that flag, expert-affinity learning happens at request finish in `vllm/v
 
 Owner GPU is computed from current expert placement in `vllm/v1/worker/worker_base.py`.
 
-Prefix is inserted into worker radix tree in `vllm/v1/worker/worker_base.py`.
+Prefill-finished learning work is queued in a bounded LIFO queue in `vllm/v1/engine/core_client.py`.
+
+Frontend radix tree is updated in `vllm/v1/engine/core_client.py`.
 
 Coordinator radix mirror is updated in `vllm/v1/engine/coordinator.py`.
 
@@ -36,7 +38,7 @@ Placement trigger is the normal EPLB step in `vllm/distributed/eplb/eplb_state.p
 # Expert Affinity Load Balancer
 Prefix match score path is `vllm/v1/prefix_router.py` to `vllm/v1/engine/coordinator.py` to `vllm/v1/engine/core_client.py`.
 
-Learning path is `vllm/v1/core/sched/scheduler.py` to `vllm/v1/engine/core_client.py` to `vllm/v1/worker/worker_base.py`.
+Learning path is `vllm/v1/core/sched/scheduler.py` to `vllm/v1/engine/core_client.py` to `vllm/v1/worker/worker_base.py` to `vllm/v1/engine/coordinator.py`.
 
 # KV Prefix Load Balancer
 Live KV cache events come from `vllm/v1/core/sched/scheduler.py`.
@@ -64,6 +66,8 @@ Main flags are in `vllm/config/model.py` and `vllm/engine/arg_utils.py`.
 `--enable-load-score-routing` enables normalized load score.
 
 `--expert-affinity-routing-weight`, `--kv-block-prefix-routing-weight`, and `--load-score-routing-weight` set the weighted sum.
+
+`--prefix-affinity-learning-queue-size` sets the bounded LIFO queue size for prefix learning work.
 
 `--max-pending-requests-per-engine` enables frontend-side admission queueing and caps how many requests can be pending at an engine before dispatch waits.
 

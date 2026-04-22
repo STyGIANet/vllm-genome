@@ -27,9 +27,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsReader,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.v1.core.encoder_cache_manager import (
@@ -270,8 +267,6 @@ class Scheduler(SchedulerInterface):
                 "(dcp_world_size > 1 or pcp_world_size > 1)"
             )
 
-            self.routed_experts_reader = RoutedExpertsReader.create()
-
             assert len(kv_cache_config.kv_cache_groups) > 0, (
                 "enable_return_routed_experts requires at least one kv cache group"
             )
@@ -296,9 +291,14 @@ class Scheduler(SchedulerInterface):
             if pcp_size * dcp_size > 1:
                 self.max_num_kv_tokens *= pcp_size * dcp_size
 
-            self.routed_experts_reader.attach_buffer(
-                max_num_kv_tokens=self.max_num_kv_tokens,
-                vllm_config=self.vllm_config,
+            hf_config = self.vllm_config.model_config.hf_text_config
+            self.routed_experts_buffer = np.zeros(
+                (
+                    self.max_num_kv_tokens,
+                    hf_config.num_hidden_layers,
+                    hf_config.num_experts_per_tok,
+                ),
+                dtype=np.int32,
             )
 
         self._pause_state: PauseState = PauseState.UNPAUSED
@@ -1320,6 +1320,9 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        prefix_router_placement_update = (
+            model_runner_output.prefix_router_placement_update
+        )
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1344,6 +1347,8 @@ class Scheduler(SchedulerInterface):
                 kv_connector_output.invalid_block_ids,
                 num_scheduled_tokens,
             )
+
+        self._apply_routed_experts_step(model_runner_output)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -1541,6 +1546,10 @@ class Scheduler(SchedulerInterface):
             for client_index, outs in outputs.items()
         }
 
+        if prefix_router_placement_update is not None:
+            for eco in engine_core_outputs.values():
+                eco.prefix_router_placement_update = prefix_router_placement_update
+
         finished_req_ids = self.finished_req_ids_dict
         if finished_req_ids:
             # Include ids of requests that finished since last outputs
@@ -1568,12 +1577,18 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         if local_events and self.emit_internal_kv_prefix_routing_events:
-            engine_core_outputs[-1] = EngineCoreOutputs(
-                kv_cache_event_batch=KVEventBatch(
-                    ts=time.time(),
-                    events=local_events,
-                )
+            eco = engine_core_outputs.get(-1)
+            if eco is None:
+                eco = engine_core_outputs[-1] = EngineCoreOutputs()
+            eco.kv_cache_event_batch = KVEventBatch(
+                ts=time.time(),
+                events=local_events,
             )
+        if prefix_router_placement_update is not None:
+            eco = engine_core_outputs.get(-1)
+            if eco is None:
+                eco = engine_core_outputs[-1] = EngineCoreOutputs()
+            eco.prefix_router_placement_update = prefix_router_placement_update
         # ///////////// Expert-based load balancing
 
         return engine_core_outputs
@@ -1622,13 +1637,29 @@ class Scheduler(SchedulerInterface):
         self._enqueue_waiting_request(request)
         return False
 
+    def _apply_routed_experts_step(self, model_runner_output: ModelRunnerOutput) -> None:
+        if not self.vllm_config.model_config.enable_return_routed_experts:
+            return
+
+        step = model_runner_output.routed_experts_step
+        indices = model_runner_output.routed_experts_step_indices
+        if step is None or indices is None:
+            return
+        if len(step) == 0 or len(indices) == 0:
+            return
+
+        assert self.routed_experts_buffer is not None
+        self.routed_experts_buffer[indices] = step
+
     def _get_routed_experts(self, request: Request) -> np.ndarray | None:
         if not self.vllm_config.model_config.enable_return_routed_experts:
             return None
 
         kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
         block_ids = kv_blocks.get_block_ids()[self.routed_experts_attn_gid]
-        num_tokens = request.num_tokens - 1
+        # Routed-expert capture is prompt-only. Decode-token expert traces are
+        # intentionally skipped to keep the feature off the steady-state hot path.
+        num_tokens = request.num_prompt_tokens
 
         # compute slot mapping using attention group's block_size
         block_ids_array = np.array(block_ids, dtype=np.int32)
@@ -1645,7 +1676,8 @@ class Scheduler(SchedulerInterface):
             + block_ids_array.reshape((num_blocks, 1)) * block_size
         ).flatten()[:num_tokens]
 
-        return self.routed_experts_reader.get_routed_experts(indices=slot_mapping)
+        assert self.routed_experts_buffer is not None
+        return self.routed_experts_buffer[slot_mapping].copy()
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]

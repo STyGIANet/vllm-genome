@@ -223,6 +223,8 @@ class ModelConfig:
     """Linear-combination weight for the normalized load routing score."""
     load_balancer_debug: bool = False
     """Whether to print expert/KV/load routing diagnostics during serving."""
+    prefix_affinity_learning_queue_size: int = 32
+    """Bounded LIFO queue size for prefix-affinity learning work items."""
     max_pending_requests_per_engine: int = 0
     """Frontend-side admission limit for requests pending at each engine.
     Set to 0 to disable the frontend dispatch queue."""

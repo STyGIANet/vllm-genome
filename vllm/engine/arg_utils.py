@@ -389,6 +389,9 @@ class EngineArgs:
     )
     load_score_routing_weight: float = ModelConfig.load_score_routing_weight
     load_balancer_debug: bool = ModelConfig.load_balancer_debug
+    prefix_affinity_learning_queue_size: int = (
+        ModelConfig.prefix_affinity_learning_queue_size
+    )
     max_pending_requests_per_engine: int = (
         ModelConfig.max_pending_requests_per_engine
     )
@@ -771,6 +774,10 @@ class EngineArgs:
         model_group.add_argument(
             "--load-balancer-debug",
             **model_kwargs["load_balancer_debug"],
+        )
+        model_group.add_argument(
+            "--prefix-affinity-learning-queue-size",
+            **model_kwargs["prefix_affinity_learning_queue_size"],
         )
         model_group.add_argument(
             "--max-pending-requests-per-engine",
@@ -1493,6 +1500,9 @@ class EngineArgs:
             kv_block_prefix_routing_weight=self.kv_block_prefix_routing_weight,
             load_score_routing_weight=self.load_score_routing_weight,
             load_balancer_debug=self.load_balancer_debug,
+            prefix_affinity_learning_queue_size=(
+                self.prefix_affinity_learning_queue_size
+            ),
             max_pending_requests_per_engine=(
                 self.max_pending_requests_per_engine
             ),

@@ -253,6 +253,13 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # Step-local routed experts for the current scheduled tokens.
+    routed_experts_step: np.ndarray | None = None
+    routed_experts_step_indices: np.ndarray | None = None
+
+    # Prefix-router owner-cache updates derived from EPLB placement changes.
+    prefix_router_placement_update: dict[str, object] | None = None
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):

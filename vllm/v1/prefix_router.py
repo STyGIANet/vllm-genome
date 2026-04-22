@@ -52,6 +52,90 @@ class TokenRadixTree:
         return depth
 
 
+PrefixRouterOwnerCache: TypeAlias = list[list[tuple[int, ...]]]
+
+
+def build_owner_cache_from_physical_to_logical_map(
+    physical_to_logical_map: Sequence[Sequence[int]],
+    num_ranks: int,
+) -> PrefixRouterOwnerCache:
+    if num_ranks <= 0 or not physical_to_logical_map:
+        return []
+
+    num_layers = len(physical_to_logical_map)
+    num_physical_experts = len(physical_to_logical_map[0])
+    if num_physical_experts <= 0:
+        return [[] for _ in range(num_layers)]
+
+    max_logical_expert = -1
+    for logical_ids in physical_to_logical_map:
+        for logical_id in logical_ids:
+            if logical_id > max_logical_expert:
+                max_logical_expert = logical_id
+
+    if max_logical_expert < 0:
+        return [[] for _ in range(num_layers)]
+
+    owner_sets = [
+        [set() for _ in range(max_logical_expert + 1)] for _ in range(num_layers)
+    ]
+    slots_per_rank = max(num_physical_experts // num_ranks, 1)
+    for layer_idx, logical_ids in enumerate(physical_to_logical_map):
+        for physical_idx, logical_id in enumerate(logical_ids):
+            if logical_id < 0:
+                continue
+            owner_rank = min(physical_idx // slots_per_rank, num_ranks - 1)
+            owner_sets[layer_idx][logical_id].add(owner_rank)
+
+    return [
+        [tuple(sorted(rank_ids)) for rank_ids in layer_sets]
+        for layer_sets in owner_sets
+    ]
+
+
+def compute_owner_from_routed_experts(
+    routed_experts: Sequence[Sequence[Sequence[int]]],
+    prompt_token_count: int,
+    owner_cache: PrefixRouterOwnerCache,
+    num_ranks: int,
+    epoch: int,
+) -> dict[str, int] | None:
+    if (
+        not routed_experts
+        or prompt_token_count <= 0
+        or not owner_cache
+        or num_ranks <= 0
+    ):
+        return None
+
+    num_prompt_tokens = min(prompt_token_count, len(routed_experts))
+    scores = [0] * num_ranks
+    seen_pairs: set[tuple[int, int]] = set()
+
+    for token_layers in routed_experts[:num_prompt_tokens]:
+        for layer_idx, layer_experts in enumerate(token_layers[: len(owner_cache)]):
+            layer_owner_cache = owner_cache[layer_idx]
+            for raw_expert_id in layer_experts:
+                expert_id = int(raw_expert_id)
+                if expert_id < 0 or expert_id >= len(layer_owner_cache):
+                    continue
+                layer_expert = (layer_idx, expert_id)
+                if layer_expert in seen_pairs:
+                    continue
+                seen_pairs.add(layer_expert)
+                for owner_rank in layer_owner_cache[expert_id]:
+                    scores[owner_rank] += 1
+
+    if not seen_pairs:
+        return None
+
+    target_rank = max(range(num_ranks), key=lambda rank: (scores[rank], -rank))
+    return {
+        "target_rank": target_rank,
+        "epoch": epoch,
+    }
+
+
 BlockPrefixKey: TypeAlias = tuple[tuple[int, ...], tuple[Any, ...] | None]
 
 

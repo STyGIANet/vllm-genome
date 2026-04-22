@@ -19,6 +19,9 @@ else
 	EXTRA_ARGS="--headless"
 fi
 
+
+export DEEP_EP_SM8X_NUM_CHANNELS=1
+
 echo "$RANK, $HEAD_RANK"
 vllm serve $MODEL \
 	  --tensor-parallel-size 1 \
@@ -30,22 +33,23 @@ vllm serve $MODEL \
 	  --trust_remote_code \
 	  --data-parallel-address ${HEAD_IP} \
 	  --data-parallel-rpc-port 18000 \
+	  --max_num_batched_tokens 2048 \
 	  ${EXTRA_ARGS} \
 	  ${VLLM_EXTRA_ARGS} \
-      --expert-affinity-routing-weight 0 \
-      --kv-block-prefix-routing-weight 0.1 \
-      --load-score-routing-weight 0.1 \
+      --expert-affinity-routing-weight 1 \
+      --kv-block-prefix-routing-weight 0.5 \
+      --load-score-routing-weight 0.5 \
       --enable-eplb \
-      --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000}' \
-	  --placement-callback-path ${PLACEMENT_PATH} \
-	  --placement-callback-func compute_placement \
-	  --load-balancer-debug \
-      --enable-return-routed-experts \
       --enable-load-score-routing \
       --enable-kv-block-prefix-routing \
-      --max-pending-requests-per-engine 8 \
-      --prefix-affinity-only-prefill \
-      --enable-prefix-affinity-routing \
+      # --enable-return-routed-experts \
+      # --max-pending-requests-per-engine 256 \
+      # --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000}' \
+	  # --placement-callback-path ${PLACEMENT_PATH} \
+	  # --placement-callback-func compute_placement \
+      # --enable-prefix-affinity-routing \
+      # --prefix-affinity-only-prefill \
+	  # --load-balancer-debug \
 
       # --max-pending-requests-per-engine set this to a small number for now 
       # until the load balancer is stable and works as expected.

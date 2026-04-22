@@ -384,6 +384,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
+    prefill_capture_ranges: list[tuple[int, int]]
 
 
 class GPUModelRunner(
@@ -481,6 +482,8 @@ class GPUModelRunner(
         self.eplb_state: EplbState | None = None
         # NOTE(yongji): flag to temporarily disable EPLB during scaling up/down
         self.eep_eplb_suppressed = False
+        self._last_prefix_router_placement_epoch: int | None = None
+        self._last_prefix_router_physical_to_logical_map: torch.Tensor | None = None
         """
         State of the expert parallelism load balancer.
 
@@ -3273,6 +3276,43 @@ class GPUModelRunner(
             ),
         )
 
+    def _take_prefix_router_placement_update(self) -> dict[str, object] | None:
+        if not (
+            self.model_config.enable_prefix_affinity_routing
+            or self.model_config.enable_return_routed_experts
+        ):
+            return None
+        if self.eplb_state is None or not self.eplb_state.model_states:
+            return None
+
+        from vllm.distributed.eplb.policy.custom_policy import StaticPlacementPolicy
+
+        epoch = StaticPlacementPolicy.get_prefix_router_epoch()
+        model_state = next(iter(self.eplb_state.model_states.values()))
+        physical_to_logical_map = model_state.physical_to_logical_map.detach().cpu()
+
+        if self._last_prefix_router_physical_to_logical_map is None:
+            self._last_prefix_router_physical_to_logical_map = (
+                physical_to_logical_map.clone()
+            )
+            self._last_prefix_router_placement_epoch = epoch
+        elif self._last_prefix_router_placement_epoch == epoch:
+            return None
+        elif torch.equal(
+            self._last_prefix_router_physical_to_logical_map, physical_to_logical_map
+        ):
+            return None
+        else:
+            self._last_prefix_router_physical_to_logical_map = (
+                physical_to_logical_map.clone()
+            )
+            self._last_prefix_router_placement_epoch = epoch
+
+        return {
+            "epoch": epoch,
+            "physical_to_logical_map": physical_to_logical_map.tolist(),
+        }
+
     def setup_eplb_from_mapping(
         self,
         expanded_physical_to_logical: torch.Tensor,
@@ -3954,13 +3994,6 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
-        if self.routed_experts_initialized:
-            capturer = RoutedExpertsCapturer.get_instance()
-            if capturer is not None:
-                capturer.clear_buffer()  # noqa
-            else:
-                logger.error("RoutedExpertsCapturer not initialized.")
-
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -4306,6 +4339,7 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            prefill_capture_ranges,
         )
         self.kv_connector_output = kv_connector_output
 
@@ -4350,6 +4384,7 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            prefill_capture_ranges,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -4508,12 +4543,26 @@ class GPUModelRunner(
         self.kv_connector_output = None
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+            routed_experts_step = None
+            routed_experts_step_indices = None
             if self.routed_experts_initialized:
                 capturer = RoutedExpertsCapturer.get_instance()
                 if capturer is not None:
-                    capturer.save_captured_experts(indices=self.slot_mapping)  # noqa
+                    routed_experts_step = capturer.get_captured_experts_for_ranges(
+                        prefill_capture_ranges
+                    )
+                    if self.slot_mapping is not None and prefill_capture_ranges:
+                        routed_experts_step_indices = np.concatenate(
+                            [
+                                self.slot_mapping[start:end]
+                                for start, end in prefill_capture_ranges
+                                if end > start
+                            ]
+                        ).copy()
                 else:
                     logger.error("RoutedExpertsCapturer not initialized.")
+
+            prefix_router_placement_update = self._take_prefix_router_placement_update()
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -4527,6 +4576,9 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                routed_experts_step=routed_experts_step,
+                routed_experts_step_indices=routed_experts_step_indices,
+                prefix_router_placement_update=prefix_router_placement_update,
             )
 
         if not self.use_async_scheduling:
