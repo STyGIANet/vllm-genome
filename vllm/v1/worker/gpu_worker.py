@@ -552,7 +552,10 @@ class Worker(WorkerBase):
         else:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
-        if self.model_config.enable_return_routed_experts:
+        if (
+            self.model_config.enable_return_routed_experts
+            or self.model_config.enable_prefix_affinity_routing
+        ):
             self.model_runner.init_routed_experts_capturer()
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping

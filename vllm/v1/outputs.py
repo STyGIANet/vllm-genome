@@ -257,6 +257,9 @@ class ModelRunnerOutput:
     routed_experts_step: np.ndarray | None = None
     routed_experts_step_indices: np.ndarray | None = None
 
+    # Compact prompt-only prefix-learning summaries keyed by request id.
+    prefix_learning_pairs_by_req: dict[str, list[list[int]]] | None = None
+
     # Prefix-router owner-cache updates derived from EPLB placement changes.
     prefix_router_placement_update: dict[str, object] | None = None
 

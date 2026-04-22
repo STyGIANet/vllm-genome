@@ -62,7 +62,7 @@ from vllm.v1.executor import Executor
 from vllm.v1.prefix_router import (
     build_query_block_extra_keys,
     build_owner_cache_from_physical_to_logical_map,
-    compute_owner_from_routed_experts,
+    compute_owner_from_layer_expert_pairs,
     ExactBlockPrefixIndex,
     TokenRadixTree,
     prepare_block_prefix_query,
@@ -520,7 +520,7 @@ class PrefixLearningWorkItem:
     request_id: str
     engine: EngineIdentity
     prompt_token_ids: list[int]
-    routed_experts: Any
+    layer_expert_pairs: Any
 # ///////////// Expert-based load balancing
 
 
@@ -1741,7 +1741,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     request_id=item.request_id,
                     engine=item.engine,
                     prompt_token_ids=item.prompt_token_ids,
-                    routed_experts=item.routed_experts,
+                    layer_expert_pairs=item.layer_expert_pairs,
                 )
             except Exception as exc:
                 logger.warning(
@@ -1964,10 +1964,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         return self._is_prefix_router_learning_supported()
 
     def _is_prefix_router_learning_supported(self) -> bool:
-        if not (
-            self.vllm_config.model_config.enable_prefix_affinity_routing
-            or self.vllm_config.model_config.enable_return_routed_experts
-        ):
+        if not self.vllm_config.model_config.enable_prefix_affinity_routing:
             return False
 
         parallel_config = self.vllm_config.parallel_config
@@ -2212,12 +2209,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         request_id: str,
         engine: EngineIdentity,
         prompt_token_ids: list[int] | None,
-        routed_experts: Any,
+        layer_expert_pairs: Any,
     ) -> None:
         if not self.expert_affinity_learning_enabled:
             return
 
-        if not prompt_token_ids or routed_experts is None:
+        if not prompt_token_ids or layer_expert_pairs is None:
             return
 
         engine_index = self._engine_index_for_identity(engine)
@@ -2245,14 +2242,13 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     request_id,
                 )
             return
-        routed_experts_list = (
-            routed_experts.tolist()
-            if hasattr(routed_experts, "tolist")
-            else routed_experts
+        layer_expert_pairs_list = (
+            layer_expert_pairs.tolist()
+            if hasattr(layer_expert_pairs, "tolist")
+            else layer_expert_pairs
         )
-        owner = compute_owner_from_routed_experts(
-            routed_experts=routed_experts_list,
-            prompt_token_count=len(prompt_token_ids),
+        owner = compute_owner_from_layer_expert_pairs(
+            layer_expert_pairs=layer_expert_pairs_list,
             owner_cache=owner_cache,
             num_ranks=len(self.core_engines),
             epoch=owner_epoch,
@@ -2271,19 +2267,14 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         if target_rank < 0 or target_rank >= len(self.core_engines):
             return
         if self.load_balancer_debug:
-            routed_shape = (
-                tuple(routed_experts.shape)
-                if hasattr(routed_experts, "shape")
-                else None
-            )
             logger.info(
                 "Prefix affinity update request_id=%s target_rank=%d epoch=%d "
-                "prompt_tokens=%d routed_experts_shape=%s",
+                "prompt_tokens=%d unique_pairs=%d",
                 request_id,
                 target_rank,
                 epoch,
                 len(prompt_token_ids),
-                routed_shape,
+                len(layer_expert_pairs_list),
             )
         self._apply_prefix_router_update(target_rank, epoch, prompt_token_ids)
         # Routing consults the frontend/coordinator radix-tree mirrors. The
@@ -2620,44 +2611,34 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 if self.prefix_affinity_only_prefill:
                     if request_info.expert_affinity_prefill_learned:
                         continue
-                    if output.routed_experts is None:
+                    if output.prefix_learning_pairs is None:
                         continue
                     if self.load_balancer_debug:
-                        routed_shape = (
-                            tuple(output.routed_experts.shape)
-                            if hasattr(output.routed_experts, "shape")
-                            else None
-                        )
                         logger.warning(
-                            "Routed experts captured request_id=%s phase=prefill "
-                            "shape=%s",
+                            "Prefix learning pairs captured request_id=%s phase=prefill "
+                            "unique_pairs=%d",
                             output.request_id,
-                            routed_shape,
+                            len(output.prefix_learning_pairs),
                         )
                     request_info.expert_affinity_prefill_learned = True
                 else:
                     if output.finish_reason is None:
                         continue
-                    if output.routed_experts is None:
+                    if output.prefix_learning_pairs is None:
                         continue
-                    if self.load_balancer_debug and output.routed_experts is not None:
-                        routed_shape = (
-                            tuple(output.routed_experts.shape)
-                            if hasattr(output.routed_experts, "shape")
-                            else None
-                        )
+                    if self.load_balancer_debug and output.prefix_learning_pairs is not None:
                         logger.warning(
-                            "Routed experts captured request_id=%s phase=finish "
-                            "shape=%s",
+                            "Prefix learning pairs captured request_id=%s phase=finish "
+                            "unique_pairs=%d",
                             output.request_id,
-                            routed_shape,
+                            len(output.prefix_learning_pairs),
                         )
                 await self._enqueue_prefix_learning_work_item(
                     PrefixLearningWorkItem(
                         request_id=output.request_id,
                         engine=request_info.engine,
                         prompt_token_ids=list(request_info.prompt_token_ids or []),
-                        routed_experts=output.routed_experts,
+                        layer_expert_pairs=output.prefix_learning_pairs,
                     )
                 )
     # ///////////// Expert-based load balancing

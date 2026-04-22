@@ -385,6 +385,7 @@ class ExecuteModelState(NamedTuple):
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
     prefill_capture_ranges: list[tuple[int, int]]
+    prefill_capture_req_ids: list[str]
 
 
 class GPUModelRunner(
@@ -2099,17 +2100,19 @@ class GPUModelRunner(
         PerLayerAttnMetadata,
         CommonAttentionMetadata | None,
         list[tuple[int, int]],
+        list[str],
     ]:
         """
         :return: tuple[
             attn_metadata,
             spec_decode_common_attn_metadata,
             prefill_capture_ranges,
+            prefill_capture_req_ids,
         ]
         """
         # Attention metadata is not needed for attention free models
         if len(self.kv_cache_config.kv_cache_groups) == 0:
-            return {}, None, []
+            return {}, None, [], []
 
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
@@ -2151,7 +2154,10 @@ class GPUModelRunner(
         block_table_gid_0 = _get_block_table(0)
         slot_mapping_gid_0 = slot_mappings[0]
 
-        if self.routed_experts_initialized:
+        if (
+            self.model_config.enable_return_routed_experts
+            and self.routed_experts_initialized
+        ):
             attn_gid = self.routed_experts_attn_gid
             slot_mapping_attn = slot_mappings[attn_gid]
             self.slot_mapping = slot_mapping_attn[:num_tokens].cpu().numpy()
@@ -2346,6 +2352,7 @@ class GPUModelRunner(
             )
 
         prefill_capture_ranges: list[tuple[int, int]] = []
+        prefill_capture_req_ids: list[str] = []
         if cm_base.is_prefilling is not None:
             query_start_loc_cpu = cm_base.query_start_loc_cpu
             num_capture_reqs = min(
@@ -2359,8 +2366,14 @@ class GPUModelRunner(
                 end = int(query_start_loc_cpu[req_idx + 1].item())
                 if end > start:
                     prefill_capture_ranges.append((start, end))
+                    prefill_capture_req_ids.append(self.input_batch.req_ids[req_idx])
 
-        return attn_metadata, spec_decode_common_attn_metadata, prefill_capture_ranges
+        return (
+            attn_metadata,
+            spec_decode_common_attn_metadata,
+            prefill_capture_ranges,
+            prefill_capture_req_ids,
+        )
 
     def _compute_cascade_attn_prefix_lens(
         self,
@@ -3277,10 +3290,7 @@ class GPUModelRunner(
         )
 
     def _take_prefix_router_placement_update(self) -> dict[str, object] | None:
-        if not (
-            self.model_config.enable_prefix_affinity_routing
-            or self.model_config.enable_return_routed_experts
-        ):
+        if not self.model_config.enable_prefix_affinity_routing:
             return None
         if self.eplb_state is None or not self.eplb_state.model_states:
             return None
@@ -4187,6 +4197,7 @@ class GPUModelRunner(
                 attn_metadata,
                 spec_decode_common_attn_metadata,
                 prefill_capture_ranges,
+                prefill_capture_req_ids,
             ) = (
                 self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
@@ -4340,6 +4351,7 @@ class GPUModelRunner(
             cudagraph_stats,
             slot_mappings,
             prefill_capture_ranges,
+            prefill_capture_req_ids,
         )
         self.kv_connector_output = kv_connector_output
 
@@ -4385,6 +4397,7 @@ class GPUModelRunner(
             cudagraph_stats,
             slot_mappings,
             prefill_capture_ranges,
+            prefill_capture_req_ids,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -4545,7 +4558,32 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             routed_experts_step = None
             routed_experts_step_indices = None
-            if self.routed_experts_initialized:
+            prefix_learning_pairs_by_req = None
+            if (
+                self.model_config.enable_prefix_affinity_routing
+                and self.routed_experts_initialized
+            ):
+                capturer = RoutedExpertsCapturer.get_instance()
+                if (
+                    capturer is not None
+                    and prefill_capture_ranges
+                    and prefill_capture_req_ids
+                ):
+                    compact_pairs = capturer.get_unique_layer_expert_pairs_for_ranges(
+                        prefill_capture_ranges
+                    )
+                    if compact_pairs is not None:
+                        prefix_learning_pairs_by_req = {
+                            req_id: pairs.tolist()
+                            for req_id, pairs in zip(
+                                prefill_capture_req_ids, compact_pairs
+                            )
+                            if pairs is not None and len(pairs) > 0
+                        }
+            if (
+                self.model_config.enable_return_routed_experts
+                and self.routed_experts_initialized
+            ):
                 capturer = RoutedExpertsCapturer.get_instance()
                 if capturer is not None:
                     routed_experts_step = capturer.get_captured_experts_for_ranges(
@@ -4578,6 +4616,7 @@ class GPUModelRunner(
                 cudagraph_stats=cudagraph_stats,
                 routed_experts_step=routed_experts_step,
                 routed_experts_step_indices=routed_experts_step_indices,
+                prefix_learning_pairs_by_req=prefix_learning_pairs_by_req,
                 prefix_router_placement_update=prefix_router_placement_update,
             )
 
@@ -5651,7 +5690,12 @@ class GPUModelRunner(
                 self.input_batch.block_table.commit_block_table(num_reqs_padded)
 
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
-                attn_metadata, _, prefill_capture_ranges = self._build_attention_metadata(
+                (
+                    attn_metadata,
+                    _,
+                    prefill_capture_ranges,
+                    _,
+                ) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
                     num_tokens_padded=num_tokens_padded if pad_attn else None,
                     num_reqs=num_reqs_padded,
@@ -7099,8 +7143,10 @@ class GPUModelRunner(
 
     def init_routed_experts_capturer(self):
         logger.info(
-            "Initializing routed experts capturer, enable_return_routed_experts: %s",
+            "Initializing routed experts capturer, enable_return_routed_experts=%s "
+            "enable_prefix_affinity_routing=%s",
             self.model_config.enable_return_routed_experts,
+            self.model_config.enable_prefix_affinity_routing,
         )
         routed_experts_capturer = RoutedExpertsCapturer.create()
         self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()

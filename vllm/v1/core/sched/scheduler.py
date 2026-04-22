@@ -300,6 +300,7 @@ class Scheduler(SchedulerInterface):
                 ),
                 dtype=np.int32,
             )
+        self.prefix_learning_pairs_by_request: dict[str, list[list[int]]] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
@@ -1349,6 +1350,7 @@ class Scheduler(SchedulerInterface):
             )
 
         self._apply_routed_experts_step(model_runner_output)
+        self._apply_prefix_learning_pairs(model_runner_output)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -1424,9 +1426,11 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             routed_experts = None
+            prefix_learning_pairs = None
             finish_reason = None
             if stopped:
                 routed_experts = self._get_routed_experts(request)
+                prefix_learning_pairs = self._take_prefix_learning_pairs(request)
 
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
@@ -1441,6 +1445,7 @@ class Scheduler(SchedulerInterface):
                     stopped_preempted_reqs.add(request)
             elif emit_prefill_routed_experts and new_token_ids:
                 routed_experts = self._get_routed_experts(request)
+                prefix_learning_pairs = self._take_prefix_learning_pairs(request)
 
             # Extract sample logprobs if needed.
             if (
@@ -1489,6 +1494,7 @@ class Scheduler(SchedulerInterface):
                         num_cached_tokens=request.num_cached_tokens,
                         num_external_computed_tokens=request.num_external_computed_tokens,
                         routed_experts=routed_experts,
+                        prefix_learning_pairs=prefix_learning_pairs,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )
@@ -1650,6 +1656,20 @@ class Scheduler(SchedulerInterface):
 
         assert self.routed_experts_buffer is not None
         self.routed_experts_buffer[indices] = step
+
+    def _apply_prefix_learning_pairs(
+        self, model_runner_output: ModelRunnerOutput
+    ) -> None:
+        pairs_by_req = model_runner_output.prefix_learning_pairs_by_req
+        if not pairs_by_req:
+            return
+        for req_id, pairs in pairs_by_req.items():
+            self.prefix_learning_pairs_by_request[req_id] = pairs
+
+    def _take_prefix_learning_pairs(
+        self, request: Request
+    ) -> list[list[int]] | None:
+        return self.prefix_learning_pairs_by_request.pop(request.request_id, None)
 
     def _get_routed_experts(self, request: Request) -> np.ndarray | None:
         if not self.vllm_config.model_config.enable_return_routed_experts:
@@ -1878,6 +1898,7 @@ class Scheduler(SchedulerInterface):
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
+        self.prefix_learning_pairs_by_request.pop(request_id, None)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)

@@ -88,12 +88,20 @@ class RoutedExpertsCapturer:
         ctx = get_forward_context()
         if ctx.additional_kwargs.get("skip_routed_experts_capture", False):
             return
-        token_num_per_dp = topk_ids.shape[0]
+        prefill_ranges = list(
+            ctx.additional_kwargs.get("routing_capture_prefill_ranges", [])
+        )
 
         if layer_id >= self._device_buffer.shape[1]:
             return
 
-        self._device_buffer[:token_num_per_dp, layer_id, :] = topk_ids
+        if not prefill_ranges:
+            return
+
+        for start, end in prefill_ranges:
+            if end <= start:
+                continue
+            self._device_buffer[start:end, layer_id, :] = topk_ids[start:end]
 
     def get_captured_experts(self, num_tokens: int) -> np.ndarray | None:
         """
@@ -133,6 +141,46 @@ class RoutedExpertsCapturer:
         if len(parts) == 1:
             return parts[0]
         return np.concatenate(parts, axis=0)
+
+    def get_unique_layer_expert_pairs_for_ranges(
+        self, ranges: list[tuple[int, int]]
+    ) -> list[np.ndarray] | None:
+        if get_tensor_model_parallel_rank() != 0:
+            return None
+        if self._device_buffer is None:
+            raise RuntimeError("Device buffer not initialized.")
+        if not ranges:
+            return None
+
+        num_layers = self._device_buffer.shape[1]
+        top_k = self._device_buffer.shape[2]
+        layer_ids = torch.arange(
+            num_layers,
+            dtype=torch.int32,
+            device=self._device_buffer.device,
+        ).view(1, num_layers, 1).expand(1, num_layers, top_k)
+
+        results: list[np.ndarray] = []
+        for start, end in ranges:
+            if end <= start:
+                results.append(np.empty((0, 2), dtype=np.int32))
+                continue
+
+            token_slice = self._device_buffer[start:end]
+            pair_tensor = torch.stack(
+                (
+                    layer_ids.expand(token_slice.shape[0], -1, -1),
+                    token_slice,
+                ),
+                dim=-1,
+            ).reshape(-1, 2)
+            pair_tensor = pair_tensor[pair_tensor[:, 1] >= 0]
+            if pair_tensor.numel() == 0:
+                results.append(np.empty((0, 2), dtype=np.int32))
+                continue
+            results.append(torch.unique(pair_tensor, dim=0).cpu().numpy())
+
+        return results
 
     def cleanup(self) -> None:
         """Explicitly clean up resources."""

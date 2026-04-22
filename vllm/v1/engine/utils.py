@@ -910,10 +910,7 @@ def launch_core_engines(
         coordinator = DPCoordinator(
             parallel_config,
             enable_wave_coordination=vllm_config.model_config.is_moe,
-            enable_prefix_affinity_routing=(
-                model_config.enable_prefix_affinity_routing
-                or model_config.enable_return_routed_experts
-            ),
+            enable_prefix_affinity_routing=model_config.enable_prefix_affinity_routing,
             enable_kv_block_prefix_routing=(
                 model_config.enable_kv_block_prefix_routing
             ),

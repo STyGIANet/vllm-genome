@@ -136,6 +136,45 @@ def compute_owner_from_routed_experts(
     }
 
 
+def compute_owner_from_layer_expert_pairs(
+    layer_expert_pairs: Sequence[Sequence[int]],
+    owner_cache: PrefixRouterOwnerCache,
+    num_ranks: int,
+    epoch: int,
+) -> dict[str, int] | None:
+    if not layer_expert_pairs or not owner_cache or num_ranks <= 0:
+        return None
+
+    scores = [0] * num_ranks
+    seen_pairs: set[tuple[int, int]] = set()
+
+    for raw_pair in layer_expert_pairs:
+        if len(raw_pair) < 2:
+            continue
+        layer_idx = int(raw_pair[0])
+        expert_id = int(raw_pair[1])
+        if layer_idx < 0 or layer_idx >= len(owner_cache):
+            continue
+        layer_owner_cache = owner_cache[layer_idx]
+        if expert_id < 0 or expert_id >= len(layer_owner_cache):
+            continue
+        layer_expert = (layer_idx, expert_id)
+        if layer_expert in seen_pairs:
+            continue
+        seen_pairs.add(layer_expert)
+        for owner_rank in layer_owner_cache[expert_id]:
+            scores[owner_rank] += 1
+
+    if not seen_pairs:
+        return None
+
+    target_rank = max(range(num_ranks), key=lambda rank: (scores[rank], -rank))
+    return {
+        "target_rank": target_rank,
+        "epoch": epoch,
+    }
+
+
 BlockPrefixKey: TypeAlias = tuple[tuple[int, ...], tuple[Any, ...] | None]
 
 

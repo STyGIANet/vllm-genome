@@ -621,15 +621,15 @@ class EplbState:
             for eplb_model_state in self.model_states.values():
                 all_ranks_buffer_ready = False
                 if eplb_model_state.pending_global_ready_check:
-                    if hasattr(self.policy, 'snapshot_for_rebalance'):
-                        # Custom policy: once a rebalance is in progress, readiness
-                        # is driven by the EPLB rebalance state itself. Skip the
-                        # extra NCCL all_reduce here.
-                        all_ranks_buffer_ready = bool(eplb_model_state.ep_buffer_ready)
-                    else:
-                        all_ranks_buffer_ready = self._all_ranks_buffer_ready(
-                            eplb_model_state
-                        )
+                    # Async EPLB commits must stay in lockstep across ranks.
+                    # Custom placement callbacks change how the new mapping is
+                    # produced, but they do not change the buffer handoff
+                    # protocol. Advancing on only local readiness can let ranks
+                    # apply different layers at different times and wedge the
+                    # EP/DP wave.
+                    all_ranks_buffer_ready = self._all_ranks_buffer_ready(
+                        eplb_model_state
+                    )
                 if eplb_model_state.ep_buffer_ready and all_ranks_buffer_ready:
                     self.move_to_workspace(
                         model_state=eplb_model_state,

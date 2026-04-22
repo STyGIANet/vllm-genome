@@ -40,16 +40,18 @@ vllm serve $MODEL \
       --kv-block-prefix-routing-weight 0.5 \
       --load-score-routing-weight 0.5 \
       --enable-eplb \
+      --max-pending-requests-per-engine 256 \
       --enable-load-score-routing \
       --enable-kv-block-prefix-routing \
-      # --enable-return-routed-experts \
-      # --max-pending-requests-per-engine 256 \
-      # --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000}' \
-	  # --placement-callback-path ${PLACEMENT_PATH} \
-	  # --placement-callback-func compute_placement \
-      # --enable-prefix-affinity-routing \
-      # --prefix-affinity-only-prefill \
+      --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000}' \
+	  --placement-callback-path ${PLACEMENT_PATH} \
+	  --placement-callback-func compute_placement \
+      --enable-prefix-affinity-routing \
+      --prefix-affinity-only-prefill \
 	  # --load-balancer-debug \
+
+	  # No longer needed. setting EPLB custom policy is enough
+      # --enable-return-routed-experts \
 
       # --max-pending-requests-per-engine set this to a small number for now 
       # until the load balancer is stable and works as expected.

@@ -1508,10 +1508,7 @@ class EngineArgs:
             ),
             placement_callback_path=self.placement_callback_path,
             placement_callback_func=self.placement_callback_func,
-            enable_return_routed_experts=(
-                self.enable_return_routed_experts
-                or self.enable_prefix_affinity_routing
-            ),
+            enable_return_routed_experts=self.enable_return_routed_experts,
             # ///////////// Expert-based load balancing
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
