@@ -63,8 +63,9 @@ from vllm.v1.prefix_router import (
     build_query_block_extra_keys,
     build_owner_cache_from_physical_to_logical_map,
     compute_owner_from_layer_expert_pairs,
+    ExpertAffinityIndex,
     ExactBlockPrefixIndex,
-    TokenRadixTree,
+    make_expert_affinity_index,
     prepare_block_prefix_query,
 )
 # ///////////// Expert-based load balancing
@@ -1513,6 +1514,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             if self.load_score_enabled
             else 0.0
         )
+        self.prefix_learning_algorithm = model_config.prefix_learning_algorithm
         self.load_balancer_debug = model_config.load_balancer_debug
         self.prefix_affinity_learning_queue_size = max(
             1, int(model_config.prefix_affinity_learning_queue_size)
@@ -1539,6 +1541,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             logger.warning(
                 "LB debug enabled expert_affinity_enabled=%s kv_block_prefix_enabled=%s "
                 "expert_affinity_learning_enabled=%s "
+                "prefix_learning_algorithm=%s "
                 "load_score_enabled=%s coordinator_routing_enabled=%s "
                 "prefix_affinity_learning_queue_size=%d "
                 "frontend_dispatch_queue_enabled=%s max_pending_requests_per_engine=%d "
@@ -1546,19 +1549,21 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 self.expert_affinity_enabled,
                 self.kv_block_prefix_enabled,
                 self.expert_affinity_learning_enabled,
+                self.prefix_learning_algorithm,
                 self.load_score_enabled,
                 self.coordinator_routing_enabled,
                 self.prefix_affinity_learning_queue_size,
                 self.frontend_dispatch_queue_enabled,
                 self.max_pending_requests_per_engine,
                 self.route_query_address,
-            )
+        )
         self.expert_affinity_epoch = 0
-        self.expert_affinity_trees: dict[int, TokenRadixTree] = (
+        self.expert_affinity_indices: dict[int, ExpertAffinityIndex] = (
             {}
             if self.coordinator_routing_enabled
             else {
-                rank: TokenRadixTree() for rank in self.engine_ranks_managed
+                rank: self._make_expert_affinity_index()
+                for rank in self.engine_ranks_managed
             }
         )
         self.prefix_router_owner_cache = None
@@ -1601,6 +1606,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             except RuntimeError:
                 pass
 
+    def _make_expert_affinity_index(self) -> ExpertAffinityIndex:
+        return make_expert_affinity_index(self.prefix_learning_algorithm)
+
     def _get_runtime_load_balancer_weights(self) -> dict[str, Any]:
         return {
             "expert_affinity_routing_weight": self.expert_affinity_weight,
@@ -1610,6 +1618,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             "kv_block_prefix_enabled": self.kv_block_prefix_enabled,
             "load_score_enabled": self.load_score_enabled,
             "coordinator_routing_enabled": self.coordinator_routing_enabled,
+            "prefix_learning_algorithm": self.prefix_learning_algorithm,
         }
 
     def get_runtime_load_balancer_weights(self) -> dict[str, Any]:
@@ -2263,8 +2272,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
 
     def _clear_prefix_router_state(self, epoch: int) -> None:
-        for tree in self.expert_affinity_trees.values():
-            tree.clear()
+        for index in self.expert_affinity_indices.values():
+            index.clear()
         self.expert_affinity_epoch = epoch
 
     def _apply_prefix_router_placement_update(
@@ -2296,9 +2305,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             self._clear_prefix_router_state(epoch)
         elif epoch < self.expert_affinity_epoch:
             return
-        if target_rank not in self.expert_affinity_trees:
-            self.expert_affinity_trees[target_rank] = TokenRadixTree()
-        self.expert_affinity_trees[target_rank].insert(prompt_token_ids)
+        if target_rank not in self.expert_affinity_indices:
+            self.expert_affinity_indices[target_rank] = (
+                self._make_expert_affinity_index()
+            )
+        self.expert_affinity_indices[target_rank].insert(prompt_token_ids)
 
     def _handle_prefix_router_coordinator_update(self, decoded: Sequence[Any]) -> None:
         if not self.expert_affinity_learning_enabled:
@@ -2577,8 +2588,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 unique_pairs_count,
             )
         self._apply_prefix_router_update(target_rank, epoch, prompt_token_ids)
-        # Routing consults the frontend/coordinator radix-tree mirrors. The
-        # worker-local prefix tree is not used on the routing path, so avoid a
+        # Routing consults the frontend/coordinator expert-affinity mirrors.
+        # The worker-local learner is not used on the routing path, so avoid a
         # per-request utility RPC here.
         if self.load_balancer_debug:
             logger.warning(
@@ -2599,19 +2610,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         if not self.expert_affinity_enabled or not prompt_token_ids:
             return {}
 
-        total_tokens = len(prompt_token_ids)
-        if total_tokens <= 0:
-            return {}
-
         scores: dict[int, float] = {}
-        for rank, tree in self.expert_affinity_trees.items():
-            prefix_len = tree.longest_prefix_length(prompt_token_ids)
-            if prefix_len <= 0:
+        for rank, index in self.expert_affinity_indices.items():
+            score = index.score(prompt_token_ids)
+            if score <= 0.0:
                 continue
             engine_index = self.rank_to_engine_index.get(rank)
             if engine_index is None:
                 continue
-            scores[engine_index] = prefix_len / total_tokens
+            scores[engine_index] = score
         return scores
 
     def _get_kv_block_prefix_scores(

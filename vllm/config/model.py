@@ -225,6 +225,8 @@ class ModelConfig:
     """Whether to print expert/KV/load routing diagnostics during serving."""
     prefix_affinity_learning_queue_size: int = 32
     """Bounded LIFO queue size for prefix-affinity learning work items."""
+    prefix_learning_algorithm: Literal["prefixtrie"] = "prefixtrie"
+    """Algorithm used for expert-affinity learning and lookup."""
     max_pending_requests_per_engine: int = 0
     """Frontend-side admission limit for requests pending at each engine.
     Set to 0 to disable the frontend dispatch queue."""

@@ -34,7 +34,11 @@ vllm serve $MODEL \
 		--placement-callback-func compute_placement \
 		--enable-prefix-affinity-routing \
 		--prefix-affinity-only-prefill \
-		# --load-balancer-debug \
+		--prefix-learning-algorithm prefixtrie \
+		--load-balancer-debug \
+		# --prefix-learning-algorithm ngramoverlap \
+		# --prefix-learning-algorithm tokenoverlap \
+
 
 # cleanup
 for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv | awk '{print $1}' | awk -F ',' '{print $1}');do kill -9 $i;done

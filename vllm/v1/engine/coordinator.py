@@ -21,7 +21,11 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequestType,
 )
-from vllm.v1.prefix_router import ExactBlockPrefixIndex, TokenRadixTree
+from vllm.v1.prefix_router import (
+    ExactBlockPrefixIndex,
+    ExpertAffinityIndex,
+    make_expert_affinity_index,
+)
 # ///////////// Expert-based load balancing
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
@@ -95,6 +99,7 @@ class DPCoordinator:
         expert_affinity_routing_weight: float = 1.0,
         kv_block_prefix_routing_weight: float = 1.0,
         load_score_routing_weight: float = 1.0,
+        prefix_learning_algorithm: str = "prefixtrie",
         load_balancer_debug: bool = False,
         kv_block_prefix_block_size: int = 0,
         # ///////////// Expert-based load balancing
@@ -145,6 +150,7 @@ class DPCoordinator:
                 "expert_affinity_routing_weight": expert_affinity_routing_weight,
                 "kv_block_prefix_routing_weight": kv_block_prefix_routing_weight,
                 "load_score_routing_weight": load_score_routing_weight,
+                "prefix_learning_algorithm": prefix_learning_algorithm,
                 "load_balancer_debug": load_balancer_debug,
                 "kv_block_prefix_block_size": kv_block_prefix_block_size,
                 # ///////////// Expert-based load balancing
@@ -203,6 +209,7 @@ class DPCoordinatorProc:
         expert_affinity_routing_weight: float = 1.0,
         kv_block_prefix_routing_weight: float = 1.0,
         load_score_routing_weight: float = 1.0,
+        prefix_learning_algorithm: str = "prefixtrie",
         load_balancer_debug: bool = False,
         kv_block_prefix_block_size: int = 0,
     ):
@@ -227,16 +234,20 @@ class DPCoordinatorProc:
         self.load_score_weight = (
             load_score_routing_weight if self.load_score_enabled else 0.0
         )
+        self.prefix_learning_algorithm = prefix_learning_algorithm
         self.load_balancer_debug = load_balancer_debug
         self.kv_block_prefix_block_size = kv_block_prefix_block_size
         self.expert_affinity_epoch = 0
         self.prefix_router_placement_epoch: int | None = None
-        self.expert_affinity_trees = {
-            rank: TokenRadixTree() for rank in range(engine_count)
+        self.expert_affinity_indices: dict[int, ExpertAffinityIndex] = {
+            rank: self._make_expert_affinity_index() for rank in range(engine_count)
         }
         self.kv_block_prefix_indices = {
             rank: ExactBlockPrefixIndex() for rank in range(engine_count)
         }
+
+    def _make_expert_affinity_index(self) -> ExpertAffinityIndex:
+        return make_expert_affinity_index(self.prefix_learning_algorithm)
 
     def _apply_runtime_routing_weights(
         self,
@@ -261,8 +272,8 @@ class DPCoordinatorProc:
         )
 
     def _clear_prefix_router_state(self, epoch: int) -> None:
-        for tree in self.expert_affinity_trees.values():
-            tree.clear()
+        for index in self.expert_affinity_indices.values():
+            index.clear()
         self.expert_affinity_epoch = epoch
 
     def _apply_prefix_router_update(
@@ -278,10 +289,12 @@ class DPCoordinatorProc:
         elif epoch < self.expert_affinity_epoch:
             return
 
-        tree = self.expert_affinity_trees.get(target_rank)
-        if tree is None:
-            tree = self.expert_affinity_trees[target_rank] = TokenRadixTree()
-        tree.insert(prompt_token_ids)
+        index = self.expert_affinity_indices.get(target_rank)
+        if index is None:
+            index = self.expert_affinity_indices[target_rank] = (
+                self._make_expert_affinity_index()
+            )
+        index.insert(prompt_token_ids)
 
     def _apply_prefix_router_placement_update(self, epoch: int) -> bool:
         if not self.expert_affinity_enabled:
@@ -327,15 +340,11 @@ class DPCoordinatorProc:
         if not self.expert_affinity_enabled or not prompt_token_ids:
             return {}
 
-        total_tokens = len(prompt_token_ids)
-        if total_tokens <= 0:
-            return {}
-
         scores: dict[int, float] = {}
-        for rank, tree in self.expert_affinity_trees.items():
-            prefix_len = tree.longest_prefix_length(prompt_token_ids)
-            if prefix_len > 0:
-                scores[rank] = prefix_len / total_tokens
+        for rank, index in self.expert_affinity_indices.items():
+            score = index.score(prompt_token_ids)
+            if score > 0.0:
+                scores[rank] = score
         return scores
 
     def _get_kv_block_prefix_scores(
@@ -522,6 +531,7 @@ class DPCoordinatorProc:
         expert_affinity_routing_weight: float = 1.0,
         kv_block_prefix_routing_weight: float = 1.0,
         load_score_routing_weight: float = 1.0,
+        prefix_learning_algorithm: str = "prefixtrie",
         load_balancer_debug: bool = False,
         kv_block_prefix_block_size: int = 0,
         # ///////////// Expert-based load balancing
@@ -536,6 +546,7 @@ class DPCoordinatorProc:
             expert_affinity_routing_weight=expert_affinity_routing_weight,
             kv_block_prefix_routing_weight=kv_block_prefix_routing_weight,
             load_score_routing_weight=load_score_routing_weight,
+            prefix_learning_algorithm=prefix_learning_algorithm,
             load_balancer_debug=load_balancer_debug,
             kv_block_prefix_block_size=kv_block_prefix_block_size,
         )
@@ -702,7 +713,9 @@ class DPCoordinatorProc:
                             for _ in range(new_engine_count - current_count):
                                 self.engines.append(EngineState())
                             for rank in range(current_count, new_engine_count):
-                                self.expert_affinity_trees[rank] = TokenRadixTree()
+                                self.expert_affinity_indices[rank] = (
+                                    self._make_expert_affinity_index()
+                                )
                                 self.kv_block_prefix_indices[rank] = (
                                     ExactBlockPrefixIndex()
                                 )
@@ -723,9 +736,9 @@ class DPCoordinatorProc:
                             )
                         else:
                             self.engines = self.engines[:new_engine_count]
-                            self.expert_affinity_trees = {
-                                rank: tree
-                                for rank, tree in self.expert_affinity_trees.items()
+                            self.expert_affinity_indices = {
+                                rank: index
+                                for rank, index in self.expert_affinity_indices.items()
                                 if rank < new_engine_count
                             }
                             self.kv_block_prefix_indices = {

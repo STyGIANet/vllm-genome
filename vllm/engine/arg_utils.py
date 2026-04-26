@@ -392,6 +392,7 @@ class EngineArgs:
     prefix_affinity_learning_queue_size: int = (
         ModelConfig.prefix_affinity_learning_queue_size
     )
+    prefix_learning_algorithm: str = ModelConfig.prefix_learning_algorithm
     max_pending_requests_per_engine: int = (
         ModelConfig.max_pending_requests_per_engine
     )
@@ -778,6 +779,10 @@ class EngineArgs:
         model_group.add_argument(
             "--prefix-affinity-learning-queue-size",
             **model_kwargs["prefix_affinity_learning_queue_size"],
+        )
+        model_group.add_argument(
+            "--prefix-learning-algorithm",
+            **model_kwargs["prefix_learning_algorithm"],
         )
         model_group.add_argument(
             "--max-pending-requests-per-engine",
@@ -1503,6 +1508,7 @@ class EngineArgs:
             prefix_affinity_learning_queue_size=(
                 self.prefix_affinity_learning_queue_size
             ),
+            prefix_learning_algorithm=self.prefix_learning_algorithm,
             max_pending_requests_per_engine=(
                 self.max_pending_requests_per_engine
             ),

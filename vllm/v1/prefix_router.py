@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Sequence, TypeAlias
+from typing import Any, Literal, Protocol, Sequence, TypeAlias
 
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.core.kv_cache_utils import ExternalBlockHash, generate_block_hash_extra_keys
@@ -27,7 +27,7 @@ class TokenRadixTree:
     def clear(self) -> None:
         self._root = _RadixNode()
 
-    def insert(self, token_ids: list[int]) -> None:
+    def insert(self, token_ids: Sequence[int]) -> None:
         if not token_ids:
             return
 
@@ -39,7 +39,7 @@ class TokenRadixTree:
                 node.children[token_id] = child
             node = child
 
-    def longest_prefix_length(self, token_ids: list[int]) -> int:
+    def longest_prefix_length(self, token_ids: Sequence[int]) -> int:
         node = self._root
         depth = 0
 
@@ -50,6 +50,45 @@ class TokenRadixTree:
             node = child
             depth += 1
         return depth
+
+
+PrefixLearningAlgorithm = Literal["prefixtrie"]
+
+
+class ExpertAffinityIndex(Protocol):
+
+    def clear(self) -> None: ...
+
+    def insert(self, token_ids: Sequence[int]) -> None: ...
+
+    def score(self, token_ids: Sequence[int]) -> float: ...
+
+
+class PrefixTrieIndex:
+    """Current longest-prefix expert-affinity index."""
+
+    def __init__(self) -> None:
+        self._tree = TokenRadixTree()
+
+    def clear(self) -> None:
+        self._tree.clear()
+
+    def insert(self, token_ids: Sequence[int]) -> None:
+        self._tree.insert(token_ids)
+
+    def score(self, token_ids: Sequence[int]) -> float:
+        total_tokens = len(token_ids)
+        if total_tokens <= 0:
+            return 0.0
+        return self._tree.longest_prefix_length(token_ids) / total_tokens
+
+
+def make_expert_affinity_index(
+    algorithm: PrefixLearningAlgorithm | str,
+) -> ExpertAffinityIndex:
+    if algorithm == "prefixtrie":
+        return PrefixTrieIndex()
+    raise ValueError(f"Unsupported prefix learning algorithm: {algorithm}")
 
 
 PrefixRouterOwnerCache: TypeAlias = list[list[tuple[int, ...]]]

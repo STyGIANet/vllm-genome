@@ -922,6 +922,7 @@ def launch_core_engines(
                 model_config.kv_block_prefix_routing_weight
             ),
             load_score_routing_weight=model_config.load_score_routing_weight,
+            prefix_learning_algorithm=model_config.prefix_learning_algorithm,
             load_balancer_debug=model_config.load_balancer_debug,
             kv_block_prefix_block_size=(
                 cache_config.block_size
