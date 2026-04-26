@@ -3,7 +3,7 @@
 MODEL=${1:-deepseek-ai/deepseek-moe-16b-chat}
 
 export SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PLACEMENT_PATH="${SCRIPT_DIR}/genome_scripts/placement_fns.py"
+export PLACEMENT_PATH="${SCRIPT_DIR}/expert-placement/placement_fns.py"
 export VLLM_SERVER_DEV_MODE=1
 
 # export NVSHMEM_DIR=/usr/local/nvshmem
