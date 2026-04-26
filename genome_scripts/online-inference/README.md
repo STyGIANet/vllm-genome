@@ -6,7 +6,21 @@ The fastest way to bring up the online-inference stack in this repo is the
 single-host launcher:
 
 ```bash
-bash ../run.sh deepseek-ai/deepseek-moe-16b-chat
+../run.sh deepseek-ai/deepseek-moe-16b-chat
+```
+
+In a separate shell, send requests with:
+
+```bash
+python3 send-prompts.py
+# Change the following to match the server address and model used in the run.sh launch:
+#HOST = "http://0.0.0.0:8000"
+#MODEL = "deepseek-ai/deepseek-moe-16b-chat"
+```
+
+To evaluate placement and LB across different LB weights:
+```bash
+python3 weights-experiment.py # poisson arrival of prompts, modify poisson rate and lb weights range in the script
 ```
 
 `../run.sh` is the current canonical launch script for this LB/EPLB setup. It
