@@ -302,6 +302,8 @@ class Scheduler(SchedulerInterface):
             )
         self.prefix_learning_pairs_by_request: dict[str, list[list[int]]] = {}
         self.prefix_learning_owner_by_request: dict[str, dict[str, int]] = {}
+        self.async_prefix_learning_owner_by_request: dict[str, dict[str, int]] = {}
+        self.prefix_learning_client_index_by_request: dict[str, int] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
@@ -1353,6 +1355,7 @@ class Scheduler(SchedulerInterface):
         self._apply_routed_experts_step(model_runner_output)
         self._apply_prefix_learning_pairs(model_runner_output)
         self._apply_prefix_learning_owners(model_runner_output)
+        self._apply_async_prefix_learning_owners(model_runner_output)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -1558,6 +1561,39 @@ class Scheduler(SchedulerInterface):
             for client_index, outs in outputs.items()
         }
 
+        if self.async_prefix_learning_owner_by_request:
+            owner_updates_by_client: dict[int, list[tuple[str, int, int]]] = defaultdict(
+                list
+            )
+            consumed_req_ids: list[str] = []
+            for req_id, owner in self.async_prefix_learning_owner_by_request.items():
+                client_index = self.prefix_learning_client_index_by_request.get(req_id)
+                if client_index is None:
+                    request = self.requests.get(req_id)
+                    if request is not None:
+                        client_index = request.client_index
+                if client_index is None:
+                    continue
+                target_rank = int(owner.get("target_rank", -1))
+                epoch = int(owner.get("epoch", -1))
+                if target_rank < 0 or epoch < 0:
+                    consumed_req_ids.append(req_id)
+                    continue
+                owner_updates_by_client[client_index].append(
+                    (req_id, target_rank, epoch)
+                )
+                consumed_req_ids.append(req_id)
+
+            for client_index, updates in owner_updates_by_client.items():
+                eco = engine_core_outputs.get(client_index)
+                if eco is None:
+                    eco = engine_core_outputs[client_index] = EngineCoreOutputs()
+                eco.prefix_learning_owner_updates = updates
+
+            for req_id in consumed_req_ids:
+                self.async_prefix_learning_owner_by_request.pop(req_id, None)
+                self.prefix_learning_client_index_by_request.pop(req_id, None)
+
         if prefix_router_placement_update is not None:
             for eco in engine_core_outputs.values():
                 eco.prefix_router_placement_update = prefix_router_placement_update
@@ -1691,6 +1727,15 @@ class Scheduler(SchedulerInterface):
         for req_id, owner in owners_by_req.items():
             self.prefix_learning_owner_by_request[req_id] = owner
 
+    def _apply_async_prefix_learning_owners(
+        self, model_runner_output: ModelRunnerOutput
+    ) -> None:
+        owners_by_req = model_runner_output.async_prefix_learning_owner_by_req
+        if not owners_by_req:
+            return
+        for req_id, owner in owners_by_req.items():
+            self.async_prefix_learning_owner_by_request[req_id] = owner
+
     def _take_prefix_learning_pairs(
         self, request: Request
     ) -> list[list[int]] | None:
@@ -1705,12 +1750,21 @@ class Scheduler(SchedulerInterface):
                 0 if pairs is None else len(pairs),
                 (time.perf_counter_ns() - start_ns) / 1e6,
             )
+        if pairs is not None:
+            self.prefix_learning_client_index_by_request.pop(
+                request.request_id, None
+            )
         return pairs
 
     def _take_prefix_learning_owner(
         self, request: Request
     ) -> dict[str, int] | None:
-        return self.prefix_learning_owner_by_request.pop(request.request_id, None)
+        owner = self.prefix_learning_owner_by_request.pop(request.request_id, None)
+        if owner is not None:
+            self.prefix_learning_client_index_by_request.pop(
+                request.request_id, None
+            )
+        return owner
 
     def _get_routed_experts(self, request: Request) -> np.ndarray | None:
         if not self.vllm_config.model_config.enable_return_routed_experts:
@@ -1865,6 +1919,9 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            self.prefix_learning_client_index_by_request[request.request_id] = (
+                request.client_index
+            )
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -1941,6 +1998,7 @@ class Scheduler(SchedulerInterface):
         request_id = request.request_id
         self.prefix_learning_pairs_by_request.pop(request_id, None)
         self.prefix_learning_owner_by_request.pop(request_id, None)
+        self.async_prefix_learning_owner_by_request.pop(request_id, None)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)

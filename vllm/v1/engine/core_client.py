@@ -525,6 +525,12 @@ class PrefixLearningWorkItem:
 
 
 @dataclass
+class PrefixLearningContext:
+    engine: EngineIdentity
+    prompt_token_ids: list[int]
+
+
+@dataclass
 class PrefixRouterUpdate:
     target_rank: int
     epoch: int
@@ -1579,6 +1585,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.route_send_lock = asyncio.Lock()
         self.prefix_learning_queue: deque[PrefixLearningWorkItem] = deque()
         self.prefix_learning_queue_lock = asyncio.Lock()
+        self.prefix_learning_context_by_request: dict[str, PrefixLearningContext] = {}
 
         if self.coordinator_routing_enabled:
             assert self.route_query_address is not None
@@ -1850,6 +1857,21 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 self._drain_prefix_learning_queue(),
                 name="PrefixAffinityLearningQueue",
             )
+
+    def _take_prefix_learning_context(
+        self,
+        request_id: str,
+        request_info: InFlightRequestInfo | None = None,
+    ) -> PrefixLearningContext | None:
+        context = self.prefix_learning_context_by_request.pop(request_id, None)
+        if context is not None:
+            return context
+        if request_info is None or request_info.prompt_token_ids is None:
+            return None
+        return PrefixLearningContext(
+            engine=request_info.engine,
+            prompt_token_ids=list(request_info.prompt_token_ids),
+        )
 
     async def _enqueue_prefix_learning_work_item(
         self,
@@ -2434,6 +2456,47 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 timeout=PREFIX_ROUTER_LEARNING_TIMEOUT_S,
             )
 
+    async def _apply_prefix_router_owner_update_batch(
+        self,
+        updates: list[tuple[str, list[int], int, int]],
+    ) -> None:
+        if not self.expert_affinity_learning_enabled or not updates:
+            return
+
+        pending_updates: list[PrefixRouterUpdate] = []
+        num_engines = len(self.core_engines)
+        for request_id, prompt_token_ids, target_rank, epoch in updates:
+            if not prompt_token_ids:
+                continue
+            if target_rank < 0 or target_rank >= num_engines or epoch < 0:
+                continue
+            if self.load_balancer_debug:
+                logger.info(
+                    "Prefix affinity update request_id=%s target_rank=%d epoch=%d "
+                    "prompt_tokens=%d unique_pairs=None",
+                    request_id,
+                    target_rank,
+                    epoch,
+                    len(prompt_token_ids),
+                )
+            self._apply_prefix_router_update(target_rank, epoch, prompt_token_ids)
+            if self.load_balancer_debug:
+                logger.warning(
+                    "Prefix affinity learning request_id=%s step=upsert:skipped target_rank=%d",
+                    request_id,
+                    target_rank,
+                )
+            pending_updates.append(
+                PrefixRouterUpdate(
+                    target_rank=target_rank,
+                    epoch=epoch,
+                    prompt_token_ids=prompt_token_ids,
+                )
+            )
+
+        if pending_updates:
+            await self._send_prefix_router_update_batch(pending_updates)
+
     async def _learn_prefix_router_update(
         self,
         request_id: str,
@@ -2659,6 +2722,16 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             prompt_token_ids=request.prompt_token_ids,
             pending_engine_indices=pending_engine_indices,
         )
+        if (
+            self.expert_affinity_learning_enabled
+            and request.prompt_token_ids is not None
+        ):
+            self.prefix_learning_context_by_request[request.request_id] = (
+                PrefixLearningContext(
+                    engine=chosen_engine,
+                    prompt_token_ids=list(request.prompt_token_ids),
+                )
+            )
         return chosen_engine
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
@@ -2671,6 +2744,16 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             prompt_token_ids=request.prompt_token_ids,
             pending_engine_indices=pending_engine_indices,
         )
+        if (
+            self.expert_affinity_learning_enabled
+            and request.prompt_token_ids is not None
+        ):
+            self.prefix_learning_context_by_request[request.request_id] = (
+                PrefixLearningContext(
+                    engine=chosen_engine,
+                    prompt_token_ids=list(request.prompt_token_ids),
+                )
+            )
         return chosen_engine
 
     async def _dispatch_request_to_engine(
@@ -2687,6 +2770,16 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             prompt_token_ids=request.prompt_token_ids,
             pending_engine_indices=tuple(pending_engine_indices),
         )
+        if (
+            self.expert_affinity_learning_enabled
+            and request.prompt_token_ids is not None
+        ):
+            self.prefix_learning_context_by_request[request.request_id] = (
+                PrefixLearningContext(
+                    engine=chosen_engine,
+                    prompt_token_ids=list(request.prompt_token_ids),
+                )
+            )
         if self._should_broadcast_ep_request():
             send_ops: list[Awaitable[Any]] = []
             created_shadow_request_ids: list[str] = []
@@ -2741,6 +2834,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             await to_await
         except Exception:
             self.reqs_in_flight.pop(request.request_id, None)
+            self.prefix_learning_context_by_request.pop(request.request_id, None)
             self.primary_req_to_shadows.pop(request.request_id, None)
             for shadow_request_id in created_shadow_request_ids:
                 self.shadow_req_to_primary.pop(shadow_request_id, None)
@@ -2796,6 +2890,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self: "DPLBAsyncMPClient", outputs: EngineCoreOutputs
     ):
         primary_ids_to_abort: set[str] = set()
+        direct_prefix_owner_updates: list[tuple[str, list[int], int, int]] = []
 
         if outputs.prefix_router_placement_update is not None:
             update = outputs.prefix_router_placement_update
@@ -2805,6 +2900,26 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 self._apply_prefix_router_placement_update(
                     epoch,
                     list(physical_to_logical_map),
+                )
+
+        if (
+            self.expert_affinity_learning_enabled
+            and outputs.prefix_learning_owner_updates
+        ):
+            for request_id, target_rank, epoch in outputs.prefix_learning_owner_updates:
+                request_info = self.reqs_in_flight.get(request_id)
+                context = self._take_prefix_learning_context(request_id, request_info)
+                if context is None or not context.prompt_token_ids:
+                    continue
+                if request_info is not None:
+                    request_info.expert_affinity_prefill_learned = True
+                direct_prefix_owner_updates.append(
+                    (
+                        request_id,
+                        list(context.prompt_token_ids),
+                        int(target_rank),
+                        int(epoch),
+                    )
                 )
 
         if outputs.outputs:
@@ -2858,15 +2973,36 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                             output.request_id,
                             len(output.prefix_learning_pairs),
                         )
+                context = self._take_prefix_learning_context(
+                    output.request_id,
+                    request_info,
+                )
+                if context is None or not context.prompt_token_ids:
+                    continue
+                if output.prefix_learning_owner is not None:
+                    direct_prefix_owner_updates.append(
+                        (
+                            output.request_id,
+                            list(context.prompt_token_ids),
+                            int(output.prefix_learning_owner["target_rank"]),
+                            int(output.prefix_learning_owner["epoch"]),
+                        )
+                    )
+                    continue
                 await self._enqueue_prefix_learning_work_item(
                     PrefixLearningWorkItem(
                         request_id=output.request_id,
-                        engine=request_info.engine,
-                        prompt_token_ids=list(request_info.prompt_token_ids or []),
+                        engine=context.engine,
+                        prompt_token_ids=list(context.prompt_token_ids),
                         layer_expert_pairs=output.prefix_learning_pairs,
-                        owner=output.prefix_learning_owner,
+                        owner=None,
                     )
                 )
+
+        if direct_prefix_owner_updates:
+            await self._apply_prefix_router_owner_update_batch(
+                direct_prefix_owner_updates
+            )
     # ///////////// Expert-based load balancing
 
         if outputs.finished_requests and self.reqs_in_flight:
@@ -2988,6 +3124,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     if request_info.is_shadow
                     else request_id
                 )
+                self.prefix_learning_context_by_request.pop(primary_request_id, None)
                 await self._abort_requests([request_id], request_info.engine)
                 await self._abort_shadow_requests(primary_request_id)
             return
@@ -2997,11 +3134,13 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         for req_id in remaining_request_ids:
             if request_info := self.reqs_in_flight.get(req_id):
                 by_engine[request_info.engine].append(req_id)
-                primary_request_ids.add(
+                primary_request_id = (
                     request_info.primary_request_id
                     if request_info.is_shadow and request_info.primary_request_id
                     else req_id
                 )
+                primary_request_ids.add(primary_request_id)
+                self.prefix_learning_context_by_request.pop(primary_request_id, None)
         for engine, req_ids in by_engine.items():
             await self._abort_requests(req_ids, engine)
         for primary_request_id in primary_request_ids:

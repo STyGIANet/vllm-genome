@@ -220,6 +220,8 @@ class EngineCoreOutputs(
     # Prefix-router placement updates are relayed to the coordinator and
     # frontends so owner computation can happen locally.
     prefix_router_placement_update: dict[str, Any] | None = None
+    # Late async prefix-learning owner updates keyed by request id.
+    prefix_learning_owner_updates: list[tuple[str, int, int]] | None = None
     # ///////////// Expert-based load balancing
 
     def __post_init__(self):

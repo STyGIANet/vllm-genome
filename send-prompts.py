@@ -125,7 +125,7 @@ async def run_dataset(name, subset):
 
     warmup_count = len(base_ds) * warmup_epochs
 
-    rate = 100
+    rate = 1000
 
     results, measured, total_time = await poisson_driver(ds, rate, warmup_count)
 

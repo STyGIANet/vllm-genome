@@ -5,6 +5,7 @@ import functools
 import gc
 import itertools
 import os
+import queue
 import threading
 import time
 from collections import defaultdict
@@ -218,6 +219,221 @@ logger = init_logger(__name__)
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
+
+
+@dataclass
+class _PrefixLearningAsyncStepJob:
+    step_seq: int
+    epoch: int
+    req_ids: list[str]
+    req_lengths: list[int]
+    topk_by_layer: dict[int, np.ndarray]
+
+
+@dataclass
+class _PrefixLearningPendingCopyJob:
+    step_seq: int
+    epoch: int
+    req_ids: list[str]
+    req_lengths: list[int]
+    topk_by_layer_cpu: dict[int, torch.Tensor]
+    gpu_refs: list[torch.Tensor]
+    ready_event: torch.cuda.Event | None
+
+
+class _AsyncPrefixLearningOwnerLearner:
+    def __init__(
+        self,
+        num_ranks: int,
+        trace_enabled: bool,
+    ) -> None:
+        self._num_ranks = num_ranks
+        self._trace_enabled = trace_enabled
+        self._work_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._lock = threading.Lock()
+        self._owner_counts_by_req: dict[str, np.ndarray] = {}
+        self._processed_step_seq = 0
+        self._epoch: int | None = None
+        self._owner_lookup: np.ndarray | None = None
+        self._owner_rank_lookup: np.ndarray | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name="PrefixLearningAsyncOwnerLearner",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def update_owner_state(
+        self,
+        epoch: int,
+        owner_lookup: np.ndarray,
+        owner_rank_lookup: np.ndarray | None,
+    ) -> None:
+        self._work_queue.put(
+            ("owner_state", (epoch, owner_lookup, owner_rank_lookup))
+        )
+
+    def enqueue_step(self, job: _PrefixLearningAsyncStepJob) -> None:
+        self._work_queue.put(("step", job))
+
+    def drop_requests(self, req_ids: Iterable[str]) -> None:
+        req_id_list = list(req_ids)
+        if req_id_list:
+            self._work_queue.put(("drop", req_id_list))
+
+    def get_processed_step_seq(self) -> int:
+        with self._lock:
+            return self._processed_step_seq
+
+    def take_owner_if_ready(
+        self,
+        req_id: str,
+        required_step_seq: int,
+        epoch: int,
+    ) -> tuple[dict[str, int] | None, bool]:
+        with self._lock:
+            processed = self._processed_step_seq >= required_step_seq
+            if not processed or self._epoch != epoch:
+                return None, processed
+            scores = self._owner_counts_by_req.pop(req_id, None)
+
+        if scores is None or scores.size == 0:
+            return None, True
+        best_score = float(scores.max(initial=0.0))
+        if best_score <= 0:
+            return None, True
+        target_rank = int(np.argmax(scores))
+        return {
+            "target_rank": target_rank,
+            "epoch": epoch,
+        }, True
+
+    def _run(self) -> None:
+        while True:
+            kind, payload = self._work_queue.get()
+            if kind == "owner_state":
+                epoch, owner_lookup, owner_rank_lookup = cast(
+                    tuple[int, np.ndarray, np.ndarray | None], payload
+                )
+                with self._lock:
+                    self._epoch = epoch
+                    self._owner_lookup = owner_lookup
+                    self._owner_rank_lookup = owner_rank_lookup
+                    self._owner_counts_by_req.clear()
+                continue
+
+            if kind == "drop":
+                req_ids = cast(list[str], payload)
+                with self._lock:
+                    for req_id in req_ids:
+                        self._owner_counts_by_req.pop(req_id, None)
+                continue
+
+            if kind != "step":
+                continue
+
+            job = cast(_PrefixLearningAsyncStepJob, payload)
+            with self._lock:
+                owner_lookup = self._owner_lookup
+                owner_rank_lookup = self._owner_rank_lookup
+                epoch = self._epoch
+
+            if (
+                epoch is None
+                or job.epoch != epoch
+                or owner_lookup is None
+            ):
+                with self._lock:
+                    self._processed_step_seq = max(
+                        self._processed_step_seq, job.step_seq
+                    )
+                continue
+
+            num_reqs = len(job.req_ids)
+            if num_reqs <= 0:
+                with self._lock:
+                    self._processed_step_seq = max(
+                        self._processed_step_seq, job.step_seq
+                    )
+                continue
+
+            req_lengths = np.asarray(job.req_lengths, dtype=np.int64)
+            token_req_indices = np.repeat(
+                np.arange(num_reqs, dtype=np.int64),
+                req_lengths,
+            )
+            batch_counts = np.zeros(
+                (num_reqs, self._num_ranks),
+                dtype=np.float32,
+            )
+            flat_req_indices: np.ndarray | None = None
+            flat_req_topk = -1
+            for layer_id, captured in job.topk_by_layer.items():
+                if captured.size == 0:
+                    continue
+                if captured.ndim != 2 or captured.shape[0] != token_req_indices.size:
+                    continue
+                topk = int(captured.shape[1])
+                if topk <= 0:
+                    continue
+                if flat_req_indices is None or flat_req_topk != topk:
+                    flat_req_indices = np.repeat(token_req_indices, topk)
+                    flat_req_topk = topk
+                experts = captured.reshape(-1)
+                if owner_rank_lookup is not None:
+                    rank_lookup_layer = owner_rank_lookup[int(layer_id)]
+                    valid_mask = (
+                        (experts >= 0)
+                        & (experts < rank_lookup_layer.shape[0])
+                    )
+                    if not np.any(valid_mask):
+                        continue
+                    owner_ranks = rank_lookup_layer[experts[valid_mask]]
+                    owner_mask = owner_ranks >= 0
+                    if not np.any(owner_mask):
+                        continue
+                    linear_indices = (
+                        flat_req_indices[valid_mask][owner_mask] * self._num_ranks
+                        + owner_ranks[owner_mask].astype(np.int64, copy=False)
+                    )
+                    batch_counts += np.bincount(
+                        linear_indices,
+                        minlength=num_reqs * self._num_ranks,
+                    ).reshape(num_reqs, self._num_ranks).astype(
+                        np.float32,
+                        copy=False,
+                    )
+                else:
+                    owner_lookup_layer = owner_lookup[int(layer_id)]
+                    valid_mask = (
+                        (experts >= 0)
+                        & (experts < owner_lookup_layer.shape[0])
+                    )
+                    if not np.any(valid_mask):
+                        continue
+                    valid_req_indices = flat_req_indices[valid_mask]
+                    owner_rows = owner_lookup_layer[experts[valid_mask]]
+                    for rank_idx in range(self._num_ranks):
+                        batch_counts[:, rank_idx] += np.bincount(
+                            valid_req_indices,
+                            weights=owner_rows[:, rank_idx],
+                            minlength=num_reqs,
+                        ).astype(np.float32, copy=False)
+
+            with self._lock:
+                if self._epoch == job.epoch:
+                    nonzero_req_indices = np.flatnonzero(
+                        np.any(batch_counts > 0, axis=1)
+                    )
+                    for req_idx in nonzero_req_indices:
+                        req_id = job.req_ids[int(req_idx)]
+                        counts = batch_counts[int(req_idx)]
+                        existing = self._owner_counts_by_req.get(req_id)
+                        if existing is None:
+                            self._owner_counts_by_req[req_id] = counts.copy()
+                        else:
+                            existing += counts
+                self._processed_step_seq = max(self._processed_step_seq, job.step_seq)
 
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
@@ -500,8 +716,15 @@ class GPUModelRunner(
         self._prefix_learning_req_id_by_slot: list[str | None] = []
         self._prefix_learning_free_slots: list[int] = []
         self._prefix_learning_step_req_ids: list[str] = []
-        self._prefix_learning_step_token_slots: torch.Tensor | None = None
+        self._prefix_learning_step_req_lengths: list[int] = []
+        self._prefix_learning_step_total_prompt_tokens = 0
         self._prefix_learning_step_topk_by_layer: dict[int, list[torch.Tensor]] = {}
+        self._prefix_learning_async_step_seq = 0
+        self._prefix_learning_last_step_seq_by_req: dict[str, int] = {}
+        self._prefix_learning_pending_async_req_steps: dict[str, int] = {}
+        self._prefix_learning_pending_copy_jobs: list[_PrefixLearningPendingCopyJob] = []
+        self._prefix_learning_copy_stream: torch.cuda.Stream | None = None
+        self._prefix_learning_async_learner: _AsyncPrefixLearningOwnerLearner | None = None
         self._prefix_learning_trace_debug = bool(
             getattr(self.model_config, "load_balancer_debug", False)
         )
@@ -4606,6 +4829,7 @@ class GPUModelRunner(
             routed_experts_step_indices = None
             prefix_learning_pairs_by_req = None
             prefix_learning_owner_by_req = None
+            async_prefix_learning_owner_by_req = None
             (
                 prefix_learning_capture_ranges,
                 prefix_learning_capture_req_ids,
@@ -4679,6 +4903,11 @@ class GPUModelRunner(
                     logger.error("RoutedExpertsCapturer not initialized.")
 
             prefix_router_placement_update = self._take_prefix_router_placement_update()
+            async_prefix_learning_owner_by_req = (
+                self._take_async_prefix_learning_owner_updates()
+                if self.model_config.enable_prefix_affinity_routing
+                else None
+            )
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -4696,6 +4925,7 @@ class GPUModelRunner(
                 routed_experts_step_indices=routed_experts_step_indices,
                 prefix_learning_pairs_by_req=prefix_learning_pairs_by_req,
                 prefix_learning_owner_by_req=prefix_learning_owner_by_req,
+                async_prefix_learning_owner_by_req=async_prefix_learning_owner_by_req,
                 prefix_router_placement_update=prefix_router_placement_update,
             )
             self._current_prefill_capture_ranges = []
@@ -5621,7 +5851,8 @@ class GPUModelRunner(
         self._current_prefill_capture_ranges = []
         self._current_prefill_capture_req_ids = []
         self._prefix_learning_step_req_ids = []
-        self._prefix_learning_step_token_slots = None
+        self._prefix_learning_step_req_lengths = []
+        self._prefix_learning_step_total_prompt_tokens = 0
         self._prefix_learning_step_topk_by_layer = {}
 
         assert (
@@ -7315,6 +7546,8 @@ class GPUModelRunner(
         self._prefix_learning_free_slots.append(slot)
 
     def _clear_all_prefix_learning_state(self) -> None:
+        stale_req_ids = list(self._prefix_learning_req_slot_by_id.keys())
+        stale_req_ids.extend(self._prefix_learning_pending_async_req_steps.keys())
         if self._prefix_learning_owner_counts_buffer is not None:
             self._prefix_learning_owner_counts_buffer.zero_()
         self._prefix_learning_req_slot_by_id.clear()
@@ -7326,11 +7559,97 @@ class GPUModelRunner(
             range(self.max_num_reqs - 1, -1, -1)
         )
         self._prefix_learning_step_req_ids = []
-        self._prefix_learning_step_token_slots = None
+        self._prefix_learning_step_req_lengths = []
+        self._prefix_learning_step_total_prompt_tokens = 0
         self._prefix_learning_step_topk_by_layer = {}
+        self._prefix_learning_last_step_seq_by_req.clear()
+        self._prefix_learning_pending_async_req_steps.clear()
+        if self._prefix_learning_async_learner is not None and stale_req_ids:
+            self._prefix_learning_async_learner.drop_requests(stale_req_ids)
+
+    def _ensure_prefix_learning_async_learner(self) -> _AsyncPrefixLearningOwnerLearner:
+        learner = self._prefix_learning_async_learner
+        if learner is None:
+            learner = _AsyncPrefixLearningOwnerLearner(
+                num_ranks=self.parallel_config.data_parallel_size,
+                trace_enabled=self._prefix_learning_trace_debug,
+            )
+            self._prefix_learning_async_learner = learner
+        return learner
+
+    def _take_async_prefix_learning_owner_updates(
+        self,
+    ) -> dict[str, dict[str, int]] | None:
+        self._drain_prefix_learning_pending_copy_jobs()
+        learner = self._prefix_learning_async_learner
+        epoch = self._prefix_learning_owner_cache_epoch
+        if learner is None or epoch is None or not self._prefix_learning_pending_async_req_steps:
+            return None
+
+        results: dict[str, dict[str, int]] = {}
+        ready_req_ids: list[str] = []
+        for req_id, required_step_seq in list(
+            self._prefix_learning_pending_async_req_steps.items()
+        ):
+            owner, processed = learner.take_owner_if_ready(
+                req_id=req_id,
+                required_step_seq=required_step_seq,
+                epoch=epoch,
+            )
+            if owner is not None:
+                results[req_id] = owner
+                ready_req_ids.append(req_id)
+            elif processed:
+                ready_req_ids.append(req_id)
+
+        for req_id in ready_req_ids:
+            self._prefix_learning_pending_async_req_steps.pop(req_id, None)
+            self._prefix_learning_last_step_seq_by_req.pop(req_id, None)
+
+        return results or None
+
+    def _drain_prefix_learning_pending_copy_jobs(self) -> None:
+        if not self._prefix_learning_pending_copy_jobs:
+            return
+
+        learner = self._prefix_learning_async_learner
+        if learner is None:
+            return
+
+        current_epoch = self._prefix_learning_owner_cache_epoch
+        remaining_jobs: list[_PrefixLearningPendingCopyJob] = []
+        for job in self._prefix_learning_pending_copy_jobs:
+            if job.ready_event is not None and not job.ready_event.query():
+                remaining_jobs.append(job)
+                continue
+            if current_epoch is None or job.epoch != current_epoch:
+                continue
+            learner.enqueue_step(
+                _PrefixLearningAsyncStepJob(
+                    step_seq=job.step_seq,
+                    epoch=job.epoch,
+                    req_ids=job.req_ids,
+                    req_lengths=job.req_lengths,
+                    topk_by_layer={
+                        layer_id: tensor.numpy()
+                        for layer_id, tensor in job.topk_by_layer_cpu.items()
+                    },
+                )
+            )
+        self._prefix_learning_pending_copy_jobs = remaining_jobs
 
     def _update_prefix_learning_freeze_state(self) -> bool:
         return False
+
+    def _get_prefix_learning_capture_cpu_dtype(self) -> torch.dtype:
+        num_experts = self._prefix_learning_num_experts
+        if num_experts > 0:
+            # Keep a signed dtype so sentinel values like -1 remain representable.
+            if num_experts <= 127:
+                return torch.int8
+            if num_experts <= 32767:
+                return torch.int16
+        return torch.int32
 
     def _refresh_prefix_learning_owner_state(
         self,
@@ -7406,7 +7725,21 @@ class GPUModelRunner(
         self._prefix_learning_owner_lookup = owner_lookup
         self._prefix_learning_owner_rank_lookup = owner_rank_lookup
         self._prefix_learning_owner_cache_epoch = epoch
-        if epoch_changed and self._prefix_learning_req_slot_by_id:
+        owner_lookup_cpu = owner_lookup.to(device="cpu").numpy()
+        owner_rank_lookup_cpu = (
+            owner_rank_lookup.to(device="cpu").numpy()
+            if owner_rank_lookup is not None
+            else None
+        )
+        self._ensure_prefix_learning_async_learner().update_owner_state(
+            epoch=epoch,
+            owner_lookup=owner_lookup_cpu,
+            owner_rank_lookup=owner_rank_lookup_cpu,
+        )
+        if epoch_changed and (
+            self._prefix_learning_req_slot_by_id
+            or self._prefix_learning_pending_async_req_steps
+        ):
             self._clear_all_prefix_learning_state()
 
     def _begin_prefix_learning_step_capture(
@@ -7417,7 +7750,8 @@ class GPUModelRunner(
         trace_enabled = self._prefix_learning_trace_debug
         start_ns = time.perf_counter_ns() if trace_enabled else 0
         self._prefix_learning_step_req_ids = []
-        self._prefix_learning_step_token_slots = None
+        self._prefix_learning_step_req_lengths = []
+        self._prefix_learning_step_total_prompt_tokens = 0
         self._prefix_learning_step_topk_by_layer = {}
 
         if (
@@ -7431,7 +7765,6 @@ class GPUModelRunner(
             return
 
         active_req_ids: list[str] = []
-        active_req_slots: list[int] = []
         req_lengths: list[int] = []
         for req_id, (start, end) in zip(prefill_capture_req_ids, prefill_capture_ranges):
             if end <= start:
@@ -7440,25 +7773,15 @@ class GPUModelRunner(
             if slot is None:
                 continue
             active_req_ids.append(req_id)
-            active_req_slots.append(slot)
             req_lengths.append(end - start)
 
         total_prompt_tokens = sum(req_lengths)
         if not active_req_ids or total_prompt_tokens <= 0:
             return
 
-        token_slots = torch.empty(
-            (total_prompt_tokens,),
-            dtype=torch.int64,
-            device=self.device,
-        )
-        offset = 0
-        for slot, req_len in zip(active_req_slots, req_lengths):
-            token_slots[offset:offset + req_len] = slot
-            offset += req_len
-
         self._prefix_learning_step_req_ids = active_req_ids
-        self._prefix_learning_step_token_slots = token_slots
+        self._prefix_learning_step_req_lengths = req_lengths
+        self._prefix_learning_step_total_prompt_tokens = total_prompt_tokens
 
         if trace_enabled:
             logger.warning(
@@ -7472,131 +7795,149 @@ class GPUModelRunner(
     def _accumulate_prefix_learning_step_capture(self) -> None:
         trace_enabled = self._prefix_learning_trace_debug
         start_ns = time.perf_counter_ns() if trace_enabled else 0
+        self._drain_prefix_learning_pending_copy_jobs()
 
-        owner_lookup = self._prefix_learning_owner_lookup
-        token_slots = self._prefix_learning_step_token_slots
+        epoch = self._prefix_learning_owner_cache_epoch
         step_topk_by_layer = self._prefix_learning_step_topk_by_layer
         if (
             not self.model_config.enable_prefix_affinity_routing
-            or owner_lookup is None
-            or token_slots is None
-            or self._prefix_learning_owner_counts_buffer is None
+            or epoch is None
             or not step_topk_by_layer
         ):
             self._prefix_learning_step_req_ids = []
-            self._prefix_learning_step_token_slots = None
+            self._prefix_learning_step_req_lengths = []
+            self._prefix_learning_step_total_prompt_tokens = 0
             self._prefix_learning_step_topk_by_layer = {}
             return
 
         total_captured_tokens = 0
         total_layers = 0
-        total_mask_ms = 0.0
-        total_owner_reduce_ms = 0.0
-        total_index_add_ms = 0.0
-        owner_rank_lookup = self._prefix_learning_owner_rank_lookup
+        total_copy_enqueue_ms = 0.0
         req_count = len(self._prefix_learning_step_req_ids)
-
-        for layer_id, captured_parts in step_topk_by_layer.items():
-            if not captured_parts:
-                continue
-            captured = (
-                captured_parts[0]
-                if len(captured_parts) == 1
-                else torch.cat(captured_parts, dim=0)
-            )
-            if token_slots.shape[0] != captured.shape[0]:
-                continue
-
-            layer_start_ns = time.perf_counter_ns() if trace_enabled else 0
-            expert_indices = captured.to(torch.int64)
-            valid_mask = ((expert_indices >= 0)
-                          & (expert_indices < self._prefix_learning_num_experts))
-            if trace_enabled:
-                if self.device.type == "cuda":
-                    torch.cuda.synchronize(device=self.device)
-                after_mask_ns = time.perf_counter_ns()
-                total_mask_ms += (after_mask_ns - layer_start_ns) / 1e6
-            if not torch.any(valid_mask):
-                continue
-
-            if owner_rank_lookup is not None:
-                safe_expert_indices = torch.where(
-                    valid_mask,
-                    expert_indices,
-                    torch.zeros((), dtype=torch.int64, device=self.device),
+        topk_by_layer_cpu: dict[int, torch.Tensor] = {}
+        gpu_refs: list[torch.Tensor] = []
+        capture_cpu_dtype = self._get_prefix_learning_capture_cpu_dtype()
+        copy_stream = None
+        current_stream = None
+        pin_memory = is_pin_memory_available()
+        if self.device.type == "cuda":
+            current_stream = torch.cuda.current_stream(device=self.device)
+            if self._prefix_learning_copy_stream is None:
+                self._prefix_learning_copy_stream = torch.cuda.Stream(
+                    device=self.device
                 )
-                owner_ranks = owner_rank_lookup[int(layer_id), safe_expert_indices]
-                valid_rank_mask = valid_mask & (owner_ranks >= 0)
-                if not torch.any(valid_rank_mask):
-                    continue
-                num_ranks = self.parallel_config.data_parallel_size
-                flat_token_slots = token_slots.view(-1, 1).expand_as(owner_ranks)[
-                    valid_rank_mask
-                ]
-                flat_owner_ranks = owner_ranks[valid_rank_mask]
-                linear_indices = flat_token_slots * num_ranks + flat_owner_ranks
-                owner_counts_flat = self._prefix_learning_owner_counts_buffer.view(-1)
-                if trace_enabled:
-                    if self.device.type == "cuda":
-                        torch.cuda.synchronize(device=self.device)
-                    after_reduce_ns = time.perf_counter_ns()
-                    total_owner_reduce_ms += (after_reduce_ns - after_mask_ns) / 1e6
-                owner_counts_flat.index_add_(
-                    0,
-                    linear_indices,
-                    torch.ones(
-                        (linear_indices.numel(),),
-                        dtype=owner_counts_flat.dtype,
-                        device=self.device,
-                    ),
-                )
-            else:
-                safe_expert_indices = torch.where(
-                    valid_mask,
-                    expert_indices,
-                    torch.zeros((), dtype=torch.int64, device=self.device),
-                )
-                owner_add = owner_lookup[int(layer_id), safe_expert_indices]
-                if owner_add.ndim == 3:
-                    token_owner_add = (
-                        owner_add * valid_mask.unsqueeze(-1).to(owner_add.dtype)
-                    ).sum(dim=1)
-                else:
-                    token_owner_add = (
-                        owner_add * valid_mask.to(owner_add.dtype).unsqueeze(-1)
+            copy_stream = self._prefix_learning_copy_stream
+        if copy_stream is not None:
+            with torch.cuda.stream(copy_stream):
+                copy_stream.wait_stream(current_stream)
+                for layer_id, captured_parts in list(step_topk_by_layer.items()):
+                    if not captured_parts:
+                        continue
+                    first_part = captured_parts[0]
+                    topk = int(first_part.shape[1]) if first_part.ndim >= 2 else 0
+                    if topk <= 0:
+                        continue
+                    layer_tokens = sum(int(part.shape[0]) for part in captured_parts)
+                    if self._prefix_learning_step_total_prompt_tokens != layer_tokens:
+                        continue
+                    if trace_enabled:
+                        enqueue_start_ns = time.perf_counter_ns()
+                    cpu_buffer = torch.empty(
+                        (layer_tokens, topk),
+                        dtype=capture_cpu_dtype,
+                        device="cpu",
+                        pin_memory=pin_memory,
                     )
+                    offset = 0
+                    for part in captured_parts:
+                        part_len = int(part.shape[0])
+                        if part_len <= 0:
+                            continue
+                        src = part.to(dtype=capture_cpu_dtype)
+                        cpu_buffer[offset:offset + part_len].copy_(
+                            src,
+                            non_blocking=True,
+                        )
+                        gpu_refs.append(src)
+                        offset += part_len
+                    topk_by_layer_cpu[int(layer_id)] = cpu_buffer
+                    if trace_enabled:
+                        total_copy_enqueue_ms += (
+                            time.perf_counter_ns() - enqueue_start_ns
+                        ) / 1e6
+                    total_captured_tokens += layer_tokens
+                    total_layers += 1
+        else:
+            for layer_id, captured_parts in list(step_topk_by_layer.items()):
+                if not captured_parts:
+                    continue
+                first_part = captured_parts[0]
+                topk = int(first_part.shape[1]) if first_part.ndim >= 2 else 0
+                if topk <= 0:
+                    continue
+                layer_tokens = sum(int(part.shape[0]) for part in captured_parts)
+                if self._prefix_learning_step_total_prompt_tokens != layer_tokens:
+                    continue
                 if trace_enabled:
-                    if self.device.type == "cuda":
-                        torch.cuda.synchronize(device=self.device)
-                    after_reduce_ns = time.perf_counter_ns()
-                    total_owner_reduce_ms += (after_reduce_ns - after_mask_ns) / 1e6
-                self._prefix_learning_owner_counts_buffer.index_add_(
-                    0,
-                    token_slots,
-                    token_owner_add,
+                    enqueue_start_ns = time.perf_counter_ns()
+                cpu_buffer = torch.empty(
+                    (layer_tokens, topk),
+                    dtype=capture_cpu_dtype,
+                    device="cpu",
+                    pin_memory=pin_memory,
                 )
+                offset = 0
+                for part in captured_parts:
+                    part_len = int(part.shape[0])
+                    if part_len <= 0:
+                        continue
+                    src = part.to(dtype=capture_cpu_dtype)
+                    cpu_buffer[offset:offset + part_len].copy_(src)
+                    gpu_refs.append(src)
+                    offset += part_len
+                topk_by_layer_cpu[int(layer_id)] = cpu_buffer
+                if trace_enabled:
+                    total_copy_enqueue_ms += (
+                        time.perf_counter_ns() - enqueue_start_ns
+                    ) / 1e6
+                total_captured_tokens += layer_tokens
+                total_layers += 1
 
-            if trace_enabled:
-                if self.device.type == "cuda":
-                    torch.cuda.synchronize(device=self.device)
-                after_index_add_ns = time.perf_counter_ns()
-                total_index_add_ms += (after_index_add_ns - after_reduce_ns) / 1e6
-            total_captured_tokens += int(captured.shape[0])
-            total_layers += 1
+        ready_event: torch.Event | None = None
+        if copy_stream is not None and topk_by_layer_cpu:
+            ready_event = torch.cuda.Event()
+            ready_event.record(copy_stream)
+
+        if topk_by_layer_cpu:
+            self._ensure_prefix_learning_async_learner()
+            self._prefix_learning_async_step_seq += 1
+            step_seq = self._prefix_learning_async_step_seq
+            self._prefix_learning_pending_copy_jobs.append(
+                _PrefixLearningPendingCopyJob(
+                    step_seq=step_seq,
+                    epoch=epoch,
+                    req_ids=list(self._prefix_learning_step_req_ids),
+                    req_lengths=list(self._prefix_learning_step_req_lengths),
+                    topk_by_layer_cpu=topk_by_layer_cpu,
+                    gpu_refs=gpu_refs,
+                    ready_event=ready_event,
+                )
+            )
+            for req_id in self._prefix_learning_step_req_ids:
+                self._prefix_learning_last_step_seq_by_req[req_id] = step_seq
 
         self._prefix_learning_step_req_ids = []
-        self._prefix_learning_step_token_slots = None
+        self._prefix_learning_step_req_lengths = []
+        self._prefix_learning_step_total_prompt_tokens = 0
         self._prefix_learning_step_topk_by_layer = {}
         if trace_enabled:
             logger.warning(
-                "PrefixTrace worker step_accumulate ts_ns=%d reqs=%d layers=%d captured_tokens=%d mask_ms=%.3f owner_reduce_ms=%.3f index_add_ms=%.3f duration_ms=%.3f",
+                "PrefixTrace worker step_accumulate ts_ns=%d reqs=%d layers=%d captured_tokens=%d copy_enqueue_ms=%.3f duration_ms=%.3f",
                 start_ns,
                 req_count,
                 total_layers,
                 total_captured_tokens,
-                total_mask_ms,
-                total_owner_reduce_ms,
-                total_index_add_ms,
+                total_copy_enqueue_ms,
                 (time.perf_counter_ns() - start_ns) / 1e6,
             )
 
@@ -7701,12 +8042,11 @@ class GPUModelRunner(
             or layer_id < 0
             or layer_id >= self._prefix_learning_num_layers
             or self._prefix_learning_num_experts <= 0
-            or self._prefix_learning_owner_counts_buffer is None
         ):
             return
         if (not self._current_prefill_capture_ranges
                 or not self._current_prefill_capture_req_ids
-                or self._prefix_learning_step_token_slots is None):
+                or self._prefix_learning_step_total_prompt_tokens <= 0):
             return
         captured_parts = [
             topk_ids[start:end]
@@ -7723,8 +8063,7 @@ class GPUModelRunner(
             captured = torch.cat(captured_parts, dim=0)
         mark_stage("concat")
 
-        token_slots = self._prefix_learning_step_token_slots
-        if token_slots.shape[0] != captured.shape[0]:
+        if self._prefix_learning_step_total_prompt_tokens != captured.shape[0]:
             return
 
         self._prefix_learning_step_topk_by_layer.setdefault(
@@ -7799,10 +8138,9 @@ class GPUModelRunner(
     def _get_prefix_learning_owners_for_requests(
         self, req_ids: list[str]
     ) -> dict[str, dict[str, int]] | None:
-        trace_enabled = self._prefix_learning_trace_debug
+        self._drain_prefix_learning_pending_copy_jobs()
         if (
             not req_ids
-            or self._prefix_learning_owner_counts_buffer is None
             or self._prefix_learning_owner_cache_epoch is None
         ):
             return None
@@ -7823,72 +8161,36 @@ class GPUModelRunner(
                 self._free_prefix_learning_slot(req_id)
             return results or None
 
+        learner = self._prefix_learning_async_learner
+        if learner is None:
+            return None
+
+        epoch = self._prefix_learning_owner_cache_epoch
         results: dict[str, dict[str, int]] = {}
         for req_id in req_ids:
             if self._is_shadow_request_id(req_id):
                 self._free_prefix_learning_slot(req_id)
                 continue
-            slot = self._prefix_learning_req_slot_by_id.get(req_id)
-            if slot is None:
-                continue
-            if trace_enabled and self.device.type == "cuda":
-                torch.cuda.synchronize(device=self.device)
-            start_ns = time.perf_counter_ns() if trace_enabled else 0
-            last_ns = start_ns
-
-            def mark_stage(name: str, stage_times: dict[str, float]) -> None:
-                nonlocal last_ns
-                if not trace_enabled:
-                    return
-                if self.device.type == "cuda":
-                    torch.cuda.synchronize(device=self.device)
-                now_ns = time.perf_counter_ns()
-                stage_times[name] = (now_ns - last_ns) / 1e6
-                last_ns = now_ns
-
-            stage_ms: dict[str, float] = {}
-            scores = self._prefix_learning_owner_counts_buffer[slot]
-            mark_stage("scores_view", stage_ms)
-            scores_cpu = scores.to(device="cpu", dtype=torch.int32)
-            mark_stage("to_cpu", stage_ms)
-            best_score = int(scores_cpu.max().item()) if scores_cpu.numel() > 0 else 0
-            mark_stage("best_score", stage_ms)
-            if best_score <= 0:
-                self._free_prefix_learning_slot(req_id)
-                if trace_enabled:
-                    logger.warning(
-                        "PrefixTrace worker owner_take_empty ts_ns=%d request_id=%s slot=%d scores_view_ms=%.3f to_cpu_ms=%.3f best_score_ms=%.3f duration_ms=%.3f",
-                        start_ns,
-                        req_id,
-                        slot,
-                        stage_ms.get("scores_view", 0.0),
-                        stage_ms.get("to_cpu", 0.0),
-                        stage_ms.get("best_score", 0.0),
-                        (time.perf_counter_ns() - start_ns) / 1e6,
-                    )
-                continue
-            target_rank = max(
-                range(num_ranks),
-                key=lambda rank: (int(scores_cpu[rank]), -rank),
+            required_step_seq = self._prefix_learning_last_step_seq_by_req.get(
+                req_id, self._prefix_learning_async_step_seq
             )
-            mark_stage("argmax", stage_ms)
-            results[req_id] = {
-                "target_rank": target_rank,
-                "epoch": self._prefix_learning_owner_cache_epoch,
-            }
+            owner, processed = learner.take_owner_if_ready(
+                req_id=req_id,
+                required_step_seq=required_step_seq,
+                epoch=epoch,
+            )
             self._free_prefix_learning_slot(req_id)
-            if trace_enabled:
-                logger.warning(
-                    "PrefixTrace worker owner_take ts_ns=%d request_id=%s slot=%d scores_view_ms=%.3f to_cpu_ms=%.3f best_score_ms=%.3f argmax_ms=%.3f duration_ms=%.3f",
-                    start_ns,
-                    req_id,
-                    slot,
-                    stage_ms.get("scores_view", 0.0),
-                    stage_ms.get("to_cpu", 0.0),
-                    stage_ms.get("best_score", 0.0),
-                    stage_ms.get("argmax", 0.0),
-                    (time.perf_counter_ns() - start_ns) / 1e6,
+            if owner is not None:
+                results[req_id] = owner
+                self._prefix_learning_pending_async_req_steps.pop(req_id, None)
+                self._prefix_learning_last_step_seq_by_req.pop(req_id, None)
+            elif not processed:
+                self._prefix_learning_pending_async_req_steps[req_id] = (
+                    required_step_seq
                 )
+            else:
+                self._prefix_learning_pending_async_req_steps.pop(req_id, None)
+                self._prefix_learning_last_step_seq_by_req.pop(req_id, None)
         return results or None
 
     def _bind_router_capture_hooks(
