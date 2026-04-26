@@ -238,6 +238,28 @@ class DPCoordinatorProc:
             rank: ExactBlockPrefixIndex() for rank in range(engine_count)
         }
 
+    def _apply_runtime_routing_weights(
+        self,
+        expert_affinity_routing_weight: float,
+        kv_block_prefix_routing_weight: float,
+        load_score_routing_weight: float,
+    ) -> None:
+        self.expert_affinity_weight = (
+            float(expert_affinity_routing_weight)
+            if self.expert_affinity_enabled
+            else 0.0
+        )
+        self.kv_block_prefix_weight = (
+            float(kv_block_prefix_routing_weight)
+            if self.kv_block_prefix_enabled
+            else 0.0
+        )
+        self.load_score_weight = (
+            float(load_score_routing_weight)
+            if self.load_score_enabled
+            else 0.0
+        )
+
     def _clear_prefix_router_state(self, epoch: int) -> None:
         for tree in self.expert_affinity_trees.values():
             tree.clear()
@@ -593,13 +615,19 @@ class DPCoordinatorProc:
                 finally:
                     zmq_addr_pipe.close()
             # Wait until all engines subscribe.
-            for _ in self.engines:
+            num_expected = len(self.engines)
+            for subscribed in range(num_expected):
                 if publish_back.recv() != b"\x01":
                     logger.error(
                         "DP Coordinator received unexpected message while "
                         "waiting for engines to subscribe"
                     )
                     return
+                logger.info(
+                    "DP Coordinator received engine subscription %d/%d",
+                    subscribed + 1,
+                    num_expected,
+                )
             # Send ready message to engines.
             publish_back.send(b"READY")
 
@@ -722,6 +750,49 @@ class DPCoordinatorProc:
                             int(target_rank),
                             int(epoch),
                             list(prompt_token_ids),
+                        )
+                        continue
+
+                    if (
+                        isinstance(decoded, (list, tuple))
+                        and len(decoded) == 3
+                        and decoded[0] == "PREFIX_ROUTER_UPDATE_BATCH"
+                    ):
+                        _, _, updates = decoded
+                        for update in updates:
+                            if len(update) != 3:
+                                continue
+                            target_rank, epoch, prompt_token_ids = update
+                            self._apply_prefix_router_update(
+                                int(target_rank),
+                                int(epoch),
+                                list(prompt_token_ids),
+                            )
+                        continue
+
+                    if (
+                        isinstance(decoded, (list, tuple))
+                        and len(decoded) == 5
+                        and decoded[0] == "LB_WEIGHT_UPDATE"
+                    ):
+                        _, source_client_index, expert_weight, kv_weight, load_weight = (
+                            decoded
+                        )
+                        self._apply_runtime_routing_weights(
+                            float(expert_weight),
+                            float(kv_weight),
+                            float(load_weight),
+                        )
+                        publish_front.send(
+                            msgspec.msgpack.encode(
+                                (
+                                    "LB_WEIGHT_UPDATE",
+                                    int(source_client_index),
+                                    self.expert_affinity_weight,
+                                    self.kv_block_prefix_weight,
+                                    self.load_score_weight,
+                                )
+                            )
                         )
                         continue
 

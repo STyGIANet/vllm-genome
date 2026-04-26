@@ -190,11 +190,15 @@ class FusedTopKRouter(BaseRouter):
             capture_weights = topk_weights if _is_tracking_enabled() else None
             capture_num = hidden_states.shape[0]
             capture_prefill_ranges: list[tuple[int, int]] | None = None
+            capture_prefill_req_ids: list[str] | None = None
 
             ctx = get_forward_context()
             if ctx is not None:
                 capture_prefill_ranges = list(
                     ctx.additional_kwargs.get("routing_capture_prefill_ranges", [])
+                )
+                capture_prefill_req_ids = list(
+                    ctx.additional_kwargs.get("routing_capture_prefill_req_ids", [])
                 )
             if ctx is not None and ctx.dp_metadata is not None:
                 try:
@@ -212,6 +216,7 @@ class FusedTopKRouter(BaseRouter):
                         capture_num = sizes[ep_rank]
                 except Exception:
                     capture_prefill_ranges = None
+                    capture_prefill_req_ids = None
 
             if self._layer_id not in _ROUTING_DATA:
                 _ROUTING_DATA[self._layer_id] = []
@@ -219,6 +224,7 @@ class FusedTopKRouter(BaseRouter):
                 'topk_ids': capture_ids.detach(),
                 'num_tokens': capture_num,
                 'prefill_ranges': capture_prefill_ranges,
+                'prefill_req_ids': capture_prefill_req_ids,
             }
             if capture_weights is not None:
                 capture_record['topk_weights'] = capture_weights.detach()

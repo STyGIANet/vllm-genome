@@ -212,6 +212,40 @@ class WorkerBase:
         from vllm.model_executor.layers.fused_moe.layer import reset_step_counter
         reset_step_counter()
 
+    def _require_runtime_eplb_state(self):
+        model_runner = getattr(self, "model_runner", None)
+        eplb_state = getattr(model_runner, "eplb_state", None)
+        if eplb_state is None:
+            raise ValueError(
+                "Runtime EPLB step_interval control requires --enable-eplb."
+            )
+        return eplb_state
+
+    def get_runtime_eplb_step_interval_state(self) -> dict[str, int | bool]:
+        eplb_state = self._require_runtime_eplb_state()
+        step_interval = int(eplb_state.expert_rearrangement_step_interval)
+        current_step = int(eplb_state.expert_rearrangement_step)
+        return {
+            "step_interval": step_interval,
+            "current_step": current_step,
+            "steps_until_next_rearrangement": max(
+                0, step_interval - current_step
+            ),
+            "use_async": bool(eplb_state.is_async),
+        }
+
+    def set_runtime_eplb_step_interval(
+        self, step_interval: int
+    ) -> dict[str, int | bool]:
+        step_interval = int(step_interval)
+        if step_interval < 1:
+            raise ValueError("step_interval must be >= 1")
+
+        eplb_state = self._require_runtime_eplb_state()
+        eplb_state.expert_rearrangement_step_interval = step_interval
+        self.parallel_config.eplb_config.step_interval = step_interval
+        return self.get_runtime_eplb_step_interval_state()
+
     def register_placement_callback(self, file_path: str, func_name: str) -> None:
         """Load a placement function from an absolute file path and register it.
 

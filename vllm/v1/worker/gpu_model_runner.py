@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -112,6 +113,7 @@ from vllm.utils.torch_utils import (
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
 )
+from vllm.v1.prefix_router import build_owner_cache_from_physical_to_logical_map
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -483,8 +485,30 @@ class GPUModelRunner(
         self.eplb_state: EplbState | None = None
         # NOTE(yongji): flag to temporarily disable EPLB during scaling up/down
         self.eep_eplb_suppressed = False
+        self._current_prefill_capture_ranges: list[tuple[int, int]] = []
+        self._current_prefill_capture_req_ids: list[str] = []
         self._last_prefix_router_placement_epoch: int | None = None
         self._last_prefix_router_physical_to_logical_map: torch.Tensor | None = None
+        self._prefix_learning_owner_cache_epoch: int | None = None
+        self._prefix_learning_owner_lookup: torch.Tensor | None = None
+        self._prefix_learning_owner_rank_lookup: torch.Tensor | None = None
+        self._prefix_learning_num_layers = 0
+        self._prefix_learning_num_experts = 0
+        self._prefix_learning_seen_pairs_buffer: torch.Tensor | None = None
+        self._prefix_learning_owner_counts_buffer: torch.Tensor | None = None
+        self._prefix_learning_req_slot_by_id: dict[str, int] = {}
+        self._prefix_learning_req_id_by_slot: list[str | None] = []
+        self._prefix_learning_free_slots: list[int] = []
+        self._prefix_learning_step_req_ids: list[str] = []
+        self._prefix_learning_step_token_slots: torch.Tensor | None = None
+        self._prefix_learning_step_topk_by_layer: dict[int, list[torch.Tensor]] = {}
+        self._prefix_learning_trace_debug = bool(
+            getattr(self.model_config, "load_balancer_debug", False)
+        )
+        self._prefix_learning_dummy_owner_enabled = bool(
+            int(os.getenv("VLLM_PREFIX_LEARNING_DUMMY_OWNER", "0"))
+        )
+        self._skip_prefix_learning_capture_for_current_forward = False
         """
         State of the expert parallelism load balancer.
 
@@ -1070,6 +1094,7 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            self._free_prefix_learning_slot(req_id)
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -3238,6 +3263,7 @@ class GPUModelRunner(
             clear_routing_data,
             push_step_snapshot,
         )
+        self._accumulate_prefix_learning_step_capture()
         if not _is_any_routing_capture_enabled():
             return
 
@@ -3300,6 +3326,11 @@ class GPUModelRunner(
         epoch = StaticPlacementPolicy.get_prefix_router_epoch()
         model_state = next(iter(self.eplb_state.model_states.values()))
         physical_to_logical_map = model_state.physical_to_logical_map.detach().cpu()
+        physical_to_logical_map_list = physical_to_logical_map.tolist()
+        self._refresh_prefix_learning_owner_state(
+            physical_to_logical_map_list,
+            epoch,
+        )
 
         if self._last_prefix_router_physical_to_logical_map is None:
             self._last_prefix_router_physical_to_logical_map = (
@@ -3320,7 +3351,7 @@ class GPUModelRunner(
 
         return {
             "epoch": epoch,
-            "physical_to_logical_map": physical_to_logical_map.tolist(),
+            "physical_to_logical_map": physical_to_logical_map_list,
         }
 
     def setup_eplb_from_mapping(
@@ -4224,6 +4255,20 @@ class GPUModelRunner(
             ) = self._preprocess(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
+            (
+                prefix_learning_capture_ranges,
+                prefix_learning_capture_req_ids,
+            ) = self._get_primary_prefix_learning_capture_inputs(
+                prefill_capture_ranges, prefill_capture_req_ids
+            )
+            self._current_prefill_capture_ranges = list(
+                prefix_learning_capture_ranges)
+            self._current_prefill_capture_req_ids = list(
+                prefix_learning_capture_req_ids)
+            self._begin_prefix_learning_step_capture(
+                prefix_learning_capture_ranges,
+                prefix_learning_capture_req_ids,
+            )
 
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
@@ -4257,6 +4302,7 @@ class GPUModelRunner(
                 slot_mapping=slot_mappings,
                 additional_forward_context={
                     "routing_capture_prefill_ranges": prefill_capture_ranges,
+                    "routing_capture_prefill_req_ids": prefill_capture_req_ids,
                     "routing_capture_prefill_only_for_placement": bool(
                         self._compute_placement_callback
                     ),
@@ -4559,24 +4605,56 @@ class GPUModelRunner(
             routed_experts_step = None
             routed_experts_step_indices = None
             prefix_learning_pairs_by_req = None
+            prefix_learning_owner_by_req = None
+            (
+                prefix_learning_capture_ranges,
+                prefix_learning_capture_req_ids,
+            ) = self._get_primary_prefix_learning_capture_inputs(
+                prefill_capture_ranges, prefill_capture_req_ids
+            )
             if (
                 self.model_config.enable_prefix_affinity_routing
+                and prefix_learning_capture_req_ids
+            ):
+                prefix_learning_owner_by_req = (
+                    self._get_prefix_learning_owners_for_requests(
+                        prefix_learning_capture_req_ids
+                    )
+                )
+            unresolved_prefix_learning_req_ids = prefix_learning_capture_req_ids
+            if prefix_learning_owner_by_req is not None:
+                unresolved_prefix_learning_req_ids = [
+                    req_id for req_id in prefix_learning_capture_req_ids
+                    if req_id not in prefix_learning_owner_by_req
+                ]
+            if (
+                unresolved_prefix_learning_req_ids
+                and self.model_config.enable_prefix_affinity_routing
+            ):
+                prefix_learning_pairs_by_req = (
+                    self._get_prefix_learning_pairs_for_requests(
+                        unresolved_prefix_learning_req_ids
+                    )
+                )
+            if (
+                prefix_learning_pairs_by_req is None
+                and self.model_config.enable_prefix_affinity_routing
                 and self.routed_experts_initialized
             ):
                 capturer = RoutedExpertsCapturer.get_instance()
                 if (
                     capturer is not None
-                    and prefill_capture_ranges
-                    and prefill_capture_req_ids
+                    and prefix_learning_capture_ranges
+                    and prefix_learning_capture_req_ids
                 ):
                     compact_pairs = capturer.get_unique_layer_expert_pairs_for_ranges(
-                        prefill_capture_ranges
+                        prefix_learning_capture_ranges
                     )
                     if compact_pairs is not None:
                         prefix_learning_pairs_by_req = {
                             req_id: pairs.tolist()
                             for req_id, pairs in zip(
-                                prefill_capture_req_ids, compact_pairs
+                                prefix_learning_capture_req_ids, compact_pairs
                             )
                             if pairs is not None and len(pairs) > 0
                         }
@@ -4617,8 +4695,11 @@ class GPUModelRunner(
                 routed_experts_step=routed_experts_step,
                 routed_experts_step_indices=routed_experts_step_indices,
                 prefix_learning_pairs_by_req=prefix_learning_pairs_by_req,
+                prefix_learning_owner_by_req=prefix_learning_owner_by_req,
                 prefix_router_placement_update=prefix_router_placement_update,
             )
+            self._current_prefill_capture_ranges = []
+            self._current_prefill_capture_req_ids = []
 
         if not self.use_async_scheduling:
             return output
@@ -5537,6 +5618,12 @@ class GPUModelRunner(
             # mm encoder dummy run may need to add in the future.
             return torch.tensor([]), torch.tensor([])
 
+        self._current_prefill_capture_ranges = []
+        self._current_prefill_capture_req_ids = []
+        self._prefix_learning_step_req_ids = []
+        self._prefix_learning_step_token_slots = None
+        self._prefix_learning_step_topk_by_layer = {}
+
         assert (
             cudagraph_runtime_mode is None
             or cudagraph_runtime_mode.is_valid_runtime_mode()
@@ -5762,36 +5849,41 @@ class GPUModelRunner(
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
-            with (
-                self.maybe_randomize_inputs(input_ids, inputs_embeds),
-                set_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_tokens_padded,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_desc,
-                    ubatch_slices=ubatch_slices_padded,
-                    slot_mapping=slot_mappings,
-                    additional_forward_context={
-                        "routing_capture_prefill_ranges": prefill_capture_ranges,
-                        "routing_capture_prefill_only_for_placement": bool(
-                            self._compute_placement_callback
-                        ),
-                        "routing_capture_skip_expert_load": (
-                            self._uses_graph_only_callback_placement()
-                        ),
-                        "skip_routed_experts_capture": True,
-                    },
-                ),
-            ):
-                outputs = self.model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs,
-                )
+            self._skip_prefix_learning_capture_for_current_forward = True
+            try:
+                with (
+                    self.maybe_randomize_inputs(input_ids, inputs_embeds),
+                    set_forward_context(
+                        attn_metadata,
+                        self.vllm_config,
+                        num_tokens=num_tokens_padded,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                        cudagraph_runtime_mode=cudagraph_runtime_mode,
+                        batch_descriptor=batch_desc,
+                        ubatch_slices=ubatch_slices_padded,
+                        slot_mapping=slot_mappings,
+                        additional_forward_context={
+                            "routing_capture_prefill_ranges": prefill_capture_ranges,
+                            "routing_capture_prefill_req_ids": [],
+                            "routing_capture_prefill_only_for_placement": bool(
+                                self._compute_placement_callback
+                            ),
+                            "routing_capture_skip_expert_load": (
+                                self._uses_graph_only_callback_placement()
+                            ),
+                            "skip_routed_experts_capture": True,
+                        },
+                    ),
+                ):
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=inputs_embeds,
+                        **model_kwargs,
+                    )
+            finally:
+                self._skip_prefix_learning_capture_for_current_forward = False
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
@@ -7170,23 +7262,692 @@ class GPUModelRunner(
             max_num_kv_tokens=self.max_num_kv_tokens,
             vllm_config=self.vllm_config,
         )
-        self._bind_routed_experts_capturer(routed_experts_capturer)
+        self._bind_router_capture_hooks(routed_experts_capturer)
         self.routed_experts_initialized = True
 
-    def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
+    def init_prefix_learning_capture(self) -> None:
+        self._bind_router_capture_hooks(None)
+
+    @staticmethod
+    def _is_shadow_request_id(request_id: str) -> bool:
+        return "::shadow::" in request_id
+
+    def _uses_placement_snapshot_for_prefix_learning(self) -> bool:
+        return False
+
+    def _get_primary_prefix_learning_capture_inputs(
+        self,
+        prefill_capture_ranges: list[tuple[int, int]],
+        prefill_capture_req_ids: list[str],
+    ) -> tuple[list[tuple[int, int]], list[str]]:
+        frozen = self._update_prefix_learning_freeze_state()
+        primary_ranges: list[tuple[int, int]] = []
+        primary_req_ids: list[str] = []
+        for req_id, capture_range in zip(prefill_capture_req_ids,
+                                         prefill_capture_ranges):
+            if self._is_shadow_request_id(req_id):
+                continue
+            primary_req_ids.append(req_id)
+            primary_ranges.append(capture_range)
+        return primary_ranges, primary_req_ids
+
+    def _get_or_alloc_prefix_learning_slot(self, req_id: str) -> int | None:
+        slot = self._prefix_learning_req_slot_by_id.get(req_id)
+        if slot is not None:
+            return slot
+        if (self._prefix_learning_owner_counts_buffer is None
+                or not self._prefix_learning_free_slots):
+            return None
+        slot = self._prefix_learning_free_slots.pop()
+        self._prefix_learning_req_slot_by_id[req_id] = slot
+        self._prefix_learning_req_id_by_slot[slot] = req_id
+        self._prefix_learning_owner_counts_buffer[slot].zero_()
+        return slot
+
+    def _free_prefix_learning_slot(self, req_id: str) -> None:
+        slot = self._prefix_learning_req_slot_by_id.pop(req_id, None)
+        if slot is None:
+            return
+        if self._prefix_learning_owner_counts_buffer is not None:
+            self._prefix_learning_owner_counts_buffer[slot].zero_()
+        if 0 <= slot < len(self._prefix_learning_req_id_by_slot):
+            self._prefix_learning_req_id_by_slot[slot] = None
+        self._prefix_learning_free_slots.append(slot)
+
+    def _clear_all_prefix_learning_state(self) -> None:
+        if self._prefix_learning_owner_counts_buffer is not None:
+            self._prefix_learning_owner_counts_buffer.zero_()
+        self._prefix_learning_req_slot_by_id.clear()
+        if self._prefix_learning_req_id_by_slot:
+            self._prefix_learning_req_id_by_slot = [None] * len(
+                self._prefix_learning_req_id_by_slot
+            )
+        self._prefix_learning_free_slots = list(
+            range(self.max_num_reqs - 1, -1, -1)
+        )
+        self._prefix_learning_step_req_ids = []
+        self._prefix_learning_step_token_slots = None
+        self._prefix_learning_step_topk_by_layer = {}
+
+    def _update_prefix_learning_freeze_state(self) -> bool:
+        return False
+
+    def _refresh_prefix_learning_owner_state(
+        self,
+        physical_to_logical_map: Sequence[Sequence[int]],
+        epoch: int,
+    ) -> None:
+        if (
+            not self.model_config.enable_prefix_affinity_routing
+            or self._prefix_learning_num_layers <= 0
+            or self._prefix_learning_num_experts <= 0
+        ):
+            return
+
+        num_ranks = self.parallel_config.data_parallel_size
+        old_owner_lookup = self._prefix_learning_owner_lookup
+        old_owner_rank_lookup = self._prefix_learning_owner_rank_lookup
+        old_owner_epoch = self._prefix_learning_owner_cache_epoch
+        owner_cache = build_owner_cache_from_physical_to_logical_map(
+            physical_to_logical_map,
+            num_ranks,
+        )
+        owner_lookup = torch.zeros(
+            (
+                self._prefix_learning_num_layers,
+                self._prefix_learning_num_experts,
+                num_ranks,
+            ),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        use_single_owner_fast_path = (
+            self.parallel_config.eplb_config.num_redundant_experts == 0
+        )
+        owner_rank_lookup = (
+            torch.full(
+                (
+                    self._prefix_learning_num_layers,
+                    self._prefix_learning_num_experts,
+                ),
+                -1,
+                dtype=torch.int64,
+                device=self.device,
+            )
+            if use_single_owner_fast_path
+            else None
+        )
+        for layer_idx, layer_owner_cache in enumerate(
+                owner_cache[:self._prefix_learning_num_layers]):
+            for expert_id, owner_ranks in enumerate(
+                    layer_owner_cache[:self._prefix_learning_num_experts]):
+                for owner_rank in owner_ranks:
+                    if 0 <= owner_rank < num_ranks:
+                        owner_lookup[layer_idx, expert_id, owner_rank] = 1
+                if owner_rank_lookup is not None:
+                    if len(owner_ranks) == 1 and 0 <= owner_ranks[0] < num_ranks:
+                        owner_rank_lookup[layer_idx, expert_id] = owner_ranks[0]
+                    elif len(owner_ranks) > 1:
+                        owner_rank_lookup = None
+
+        epoch_changed = (
+            old_owner_lookup is None
+            or old_owner_epoch != epoch
+            or not torch.equal(old_owner_lookup, owner_lookup)
+            or (
+                (old_owner_rank_lookup is None) != (owner_rank_lookup is None)
+                or (
+                    old_owner_rank_lookup is not None
+                    and owner_rank_lookup is not None
+                    and not torch.equal(old_owner_rank_lookup, owner_rank_lookup)
+                )
+            )
+        )
+        self._prefix_learning_owner_lookup = owner_lookup
+        self._prefix_learning_owner_rank_lookup = owner_rank_lookup
+        self._prefix_learning_owner_cache_epoch = epoch
+        if epoch_changed and self._prefix_learning_req_slot_by_id:
+            self._clear_all_prefix_learning_state()
+
+    def _begin_prefix_learning_step_capture(
+        self,
+        prefill_capture_ranges: list[tuple[int, int]],
+        prefill_capture_req_ids: list[str],
+    ) -> None:
+        trace_enabled = self._prefix_learning_trace_debug
+        start_ns = time.perf_counter_ns() if trace_enabled else 0
+        self._prefix_learning_step_req_ids = []
+        self._prefix_learning_step_token_slots = None
+        self._prefix_learning_step_topk_by_layer = {}
+
+        if (
+            self._uses_placement_snapshot_for_prefix_learning()
+            or
+            not self.model_config.enable_prefix_affinity_routing
+            or self._prefix_learning_num_layers <= 0
+            or self._prefix_learning_num_experts <= 0
+            or self._prefix_learning_owner_counts_buffer is None
+        ):
+            return
+
+        active_req_ids: list[str] = []
+        active_req_slots: list[int] = []
+        req_lengths: list[int] = []
+        for req_id, (start, end) in zip(prefill_capture_req_ids, prefill_capture_ranges):
+            if end <= start:
+                continue
+            slot = self._get_or_alloc_prefix_learning_slot(req_id)
+            if slot is None:
+                continue
+            active_req_ids.append(req_id)
+            active_req_slots.append(slot)
+            req_lengths.append(end - start)
+
+        total_prompt_tokens = sum(req_lengths)
+        if not active_req_ids or total_prompt_tokens <= 0:
+            return
+
+        token_slots = torch.empty(
+            (total_prompt_tokens,),
+            dtype=torch.int64,
+            device=self.device,
+        )
+        offset = 0
+        for slot, req_len in zip(active_req_slots, req_lengths):
+            token_slots[offset:offset + req_len] = slot
+            offset += req_len
+
+        self._prefix_learning_step_req_ids = active_req_ids
+        self._prefix_learning_step_token_slots = token_slots
+
+        if trace_enabled:
+            logger.warning(
+                "PrefixTrace worker step_capture_begin ts_ns=%d reqs=%d prompt_tokens=%d duration_ms=%.3f",
+                start_ns,
+                len(active_req_ids),
+                total_prompt_tokens,
+                (time.perf_counter_ns() - start_ns) / 1e6,
+            )
+
+    def _accumulate_prefix_learning_step_capture(self) -> None:
+        trace_enabled = self._prefix_learning_trace_debug
+        start_ns = time.perf_counter_ns() if trace_enabled else 0
+
+        owner_lookup = self._prefix_learning_owner_lookup
+        token_slots = self._prefix_learning_step_token_slots
+        step_topk_by_layer = self._prefix_learning_step_topk_by_layer
+        if (
+            not self.model_config.enable_prefix_affinity_routing
+            or owner_lookup is None
+            or token_slots is None
+            or self._prefix_learning_owner_counts_buffer is None
+            or not step_topk_by_layer
+        ):
+            self._prefix_learning_step_req_ids = []
+            self._prefix_learning_step_token_slots = None
+            self._prefix_learning_step_topk_by_layer = {}
+            return
+
+        total_captured_tokens = 0
+        total_layers = 0
+        total_mask_ms = 0.0
+        total_owner_reduce_ms = 0.0
+        total_index_add_ms = 0.0
+        owner_rank_lookup = self._prefix_learning_owner_rank_lookup
+        req_count = len(self._prefix_learning_step_req_ids)
+
+        for layer_id, captured_parts in step_topk_by_layer.items():
+            if not captured_parts:
+                continue
+            captured = (
+                captured_parts[0]
+                if len(captured_parts) == 1
+                else torch.cat(captured_parts, dim=0)
+            )
+            if token_slots.shape[0] != captured.shape[0]:
+                continue
+
+            layer_start_ns = time.perf_counter_ns() if trace_enabled else 0
+            expert_indices = captured.to(torch.int64)
+            valid_mask = ((expert_indices >= 0)
+                          & (expert_indices < self._prefix_learning_num_experts))
+            if trace_enabled:
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(device=self.device)
+                after_mask_ns = time.perf_counter_ns()
+                total_mask_ms += (after_mask_ns - layer_start_ns) / 1e6
+            if not torch.any(valid_mask):
+                continue
+
+            if owner_rank_lookup is not None:
+                safe_expert_indices = torch.where(
+                    valid_mask,
+                    expert_indices,
+                    torch.zeros((), dtype=torch.int64, device=self.device),
+                )
+                owner_ranks = owner_rank_lookup[int(layer_id), safe_expert_indices]
+                valid_rank_mask = valid_mask & (owner_ranks >= 0)
+                if not torch.any(valid_rank_mask):
+                    continue
+                num_ranks = self.parallel_config.data_parallel_size
+                flat_token_slots = token_slots.view(-1, 1).expand_as(owner_ranks)[
+                    valid_rank_mask
+                ]
+                flat_owner_ranks = owner_ranks[valid_rank_mask]
+                linear_indices = flat_token_slots * num_ranks + flat_owner_ranks
+                owner_counts_flat = self._prefix_learning_owner_counts_buffer.view(-1)
+                if trace_enabled:
+                    if self.device.type == "cuda":
+                        torch.cuda.synchronize(device=self.device)
+                    after_reduce_ns = time.perf_counter_ns()
+                    total_owner_reduce_ms += (after_reduce_ns - after_mask_ns) / 1e6
+                owner_counts_flat.index_add_(
+                    0,
+                    linear_indices,
+                    torch.ones(
+                        (linear_indices.numel(),),
+                        dtype=owner_counts_flat.dtype,
+                        device=self.device,
+                    ),
+                )
+            else:
+                safe_expert_indices = torch.where(
+                    valid_mask,
+                    expert_indices,
+                    torch.zeros((), dtype=torch.int64, device=self.device),
+                )
+                owner_add = owner_lookup[int(layer_id), safe_expert_indices]
+                if owner_add.ndim == 3:
+                    token_owner_add = (
+                        owner_add * valid_mask.unsqueeze(-1).to(owner_add.dtype)
+                    ).sum(dim=1)
+                else:
+                    token_owner_add = (
+                        owner_add * valid_mask.to(owner_add.dtype).unsqueeze(-1)
+                    )
+                if trace_enabled:
+                    if self.device.type == "cuda":
+                        torch.cuda.synchronize(device=self.device)
+                    after_reduce_ns = time.perf_counter_ns()
+                    total_owner_reduce_ms += (after_reduce_ns - after_mask_ns) / 1e6
+                self._prefix_learning_owner_counts_buffer.index_add_(
+                    0,
+                    token_slots,
+                    token_owner_add,
+                )
+
+            if trace_enabled:
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(device=self.device)
+                after_index_add_ns = time.perf_counter_ns()
+                total_index_add_ms += (after_index_add_ns - after_reduce_ns) / 1e6
+            total_captured_tokens += int(captured.shape[0])
+            total_layers += 1
+
+        self._prefix_learning_step_req_ids = []
+        self._prefix_learning_step_token_slots = None
+        self._prefix_learning_step_topk_by_layer = {}
+        if trace_enabled:
+            logger.warning(
+                "PrefixTrace worker step_accumulate ts_ns=%d reqs=%d layers=%d captured_tokens=%d mask_ms=%.3f owner_reduce_ms=%.3f index_add_ms=%.3f duration_ms=%.3f",
+                start_ns,
+                req_count,
+                total_layers,
+                total_captured_tokens,
+                total_mask_ms,
+                total_owner_reduce_ms,
+                total_index_add_ms,
+                (time.perf_counter_ns() - start_ns) / 1e6,
+            )
+
+    def _accumulate_prefix_learning_from_routing_snapshot(
+        self,
+        routing_snapshot: dict[int, list[dict[str, Any]]],
+    ) -> None:
+        trace_enabled = self._prefix_learning_trace_debug
+        start_ns = time.perf_counter_ns() if trace_enabled else 0
+
+        if (
+            not self._uses_placement_snapshot_for_prefix_learning()
+            or not self.model_config.enable_prefix_affinity_routing
+            or self._prefix_learning_owner_counts_buffer is None
+            or self._prefix_learning_num_experts <= 0
+            or self._prefix_learning_num_layers <= 0
+        ):
+            return
+
+        updated_reqs = 0
+        updated_pairs = 0
+        for layer_id, captures in routing_snapshot.items():
+            if layer_id < 0 or layer_id >= self._prefix_learning_num_layers:
+                continue
+            for capture in captures:
+                prefill_ranges = capture.get("prefill_ranges")
+                prefill_req_ids = capture.get("prefill_req_ids")
+                if (not prefill_ranges or not prefill_req_ids
+                        or len(prefill_ranges) != len(prefill_req_ids)):
+                    continue
+                topk_ids = capture["topk_ids"]
+                for req_id, (start, end) in zip(prefill_req_ids, prefill_ranges):
+                    if self._is_shadow_request_id(req_id) or end <= start:
+                        continue
+                    if start < 0 or end > topk_ids.shape[0]:
+                        continue
+                    slot = self._get_or_alloc_prefix_learning_slot(req_id)
+                    if slot is None:
+                        continue
+                    req_topk_ids = topk_ids[start:end]
+                    if req_topk_ids.numel() == 0:
+                        continue
+                    flat_experts = req_topk_ids.reshape(-1).to(torch.int64)
+                    valid_experts = flat_experts[
+                        (flat_experts >= 0)
+                        & (flat_experts < self._prefix_learning_num_experts)
+                    ]
+                    if (
+                        valid_experts.numel() == 0
+                        or self._prefix_learning_owner_lookup is None
+                    ):
+                        continue
+                    self._prefix_learning_owner_counts_buffer[slot] += (
+                        self._prefix_learning_owner_lookup[
+                            int(layer_id), valid_experts
+                        ].sum(dim=0)
+                    )
+                    updated_reqs += 1
+                    updated_pairs += int(valid_experts.numel())
+
+        if trace_enabled:
+            logger.warning(
+                "PrefixTrace worker snapshot_accumulate ts_ns=%d layers=%d req_updates=%d new_pairs=%d duration_ms=%.3f",
+                start_ns,
+                len(routing_snapshot),
+                updated_reqs,
+                updated_pairs,
+                (time.perf_counter_ns() - start_ns) / 1e6,
+            )
+
+    def _extract_prefix_learning_pairs_for_slot(
+        self, slot: int
+    ) -> list[list[int]]:
+        return []
+
+    def _capture_prefix_learning_pairs(
+        self,
+        layer_id: int,
+        topk_ids: torch.Tensor,
+    ) -> None:
+        trace_enabled = self._prefix_learning_trace_debug
+        stage_ms: dict[str, float] = {}
+        if trace_enabled and self.device.type == "cuda":
+            torch.cuda.synchronize(device=self.device)
+        start_ns = time.perf_counter_ns() if trace_enabled else 0
+        last_ns = start_ns
+
+        def mark_stage(name: str) -> None:
+            nonlocal last_ns
+            if not trace_enabled:
+                return
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(device=self.device)
+            now_ns = time.perf_counter_ns()
+            stage_ms[name] = (now_ns - last_ns) / 1e6
+            last_ns = now_ns
+
+        if (
+            self._skip_prefix_learning_capture_for_current_forward
+            or self._uses_placement_snapshot_for_prefix_learning()
+            or not self.model_config.enable_prefix_affinity_routing
+            or layer_id < 0
+            or layer_id >= self._prefix_learning_num_layers
+            or self._prefix_learning_num_experts <= 0
+            or self._prefix_learning_owner_counts_buffer is None
+        ):
+            return
+        if (not self._current_prefill_capture_ranges
+                or not self._current_prefill_capture_req_ids
+                or self._prefix_learning_step_token_slots is None):
+            return
+        captured_parts = [
+            topk_ids[start:end]
+            for start, end in self._current_prefill_capture_ranges
+            if end > start
+        ]
+        mark_stage("slice")
+        if not captured_parts:
+            return
+
+        if len(captured_parts) == 1:
+            captured = captured_parts[0]
+        else:
+            captured = torch.cat(captured_parts, dim=0)
+        mark_stage("concat")
+
+        token_slots = self._prefix_learning_step_token_slots
+        if token_slots.shape[0] != captured.shape[0]:
+            return
+
+        self._prefix_learning_step_topk_by_layer.setdefault(
+            int(layer_id), []).append(captured)
+        mark_stage("store")
+        if trace_enabled:
+            logger.warning(
+                "PrefixTrace worker hook_capture ts_ns=%d layer_id=%d ranges=%d captured_tokens=%d active_reqs=%d topk=%d slice_ms=%.3f concat_ms=%.3f store_ms=%.3f duration_ms=%.3f",
+                start_ns,
+                int(layer_id),
+                len(self._current_prefill_capture_ranges),
+                int(captured.shape[0]),
+                len(self._prefix_learning_step_req_ids),
+                int(captured.shape[1]) if captured.ndim >= 2 else 0,
+                stage_ms.get("slice", 0.0),
+                stage_ms.get("concat", 0.0),
+                stage_ms.get("store", 0.0),
+                (time.perf_counter_ns() - start_ns) / 1e6,
+            )
+
+    def _get_prefix_learning_pairs_for_requests(
+        self, req_ids: list[str]
+    ) -> dict[str, list[list[int]]] | None:
+        trace_enabled = self._prefix_learning_trace_debug
+        start_ns = time.perf_counter_ns() if trace_enabled else 0
+        if not req_ids:
+            return None
+
+        results: dict[str, list[list[int]]] = {}
+        for req_id in req_ids:
+            if self._is_shadow_request_id(req_id):
+                self._free_prefix_learning_slot(req_id)
+                continue
+            slot = self._prefix_learning_req_slot_by_id.get(req_id)
+            if slot is None:
+                if trace_enabled:
+                    logger.warning(
+                        "PrefixTrace worker pairs_take_missing ts_ns=%d request_id=%s",
+                        time.perf_counter_ns(),
+                        req_id,
+                    )
+                continue
+            pairs = self._extract_prefix_learning_pairs_for_slot(slot)
+            if not pairs:
+                self._free_prefix_learning_slot(req_id)
+                if trace_enabled:
+                    logger.warning(
+                        "PrefixTrace worker pairs_take_empty ts_ns=%d request_id=%s",
+                        time.perf_counter_ns(),
+                        req_id,
+                    )
+                continue
+            results[req_id] = pairs
+            if trace_enabled:
+                logger.warning(
+                    "PrefixTrace worker pairs_take ts_ns=%d request_id=%s pairs=%d",
+                    time.perf_counter_ns(),
+                    req_id,
+                    len(results[req_id]),
+                )
+            self._free_prefix_learning_slot(req_id)
+        if trace_enabled:
+            logger.warning(
+                "PrefixTrace worker pairs_take_done ts_ns=%d reqs=%d emitted=%d duration_ms=%.3f",
+                start_ns,
+                len(req_ids),
+                len(results),
+                (time.perf_counter_ns() - start_ns) / 1e6,
+            )
+        return results or None
+
+    def _get_prefix_learning_owners_for_requests(
+        self, req_ids: list[str]
+    ) -> dict[str, dict[str, int]] | None:
+        trace_enabled = self._prefix_learning_trace_debug
+        if (
+            not req_ids
+            or self._prefix_learning_owner_counts_buffer is None
+            or self._prefix_learning_owner_cache_epoch is None
+        ):
+            return None
+
+        num_ranks = self.parallel_config.data_parallel_size
+        if self._prefix_learning_dummy_owner_enabled:
+            epoch = self._prefix_learning_owner_cache_epoch
+            results: dict[str, dict[str, int]] = {}
+            for req_id in req_ids:
+                if self._is_shadow_request_id(req_id):
+                    self._free_prefix_learning_slot(req_id)
+                    continue
+                target_rank = sum(req_id.encode("utf-8")) % max(num_ranks, 1)
+                results[req_id] = {
+                    "target_rank": target_rank,
+                    "epoch": epoch,
+                }
+                self._free_prefix_learning_slot(req_id)
+            return results or None
+
+        results: dict[str, dict[str, int]] = {}
+        for req_id in req_ids:
+            if self._is_shadow_request_id(req_id):
+                self._free_prefix_learning_slot(req_id)
+                continue
+            slot = self._prefix_learning_req_slot_by_id.get(req_id)
+            if slot is None:
+                continue
+            if trace_enabled and self.device.type == "cuda":
+                torch.cuda.synchronize(device=self.device)
+            start_ns = time.perf_counter_ns() if trace_enabled else 0
+            last_ns = start_ns
+
+            def mark_stage(name: str, stage_times: dict[str, float]) -> None:
+                nonlocal last_ns
+                if not trace_enabled:
+                    return
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(device=self.device)
+                now_ns = time.perf_counter_ns()
+                stage_times[name] = (now_ns - last_ns) / 1e6
+                last_ns = now_ns
+
+            stage_ms: dict[str, float] = {}
+            scores = self._prefix_learning_owner_counts_buffer[slot]
+            mark_stage("scores_view", stage_ms)
+            scores_cpu = scores.to(device="cpu", dtype=torch.int32)
+            mark_stage("to_cpu", stage_ms)
+            best_score = int(scores_cpu.max().item()) if scores_cpu.numel() > 0 else 0
+            mark_stage("best_score", stage_ms)
+            if best_score <= 0:
+                self._free_prefix_learning_slot(req_id)
+                if trace_enabled:
+                    logger.warning(
+                        "PrefixTrace worker owner_take_empty ts_ns=%d request_id=%s slot=%d scores_view_ms=%.3f to_cpu_ms=%.3f best_score_ms=%.3f duration_ms=%.3f",
+                        start_ns,
+                        req_id,
+                        slot,
+                        stage_ms.get("scores_view", 0.0),
+                        stage_ms.get("to_cpu", 0.0),
+                        stage_ms.get("best_score", 0.0),
+                        (time.perf_counter_ns() - start_ns) / 1e6,
+                    )
+                continue
+            target_rank = max(
+                range(num_ranks),
+                key=lambda rank: (int(scores_cpu[rank]), -rank),
+            )
+            mark_stage("argmax", stage_ms)
+            results[req_id] = {
+                "target_rank": target_rank,
+                "epoch": self._prefix_learning_owner_cache_epoch,
+            }
+            self._free_prefix_learning_slot(req_id)
+            if trace_enabled:
+                logger.warning(
+                    "PrefixTrace worker owner_take ts_ns=%d request_id=%s slot=%d scores_view_ms=%.3f to_cpu_ms=%.3f best_score_ms=%.3f argmax_ms=%.3f duration_ms=%.3f",
+                    start_ns,
+                    req_id,
+                    slot,
+                    stage_ms.get("scores_view", 0.0),
+                    stage_ms.get("to_cpu", 0.0),
+                    stage_ms.get("best_score", 0.0),
+                    stage_ms.get("argmax", 0.0),
+                    (time.perf_counter_ns() - start_ns) / 1e6,
+                )
+        return results or None
+
+    def _bind_router_capture_hooks(
+        self, capturer: RoutedExpertsCapturer | None
+    ) -> None:
         from vllm.model_executor.layers.fused_moe.layer import FusedMoE
         from vllm.model_executor.layers.fused_moe.router.base_router import (
             BaseRouter,
         )
 
+        use_snapshot_prefix_learning = (
+            self._uses_placement_snapshot_for_prefix_learning()
+        )
+        self._prefix_learning_num_layers = 0
+        self._prefix_learning_num_experts = 0
         for module in self.compilation_config.static_forward_context.values():
             if isinstance(module, FusedMoE) and isinstance(module.router, BaseRouter):
                 layer_id = module.layer_id
+                self._prefix_learning_num_layers = max(
+                    self._prefix_learning_num_layers,
+                    int(layer_id) + 1,
+                )
+                self._prefix_learning_num_experts = max(
+                    self._prefix_learning_num_experts,
+                    int(module.logical_num_experts),
+                )
 
-                def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
-                    _capturer.capture(_layer_id, topk_ids)
+                if capturer is not None or not use_snapshot_prefix_learning:
+                    def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
+                        if _capturer is not None:
+                            _capturer.capture(_layer_id, topk_ids)
+                        if not use_snapshot_prefix_learning:
+                            self._capture_prefix_learning_pairs(_layer_id, topk_ids)
 
-                module.router.set_capture_fn(_capture_fn)
+                    module.router.set_capture_fn(_capture_fn)
+                else:
+                    module.router.set_capture_fn(None)
+
+        if (self._prefix_learning_num_layers > 0
+                and self._prefix_learning_num_experts > 0):
+            self._prefix_learning_seen_pairs_buffer = None
+            self._prefix_learning_owner_counts_buffer = torch.zeros(
+                (
+                    self.max_num_reqs,
+                    self.parallel_config.data_parallel_size,
+                ),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            self._prefix_learning_req_slot_by_id = {}
+            self._prefix_learning_req_id_by_slot = [None] * self.max_num_reqs
+            self._prefix_learning_free_slots = list(
+                range(self.max_num_reqs - 1, -1, -1))
+        else:
+            self._prefix_learning_seen_pairs_buffer = None
+            self._prefix_learning_owner_counts_buffer = None
+            self._prefix_learning_req_slot_by_id = {}
+            self._prefix_learning_req_id_by_slot = []
+            self._prefix_learning_free_slots = []
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """

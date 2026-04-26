@@ -113,6 +113,11 @@ class AsyncLLM(EngineClient):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.observability_config = vllm_config.observability_config
+        self._runtime_eplb_step_interval: int | None = (
+            int(vllm_config.parallel_config.eplb_config.step_interval)
+            if vllm_config.parallel_config.enable_eplb
+            else None
+        )
         # ///////////// Expert-based load balancing
         self._placement_callback_registered = False
         placement_capture_enabled = bool(self.model_config.placement_callback_path)
@@ -941,6 +946,105 @@ class AsyncLLM(EngineClient):
         return await self.engine_core.reset_prefix_cache_async(
             reset_running_requests, reset_connector
         )
+
+    async def get_runtime_load_balancer_weights(self) -> dict[str, Any]:
+        getter = getattr(self.engine_core, "get_runtime_load_balancer_weights", None)
+        if getter is None:
+            raise ValueError(
+                "Runtime load-balancer weight control is unsupported for this "
+                "serving topology."
+            )
+        state = dict(getter())
+        state["eplb_step_interval"] = self._runtime_eplb_step_interval
+        return state
+
+    async def update_runtime_load_balancer_weights(
+        self,
+        *,
+        expert_affinity_routing_weight: float | None = None,
+        kv_block_prefix_routing_weight: float | None = None,
+        load_score_routing_weight: float | None = None,
+    ) -> dict[str, Any]:
+        updater = getattr(self.engine_core, "update_runtime_load_balancer_weights", None)
+        if updater is None:
+            raise ValueError(
+                "Runtime load-balancer weight control is unsupported for this "
+                "serving topology."
+            )
+        state = await updater(
+            expert_affinity_routing_weight=expert_affinity_routing_weight,
+            kv_block_prefix_routing_weight=kv_block_prefix_routing_weight,
+            load_score_routing_weight=load_score_routing_weight,
+        )
+        merged_state = dict(state)
+        merged_state["eplb_step_interval"] = self._runtime_eplb_step_interval
+        return merged_state
+
+    @staticmethod
+    def _aggregate_runtime_eplb_step_interval_states(
+        worker_states: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not worker_states:
+            raise ValueError("No EPLB worker state was returned.")
+
+        step_intervals = {
+            int(state["step_interval"]) for state in worker_states
+        }
+        use_async_values = {
+            bool(state["use_async"]) for state in worker_states
+        }
+        if len(step_intervals) != 1:
+            raise ValueError(
+                "Inconsistent runtime EPLB step_interval across workers: "
+                f"{sorted(step_intervals)}"
+            )
+        if len(use_async_values) != 1:
+            raise ValueError(
+                "Inconsistent runtime EPLB async mode across workers."
+            )
+
+        current_steps = [int(state["current_step"]) for state in worker_states]
+        steps_until_next = [
+            int(state["steps_until_next_rearrangement"])
+            for state in worker_states
+        ]
+        return {
+            "step_interval": next(iter(step_intervals)),
+            "use_async": next(iter(use_async_values)),
+            "worker_count": len(worker_states),
+            "current_step_min": min(current_steps),
+            "current_step_max": max(current_steps),
+            "steps_until_next_rearrangement_min": min(steps_until_next),
+            "steps_until_next_rearrangement_max": max(steps_until_next),
+        }
+
+    async def get_runtime_eplb_step_interval(self) -> dict[str, Any]:
+        if self._runtime_eplb_step_interval is None:
+            raise ValueError(
+                "Runtime EPLB step_interval control requires --enable-eplb."
+            )
+        return {
+            "step_interval": self._runtime_eplb_step_interval,
+            "use_async": bool(self.vllm_config.parallel_config.eplb_config.use_async),
+            "worker_count": None,
+            "current_step_min": None,
+            "current_step_max": None,
+            "steps_until_next_rearrangement_min": None,
+            "steps_until_next_rearrangement_max": None,
+        }
+
+    async def update_runtime_eplb_step_interval(
+        self,
+        *,
+        step_interval: int,
+    ) -> dict[str, Any]:
+        worker_states = await self.collective_rpc(
+            "set_runtime_eplb_step_interval",
+            args=(int(step_interval),),
+        )
+        state = self._aggregate_runtime_eplb_step_interval_states(worker_states)
+        self._runtime_eplb_step_interval = int(state["step_interval"])
+        return state
 
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()

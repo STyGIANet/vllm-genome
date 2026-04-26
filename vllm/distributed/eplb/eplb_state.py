@@ -602,9 +602,9 @@ class EplbState:
         # Update the expert load sliding window
         if not is_dummy:
             for eplb_model_state in self.model_states.values():
-                eplb_model_state.expert_load_window[self.expert_load_window_step] = (
-                    eplb_model_state.expert_load_pass.clone()
-                )
+                eplb_model_state.expert_load_window[
+                    self.expert_load_window_step
+                ].copy_(eplb_model_state.expert_load_pass)
                 eplb_model_state.expert_load_pass.zero_()
 
             self.expert_load_window_step += 1
@@ -754,6 +754,13 @@ class EplbState:
                 f"{num_gpus=}, {num_nodes=}"
             )
 
+        # For async custom callback policies, freeze the dynamic config snapshot
+        # before any map computation so the main thread and worker thread see
+        # the same rebalance input for this cycle.
+        if self.is_async and (not is_profile):
+            if hasattr(self.policy, 'snapshot_for_rebalance'):
+                self.policy.snapshot_for_rebalance()
+
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window, global_coactivation_edges in zip(
             self.model_states.values(),
@@ -827,6 +834,31 @@ class EplbState:
                         gpu_elapsed,
                     )
             else:
+                precomputed_async_map = None
+                if callback_graph_required:
+                    # Custom callback graph paths can invoke Python/METIS work
+                    # that is safe on the synchronized main thread but fragile
+                    # in the async transfer thread. Precompute the new mapping
+                    # here and let the async worker handle only weight transfer.
+                    if (
+                        global_coactivation_edges is not None
+                        and hasattr(self.policy, "set_graph_metadata")
+                    ):
+                        self.policy.set_graph_metadata({
+                            "coactivation_edges": global_coactivation_edges.cpu(),
+                            "num_layers": eplb_model_state.model.num_moe_layers,
+                            "num_experts": eplb_model_state.model.num_logical_experts,
+                            "num_gpus": num_gpus,
+                        })
+                    precomputed_async_map = self.policy.rebalance_experts(
+                        global_expert_load_window.cpu(),
+                        num_replicas,
+                        num_groups,
+                        num_nodes,
+                        num_gpus,
+                        eplb_model_state.physical_to_logical_map.cpu(),
+                    )
+
                 eplb_model_state.eplb_stats = EplbStats(
                     # We copy the tensor to snapshot the global_expert_load_window
                     # on the main thread so that async worker can access it safely
@@ -842,11 +874,15 @@ class EplbState:
                         else None
                     ),
                 )
-                # Record event after clone to signal async worker
-                # that load stats data is ready
-                sync_event = torch.cuda.Event()
-                sync_event.record()
-                eplb_model_state.window_ready_event = sync_event
+                if precomputed_async_map is None:
+                    # Record event after clone to signal async worker
+                    # that load stats data is ready.
+                    sync_event = torch.cuda.Event()
+                    sync_event.record()
+                    eplb_model_state.window_ready_event = sync_event
+                else:
+                    eplb_model_state.window_ready_event = None
+                eplb_model_state.new_physical_to_logical_map = precomputed_async_map
 
                 eplb_model_state.rebalanced = True
                 eplb_model_state.layer_to_transfer = 0
@@ -854,12 +890,7 @@ class EplbState:
             if not is_profile:
                 eplb_model_state.coactivation_edge_pass.zero_()
         # Signal async thread to start transferring layers.
-        # For custom policy, snapshot _dynamic_config → _pending_rebalance before
-        # waking the worker so it reads the config that was current at rearrange()
-        # time, not a later update from the next decode step's callback.
         if self.is_async and (not is_profile):
-            if hasattr(self.policy, 'snapshot_for_rebalance'):
-                self.policy.snapshot_for_rebalance()
             self.rearrange_event.set()
         return None
 

@@ -301,6 +301,7 @@ class Scheduler(SchedulerInterface):
                 dtype=np.int32,
             )
         self.prefix_learning_pairs_by_request: dict[str, list[list[int]]] = {}
+        self.prefix_learning_owner_by_request: dict[str, dict[str, int]] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
@@ -1351,6 +1352,7 @@ class Scheduler(SchedulerInterface):
 
         self._apply_routed_experts_step(model_runner_output)
         self._apply_prefix_learning_pairs(model_runner_output)
+        self._apply_prefix_learning_owners(model_runner_output)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -1427,10 +1429,12 @@ class Scheduler(SchedulerInterface):
 
             routed_experts = None
             prefix_learning_pairs = None
+            prefix_learning_owner = None
             finish_reason = None
             if stopped:
                 routed_experts = self._get_routed_experts(request)
                 prefix_learning_pairs = self._take_prefix_learning_pairs(request)
+                prefix_learning_owner = self._take_prefix_learning_owner(request)
 
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
@@ -1446,6 +1450,7 @@ class Scheduler(SchedulerInterface):
             elif emit_prefill_routed_experts and new_token_ids:
                 routed_experts = self._get_routed_experts(request)
                 prefix_learning_pairs = self._take_prefix_learning_pairs(request)
+                prefix_learning_owner = self._take_prefix_learning_owner(request)
 
             # Extract sample logprobs if needed.
             if (
@@ -1495,6 +1500,7 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens=request.num_external_computed_tokens,
                         routed_experts=routed_experts,
                         prefix_learning_pairs=prefix_learning_pairs,
+                        prefix_learning_owner=prefix_learning_owner,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )
@@ -1660,16 +1666,51 @@ class Scheduler(SchedulerInterface):
     def _apply_prefix_learning_pairs(
         self, model_runner_output: ModelRunnerOutput
     ) -> None:
+        trace_enabled = self.vllm_config.model_config.load_balancer_debug
+        start_ns = time.perf_counter_ns() if trace_enabled else 0
         pairs_by_req = model_runner_output.prefix_learning_pairs_by_req
         if not pairs_by_req:
             return
         for req_id, pairs in pairs_by_req.items():
             self.prefix_learning_pairs_by_request[req_id] = pairs
+        if trace_enabled:
+            logger.warning(
+                "PrefixTrace scheduler apply_pairs ts_ns=%d reqs=%d total_pairs=%d duration_ms=%.3f",
+                start_ns,
+                len(pairs_by_req),
+                sum(len(pairs) for pairs in pairs_by_req.values()),
+                (time.perf_counter_ns() - start_ns) / 1e6,
+            )
+
+    def _apply_prefix_learning_owners(
+        self, model_runner_output: ModelRunnerOutput
+    ) -> None:
+        owners_by_req = model_runner_output.prefix_learning_owner_by_req
+        if not owners_by_req:
+            return
+        for req_id, owner in owners_by_req.items():
+            self.prefix_learning_owner_by_request[req_id] = owner
 
     def _take_prefix_learning_pairs(
         self, request: Request
     ) -> list[list[int]] | None:
-        return self.prefix_learning_pairs_by_request.pop(request.request_id, None)
+        trace_enabled = self.vllm_config.model_config.load_balancer_debug
+        start_ns = time.perf_counter_ns() if trace_enabled else 0
+        pairs = self.prefix_learning_pairs_by_request.pop(request.request_id, None)
+        if trace_enabled:
+            logger.warning(
+                "PrefixTrace scheduler take_pairs ts_ns=%d request_id=%s pairs=%d duration_ms=%.3f",
+                start_ns,
+                request.request_id,
+                0 if pairs is None else len(pairs),
+                (time.perf_counter_ns() - start_ns) / 1e6,
+            )
+        return pairs
+
+    def _take_prefix_learning_owner(
+        self, request: Request
+    ) -> dict[str, int] | None:
+        return self.prefix_learning_owner_by_request.pop(request.request_id, None)
 
     def _get_routed_experts(self, request: Request) -> np.ndarray | None:
         if not self.vllm_config.model_config.enable_return_routed_experts:
@@ -1899,6 +1940,7 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self.prefix_learning_pairs_by_request.pop(request_id, None)
+        self.prefix_learning_owner_by_request.pop(request_id, None)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)

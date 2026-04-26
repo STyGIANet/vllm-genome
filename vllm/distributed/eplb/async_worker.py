@@ -79,7 +79,6 @@ def run_rebalance_experts(
             "num_experts": model_state.model.num_logical_experts,
             "num_gpus": eplb_stats.num_gpus,
         })
-    # Compute new expert mappings for the model
     new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
         global_expert_load_window,
         eplb_stats.num_replicas,
@@ -101,6 +100,11 @@ async def transfer_run_periodically(
 ) -> None:
     while True:
         await asyncio.to_thread(state.rearrange_event.wait)
+        # Clear immediately after wakeup. If the main thread queues another
+        # rearrangement while we are still processing the current one, its
+        # set() must remain visible for the next loop iteration instead of
+        # being erased by a late clear() here at the end of the old wave.
+        state.rearrange_event.clear()
         logger.info("async worker woke up for EPLB transfer")
 
         assert state.is_async
@@ -123,19 +127,21 @@ async def transfer_run_periodically(
                             break
                         if (
                             not rebalancing_algorithm_executed
-                            or model_state.new_physical_to_logical_map is None
                         ):
                             # Move the physical_to_logical_map to CPU
                             # for rebalancing and transfer_layer.
                             physical_to_logical_map_cpu = (
                                 model_state.physical_to_logical_map.cpu()
                             )
-                            run_rebalance_experts(
-                                model_state, state, physical_to_logical_map_cpu
-                            )
+                            if model_state.new_physical_to_logical_map is None:
+                                run_rebalance_experts(
+                                    model_state,
+                                    state,
+                                    physical_to_logical_map_cpu,
+                                )
                             rebalancing_algorithm_executed = True
                             logger.info(
-                                "Async worker computed new indices for model %s",
+                                "Async worker prepared transfer plan for model %s",
                                 model_state.model_name,
                             )
 
@@ -177,5 +183,3 @@ async def transfer_run_periodically(
                     if not model_state.rebalanced:
                         break
                     await asyncio.sleep(0.001)
-
-        state.rearrange_event.clear()

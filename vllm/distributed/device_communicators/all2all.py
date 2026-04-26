@@ -262,9 +262,14 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
         super().__init__(cpu_group, tcp_store_group)
         self.handle_cache = Cache()
 
-        # This is the DeepEP default. Stick to it till we can establish
-        # reasonable defaults based on profiling.
-        self.num_sms = 20
+        # Match the DeepEP build's compile-time transport defaults so the
+        # manager and the extension do not start from conflicting SM budgets.
+        try:
+            import deep_ep  # type: ignore[import-not-found]
+
+            self.num_sms = deep_ep.Buffer.get_default_num_sms()
+        except Exception:
+            self.num_sms = 20
 
     def get_handle(self, kwargs):
         raise NotImplementedError
@@ -329,10 +334,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         except Exception:
             non_sm90_rdma_needed = False
 
-        if (
-            self.internode
-            and not envs.VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE
-        ) or non_sm90_rdma_needed:
+        if (self.internode and not envs.VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE):# or non_sm90_rdma_needed:
             num_rdma_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
             num_qps_per_rank = self.num_sms // 2 if self.internode else 1
         else:

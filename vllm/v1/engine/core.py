@@ -845,12 +845,22 @@ class EngineCoreProc(EngineCore):
                 )
             self._init_data_parallel(vllm_config)
 
+            logger.info(
+                "EngineCore_DP%d finished DP setup; starting model init",
+                self.engine_index,
+            )
+
             super().__init__(
                 vllm_config,
                 executor_class,
                 log_stats,
                 executor_fail_callback,
                 internal_dp_balancing,
+            )
+
+            logger.info(
+                "EngineCore_DP%d finished model init; starting socket threads",
+                self.engine_index,
             )
 
             # Background Threads and Queues for IO. These enable us to
@@ -1377,6 +1387,10 @@ class EngineCoreProc(EngineCore):
                     )
                 )
                 # Send subscription message to coordinator.
+                logger.info(
+                    "EngineCore_DP%d subscribing to DP Coordinator READY channel",
+                    self.engine_index,
+                )
                 coord_socket.send(b"\x01")
 
             # Register sockets with poller.
@@ -1390,7 +1404,15 @@ class EngineCoreProc(EngineCore):
 
             if coord_socket is not None:
                 # Wait for ready message from coordinator.
+                logger.info(
+                    "EngineCore_DP%d sent DP Coordinator subscription; waiting for READY",
+                    self.engine_index,
+                )
                 assert coord_socket.recv() == b"READY"
+                logger.info(
+                    "EngineCore_DP%d received READY from DP Coordinator",
+                    self.engine_index,
+                )
                 poller.register(coord_socket, zmq.POLLIN)
 
             ready_event.set()

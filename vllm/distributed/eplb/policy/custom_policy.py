@@ -1,4 +1,5 @@
 from .abstract import AbstractEplbPolicy
+import logging
 import threading
 import torch
 import os
@@ -95,6 +96,13 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
     def get_prefix_router_epoch(cls) -> int:
         with cls._config_lock:
             return cls._placement_epoch
+
+    @classmethod
+    def _verbose_logging_enabled(cls) -> bool:
+        return (
+            logger.isEnabledFor(logging.DEBUG)
+            or bool(int(os.getenv("VLLM_CUSTOM_EPLB_VERBOSE", "0")))
+        )
     # ///////////// Expert-based load balancing
 
     @classmethod
@@ -211,11 +219,12 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
         old_map: torch.Tensor,
         new_map: torch.Tensor,
         num_gpus: int,
-    ) -> None:
-        """Log which experts changed GPU rank between old and new physical-to-logical maps."""
+    ) -> int:
+        """Log expert movement summary and return total moved experts."""
         num_layers, num_physical_experts = new_map.shape
         slots_per_gpu = num_physical_experts // num_gpus
         total_moves = 0
+        verbose = cls._verbose_logging_enabled()
 
         for layer_idx in range(num_layers):
             old_layer = old_map[layer_idx].tolist()
@@ -234,26 +243,27 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
                 if expert != -1
             }
 
-            moves = [
-                (expert, old_expert_to_gpu[expert], new_expert_to_gpu[expert])
+            moved_experts = [
+                expert
                 for expert in old_expert_to_gpu
                 if expert in new_expert_to_gpu
                 and old_expert_to_gpu[expert] != new_expert_to_gpu[expert]
             ]
-            if moves:
-                total_moves += len(moves)
+            if moved_experts:
+                total_moves += len(moved_experts)
+                if not verbose:
+                    continue
+                moves = [
+                    (expert, old_expert_to_gpu[expert], new_expert_to_gpu[expert])
+                    for expert in moved_experts
+                ]
                 logger.info(f"  Layer {layer_idx}: {len(moves)} expert(s) moved:")
                 for expert, old_gpu, new_gpu in moves[:8]:
                     logger.info(f"    Expert {expert}: GPU {old_gpu} -> GPU {new_gpu}")
                 if len(moves) > 8:
                     logger.info(f"    ... and {len(moves) - 8} more")
 
-        if total_moves == 0:
-            logger.info("Expert movement check: no experts moved (placement unchanged).")
-        else:
-            logger.info(
-                f"Expert movement check: {total_moves} total move(s) across all layers."
-            )
+        return total_moves
 
     @classmethod
     def rebalance_experts(
@@ -267,6 +277,7 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
     ):
         # Only EP/DP rank 0 logs the detailed placement info; other ranks are silent.
         is_rank0 = os.environ.get("VLLM_DP_RANK", "0") == "0"
+        verbose = cls._verbose_logging_enabled()
 
         num_layers, num_logical_experts = global_expert_load.shape
         config_path = os.getenv("VLLM_EXPERT_CONFIG_PATH")
@@ -281,26 +292,54 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
         )
 
         if is_rank0:
-            # Log expert movement summary (one line: total moves across all layers)
+            current_map_cpu = None
             if current_physical_to_logical_map is not None:
-                cls._log_expert_movement(
-                    current_physical_to_logical_map.cpu(),
+                current_map_cpu = (
+                    current_physical_to_logical_map
+                    if current_physical_to_logical_map.device.type == "cpu"
+                    else current_physical_to_logical_map.cpu()
+                )
+            # Log expert movement summary (one line: total moves across all layers)
+            total_moves = 0
+            if current_map_cpu is not None:
+                total_moves = cls._log_expert_movement(
+                    current_map_cpu,
                     new_physical_to_logical_map,
                     num_gpus,
                 )
+            if total_moves == 0:
+                logger.info(
+                    "[EPLB step %d] placement unchanged.", cls._step
+                )
+            else:
+                logger.info(
+                    "[EPLB step %d] %d expert move(s) across all layers.",
+                    cls._step,
+                    total_moves,
+                )
 
-            # Log per-GPU assignment for layer 0
-            slots_per_gpu = num_replicas // num_gpus
-            mapping_str = "  ".join(
-                f"GPU{g}:{new_physical_to_logical_map[0, g*slots_per_gpu:(g+1)*slots_per_gpu].tolist()}"
-                for g in range(num_gpus)
-            )
-            logger.info("[EPLB step %d] %s", cls._step, mapping_str)
+            if verbose:
+                slots_per_gpu = num_replicas // num_gpus
+                mapping_str = "  ".join(
+                    f"GPU{g}:{new_physical_to_logical_map[0, g*slots_per_gpu:(g+1)*slots_per_gpu].tolist()}"
+                    for g in range(num_gpus)
+                )
+                logger.info("[EPLB step %d] %s", cls._step, mapping_str)
+        else:
+            current_map_cpu = None
 
         maps_changed = (
             current_physical_to_logical_map is None
             or not torch.equal(
-                current_physical_to_logical_map.cpu(), new_physical_to_logical_map
+                current_map_cpu
+                if current_map_cpu is not None
+                else (
+                    current_physical_to_logical_map
+                    if current_physical_to_logical_map is None
+                    or current_physical_to_logical_map.device.type == "cpu"
+                    else current_physical_to_logical_map.cpu()
+                ),
+                new_physical_to_logical_map,
             )
         )
         if maps_changed:

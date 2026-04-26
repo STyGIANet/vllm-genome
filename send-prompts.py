@@ -4,8 +4,10 @@ import time
 import random
 from datasets import load_dataset, concatenate_datasets
 from transformers import AutoTokenizer
+import requests
+import sys
 
-HOST = "http://10.201.0.2:8000"
+HOST = "http://0.0.0.0:8000"
 MODEL = "deepseek-ai/deepseek-moe-16b-chat"
 
 SYSTEM_PROMPT = "You are a precise assistant. Answer clearly and concisely. Always answer in English."
@@ -113,16 +115,17 @@ async def run_dataset(name, subset):
     print(f"\nRunning dataset: {name} / {subset}")
 
     base_ds = load_dataset(name, subset, split="test")
+    print("Number of prompts =",len(base_ds))
 
-    warmup_epochs = 1
-    measured_epochs = 1
+    warmup_epochs = 2
+    measured_epochs = 5
 
     num_repeats = warmup_epochs + measured_epochs
     ds = concatenate_datasets([base_ds] * num_repeats)
 
     warmup_count = len(base_ds) * warmup_epochs
 
-    rate = 1
+    rate = 100
 
     results, measured, total_time = await poisson_driver(ds, rate, warmup_count)
 
@@ -142,8 +145,48 @@ async def run_dataset(name, subset):
     print(f"Accuracy: {correct}/{len(measured)}")
     print("----- End -----\n")
 
+
+def set_lb_weights(expert_weight: float, kv_weight: float, load_weight: float, step_interval: int):
+  resp = requests.post(
+      f"{HOST}/load_balancer/weights",
+      json={
+          "expert_affinity_routing_weight": expert_weight,
+          "kv_block_prefix_routing_weight": kv_weight,
+          "load_score_routing_weight": load_weight,
+          "step_interval": step_interval,
+      },
+      timeout=10,
+  )
+  resp.raise_for_status()
+  return resp.json()
+
+def get_lb_weights():
+  resp = requests.get(
+      f"{HOST}/load_balancer/weights",
+      timeout=10,
+  )
+  resp.raise_for_status()
+  return resp.json()
+
+
+
+
 async def main():
     await run_dataset("cais/mmlu", "abstract_algebra")
 
+
+# set defaults too if argv is not specified
+expert_weight = 0.33
+kv_weight = 0.33
+load_weight = 0.34
+step_interval = 30
+expert_weight = float(sys.argv[1]) if len(sys.argv) > 1 else expert_weight
+kv_weight = float(sys.argv[2]) if len(sys.argv) > 2 else kv_weight
+load_weight = float(sys.argv[3]) if len(sys.argv) > 3 else load_weight
+step_interval = int(sys.argv[4]) if len(sys.argv) > 4 else step_interval
+
+print(f"Setting LB weights: expert={expert_weight} kv={kv_weight} load={load_weight}")
+set_lb_weights(expert_weight, kv_weight, load_weight, step_interval)
+print(get_lb_weights())
 
 asyncio.run(main())

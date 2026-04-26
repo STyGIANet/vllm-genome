@@ -20,6 +20,8 @@ else
 fi
 
 
+# vllm serve deepseek-ai/deepseek-moe-16b-chat --tensor-parallel-size 1 --data-parallel-size 8 --enable-expert-parallel --all2all-backend deepep_high_throughput --trust_remote_code 
+
 export DEEP_EP_SM8X_NUM_CHANNELS=1
 
 echo "$RANK, $HEAD_RANK"
@@ -50,24 +52,28 @@ vllm serve $MODEL \
       --prefix-affinity-only-prefill \
 	  # --load-balancer-debug \
 
-	  # No longer needed. setting EPLB custom policy is enough
-      # --enable-return-routed-experts \
 
       # --max-pending-requests-per-engine set this to a small number for now 
       # until the load balancer is stable and works as expected.
       # Any sudden severe imbalances can cause async issues and deepep will throw errors.
 
       # --max-pending-requests controls the total number of requests pending across all engines.
+
       # --enable-prefix-affinity-routing this enables expert-aware load balancing
-      # --prefix-affinity-only-prefill  use this in conjunction with the above, as our current lb is prefix-based
+      # --prefix-affinity-only-prefill use this in conjunction with the above, as our current lb is prefix-based
+
       # --enable-kv-block-prefix-routing this directly takes vllm reported kv blocks and normalizes to a score
+      
       # --enable-load-score-routing this is waiting *4 + running for capturing load (same as how vllm does)
+      
+      # These three are weights in the convex combination of the individual scores
       # --expert-affinity-routing-weight 
       # --kv-block-prefix-routing-weight
       # --load-score-routing-weight
-      # Above three are weights in the convex combination of the individual scores
 
 
+	  # No longer needed. setting EPLB custom policy is enough
+      # --enable-return-routed-experts \
       # 
 	  # --disable-custom-all-reduce \
 	  # --max-model-len 200 \
