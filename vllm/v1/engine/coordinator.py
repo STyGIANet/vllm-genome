@@ -237,6 +237,7 @@ class DPCoordinatorProc:
         self.prefix_learning_algorithm = prefix_learning_algorithm
         self.load_balancer_debug = load_balancer_debug
         self.kv_block_prefix_block_size = kv_block_prefix_block_size
+        self.kv_block_prefix_decoder = MsgpackDecoder(KVEventBatch)
         self.expert_affinity_epoch = 0
         self.prefix_router_placement_epoch: int | None = None
         self.expert_affinity_indices: dict[int, ExpertAffinityIndex] = {
@@ -781,6 +782,16 @@ class DPCoordinatorProc:
                                 int(epoch),
                                 list(prompt_token_ids),
                             )
+                        continue
+
+                    if (
+                        isinstance(decoded, (list, tuple))
+                        and len(decoded) == 3
+                        and decoded[0] == "KV_PREFIX_EVENT_BATCH"
+                    ):
+                        _, target_rank, payload = decoded
+                        batch = self.kv_block_prefix_decoder.decode(payload)
+                        self._apply_kv_prefix_event_batch(int(target_rank), batch)
                         continue
 
                     if (

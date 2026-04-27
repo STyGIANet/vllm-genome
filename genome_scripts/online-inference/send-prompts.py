@@ -281,18 +281,18 @@ async def run_dataset(name, subset, formatter, split):
     return stats
 
 def set_vllm_config(expert, kv, load, step_interval):
-    # resp = requests.post(
-    #   f"{HOST}/load_balancer/weights",
-    #   json={
-    #       "kv_block_prefix_routing_weight": kv,
-    #       "load_score_routing_weight": load,
-    #       "eplb_step_interval": step_interval, # this is a copy in the frontend
-    #       "expert_affinity_routing_weight": expert,
-    #   },
-    #   timeout=10,
-    # )
-    # resp.raise_for_status()
-    # print("POST /load_balancer/weights ->", resp.json())
+    resp = requests.post(
+      f"{HOST}/load_balancer/weights",
+      json={
+          "kv_block_prefix_routing_weight": kv,
+          "load_score_routing_weight": load,
+          "eplb_step_interval": step_interval, # this is a copy in the frontend
+          "expert_affinity_routing_weight": expert,
+      },
+      timeout=10,
+    )
+    resp.raise_for_status()
+    print("POST /load_balancer/weights ->", resp.json())
 
 
     # eplb frequency of expert placement updates
@@ -319,12 +319,12 @@ def set_vllm_config(expert, kv, load, step_interval):
 
     
     # Checking if the updates are applied
-    # resp = requests.get(
-    #   f"{HOST}/load_balancer/weights",
-    #   timeout=10,
-    # )
-    # resp.raise_for_status()
-    # print("GET /load_balancer/weights ->", resp.json())
+    resp = requests.get(
+      f"{HOST}/load_balancer/weights",
+      timeout=10,
+    )
+    resp.raise_for_status()
+    print("GET /load_balancer/weights ->", resp.json())
 
     resp = requests.get(
       f"{HOST}/eplb/step_interval",

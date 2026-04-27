@@ -1937,7 +1937,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 continue
 
             try:
-                await self._send_prefix_router_update_batch(pending_updates)
+                await self._apply_prefix_router_owner_update_batch(pending_updates)
             except asyncio.TimeoutError:
                 request_ids = ",".join(
                     item.request_id for item in items[:4]
@@ -2390,16 +2390,40 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 timeout=PREFIX_ROUTER_LEARNING_TIMEOUT_S,
             )
 
+    async def _send_kv_prefix_event_batch(
+        self,
+        target_rank: int,
+        batch: KVEventBatch,
+    ) -> None:
+        self._ensure_stats_update_task()
+        socket = self.resources.stats_update_socket
+        if socket is None or not batch.events:
+            return
+
+        payload = (
+            "KV_PREFIX_EVENT_BATCH",
+            target_rank,
+            msgspec.msgpack.encode(batch),
+        )
+        async with self.expert_affinity_send_lock:
+            await asyncio.wait_for(
+                socket.send(msgspec.msgpack.encode(payload)),
+                timeout=PREFIX_ROUTER_LEARNING_TIMEOUT_S,
+            )
+
     async def _apply_prefix_router_owner_update_batch(
         self,
-        updates: list[tuple[str, list[int], int, int]],
+        updates: list[PrefixRouterUpdate],
     ) -> None:
         if not self.expert_affinity_learning_enabled or not updates:
             return
 
         pending_updates: list[PrefixRouterUpdate] = []
         num_engines = len(self.core_engines)
-        for request_id, prompt_token_ids, target_rank, epoch in updates:
+        for update in updates:
+            prompt_token_ids = update.prompt_token_ids
+            target_rank = update.target_rank
+            epoch = update.epoch
             if not prompt_token_ids:
                 continue
             if target_rank < 0 or target_rank >= num_engines or epoch < 0:
@@ -2408,7 +2432,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 logger.info(
                     "Prefix affinity update request_id=%s target_rank=%d epoch=%d "
                     "prompt_tokens=%d unique_pairs=None",
-                    request_id,
+                    "",
                     target_rank,
                     epoch,
                     len(prompt_token_ids),
@@ -2417,7 +2441,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             if self.load_balancer_debug:
                 logger.warning(
                     "Prefix affinity learning request_id=%s step=upsert:skipped target_rank=%d",
-                    request_id,
+                    "",
                     target_rank,
                 )
             pending_updates.append(
@@ -2430,6 +2454,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         if pending_updates:
             await self._send_prefix_router_update_batch(pending_updates)
+
 
     async def _learn_prefix_router_update(
         self,
@@ -2509,16 +2534,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 epoch,
                 len(prompt_token_ids),
                 unique_pairs_count,
-            )
-        self._apply_prefix_router_update(target_rank, epoch, prompt_token_ids)
-        # Routing consults the frontend/coordinator expert-affinity mirrors.
-        # The worker-local learner is not used on the routing path, so avoid a
-        # per-request utility RPC here.
-        if self.load_balancer_debug:
-            logger.warning(
-                "Prefix affinity learning request_id=%s step=upsert:skipped target_rank=%d",
-                request_id,
-                target_rank,
             )
         return PrefixRouterUpdate(
             target_rank=target_rank,
@@ -2774,7 +2789,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     async def process_engine_outputs(
         self: "DPLBAsyncMPClient", outputs: EngineCoreOutputs
     ):
-        direct_prefix_owner_updates: list[tuple[str, list[int], int, int]] = []
+        direct_prefix_owner_updates: list[PrefixRouterUpdate] = []
+
+        if outputs.kv_cache_event_batch is not None:
+            self._apply_kv_prefix_event_batch(
+                outputs.engine_index, outputs.kv_cache_event_batch
+            )
+            await self._send_kv_prefix_event_batch(
+                outputs.engine_index, outputs.kv_cache_event_batch
+            )
 
         if outputs.prefix_router_placement_update is not None:
             update = outputs.prefix_router_placement_update
@@ -2798,11 +2821,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 if request_info is not None:
                     request_info.expert_affinity_prefill_learned = True
                 direct_prefix_owner_updates.append(
-                    (
-                        request_id,
-                        list(context.prompt_token_ids),
-                        int(target_rank),
-                        int(epoch),
+                    PrefixRouterUpdate(
+                        target_rank=int(target_rank),
+                        epoch=int(epoch),
+                        prompt_token_ids=list(context.prompt_token_ids),
                     )
                 )
 
@@ -2854,11 +2876,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     continue
                 if output.prefix_learning_owner is not None:
                     direct_prefix_owner_updates.append(
-                        (
-                            output.request_id,
-                            list(context.prompt_token_ids),
-                            int(output.prefix_learning_owner["target_rank"]),
-                            int(output.prefix_learning_owner["epoch"]),
+                        PrefixRouterUpdate(
+                            target_rank=int(output.prefix_learning_owner["target_rank"]),
+                            epoch=int(output.prefix_learning_owner["epoch"]),
+                            prompt_token_ids=list(context.prompt_token_ids),
                         )
                     )
                     continue
