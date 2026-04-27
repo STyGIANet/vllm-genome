@@ -1735,11 +1735,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         return state
 
     def _should_broadcast_ep_request(self) -> bool:
-        parallel_config = self.vllm_config.parallel_config
-        return (
-            parallel_config.enable_expert_parallel
-            and parallel_config.data_parallel_size > 1
-        )
+        # Do not materialize shadow requests on every DP engine.
+        #
+        # Expert-parallel token payloads already move through the EP all-to-all
+        # path; ranks without a ready local request can stay aligned through the
+        # existing START_DP_WAVE + dummy-batch mechanism.
+        return False
 
     def _engine_index_for_identity(self, engine: EngineIdentity) -> int:
         for idx, candidate in enumerate(self.core_engines):
@@ -2833,7 +2834,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
 
         if not self.engines_running:
-            wake_exclude = None if self._should_broadcast_ep_request() else chosen_engine
+            wake_exclude = (
+                None
+                if self._should_broadcast_ep_request()
+                else self._engine_index_for_identity(chosen_engine)
+            )
             req_msg = msgspec.msgpack.encode(("FIRST_REQ", wake_exclude))
             await self.first_req_send_socket.send(req_msg)
 
