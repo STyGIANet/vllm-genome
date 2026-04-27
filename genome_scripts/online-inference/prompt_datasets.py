@@ -106,6 +106,12 @@ ALL_DATASETS: dict[str, DatasetSpec] = {
         format_mmlu,
         "test",
     ),
+    "mmlu_all": (
+        "cais/mmlu",
+        "all",
+        format_mmlu,
+        "test",
+    ),
     "hotpot_qa_fullwiki": (
         "hotpot_qa",
         "fullwiki",
@@ -158,8 +164,9 @@ ALL_DATASETS: dict[str, DatasetSpec] = {
 
 
 SEND_PROMPTS_DATASETS: list[DatasetSpec] = [
-    ALL_DATASETS["hotpot_qa_fullwiki"],
+    # ALL_DATASETS["hotpot_qa_fullwiki"],
     # ALL_DATASETS["mmlu_abstract_algebra"],
+    ALL_DATASETS["mmlu_all"],
     # ALL_DATASETS["pubmed_qa_pqa_labeled"],
     # ALL_DATASETS["arc_challenge"],
     # ALL_DATASETS["arc_easy"],
