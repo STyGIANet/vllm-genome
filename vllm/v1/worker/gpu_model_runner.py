@@ -7499,10 +7499,6 @@ class GPUModelRunner(
     def init_prefix_learning_capture(self) -> None:
         self._bind_router_capture_hooks(None)
 
-    @staticmethod
-    def _is_shadow_request_id(request_id: str) -> bool:
-        return "::shadow::" in request_id
-
     def _uses_placement_snapshot_for_prefix_learning(self) -> bool:
         return False
 
@@ -7511,16 +7507,8 @@ class GPUModelRunner(
         prefill_capture_ranges: list[tuple[int, int]],
         prefill_capture_req_ids: list[str],
     ) -> tuple[list[tuple[int, int]], list[str]]:
-        frozen = self._update_prefix_learning_freeze_state()
-        primary_ranges: list[tuple[int, int]] = []
-        primary_req_ids: list[str] = []
-        for req_id, capture_range in zip(prefill_capture_req_ids,
-                                         prefill_capture_ranges):
-            if self._is_shadow_request_id(req_id):
-                continue
-            primary_req_ids.append(req_id)
-            primary_ranges.append(capture_range)
-        return primary_ranges, primary_req_ids
+        self._update_prefix_learning_freeze_state()
+        return prefill_capture_ranges, prefill_capture_req_ids
 
     def _get_or_alloc_prefix_learning_slot(self, req_id: str) -> int | None:
         slot = self._prefix_learning_req_slot_by_id.get(req_id)
@@ -7970,7 +7958,7 @@ class GPUModelRunner(
                     continue
                 topk_ids = capture["topk_ids"]
                 for req_id, (start, end) in zip(prefill_req_ids, prefill_ranges):
-                    if self._is_shadow_request_id(req_id) or end <= start:
+                    if end <= start:
                         continue
                     if start < 0 or end > topk_ids.shape[0]:
                         continue
@@ -8094,9 +8082,6 @@ class GPUModelRunner(
 
         results: dict[str, list[list[int]]] = {}
         for req_id in req_ids:
-            if self._is_shadow_request_id(req_id):
-                self._free_prefix_learning_slot(req_id)
-                continue
             slot = self._prefix_learning_req_slot_by_id.get(req_id)
             if slot is None:
                 if trace_enabled:
@@ -8150,9 +8135,6 @@ class GPUModelRunner(
             epoch = self._prefix_learning_owner_cache_epoch
             results: dict[str, dict[str, int]] = {}
             for req_id in req_ids:
-                if self._is_shadow_request_id(req_id):
-                    self._free_prefix_learning_slot(req_id)
-                    continue
                 target_rank = sum(req_id.encode("utf-8")) % max(num_ranks, 1)
                 results[req_id] = {
                     "target_rank": target_rank,
@@ -8168,9 +8150,6 @@ class GPUModelRunner(
         epoch = self._prefix_learning_owner_cache_epoch
         results: dict[str, dict[str, int]] = {}
         for req_id in req_ids:
-            if self._is_shadow_request_id(req_id):
-                self._free_prefix_learning_slot(req_id)
-                continue
             required_step_seq = self._prefix_learning_last_step_seq_by_req.get(
                 req_id, self._prefix_learning_async_step_seq
             )

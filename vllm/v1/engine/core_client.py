@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import copy
 import contextlib
 import multiprocessing
 import queue
@@ -502,8 +501,6 @@ class InFlightRequestInfo:
     request_id: str
     engine: EngineIdentity
     prompt_token_ids: list[int] | None
-    is_shadow: bool = False
-    primary_request_id: str | None = None
     expert_affinity_prefill_learned: bool = False
     pending_engine_indices: tuple[int, ...] = ()
     pending_slot_released: bool = False
@@ -1466,8 +1463,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, InFlightRequestInfo] = {}
-        self.shadow_req_to_primary: dict[str, str] = {}
-        self.primary_req_to_shadows: dict[str, list[str]] = {}
 
         super().__init__(
             vllm_config,
@@ -1734,14 +1729,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
         return state
 
-    def _should_broadcast_ep_request(self) -> bool:
-        # Do not materialize shadow requests on every DP engine.
-        #
-        # Expert-parallel token payloads already move through the EP all-to-all
-        # path; ranks without a ready local request can stay aligned through the
-        # existing START_DP_WAVE + dummy-batch mechanism.
-        return False
-
     def _engine_index_for_identity(self, engine: EngineIdentity) -> int:
         for idx, candidate in enumerate(self.core_engines):
             if candidate == engine:
@@ -1752,8 +1739,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self,
         engine: EngineIdentity,
     ) -> tuple[int, ...]:
-        if self._should_broadcast_ep_request():
-            return tuple(range(len(self.core_engines)))
         return (self._engine_index_for_identity(engine),)
 
     def _can_reserve_pending_indices(self, engine_indices: Sequence[int]) -> bool:
@@ -1971,11 +1956,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         request_info = self.reqs_in_flight.get(request_id)
         if request_info is None:
             return
-        if request_info.is_shadow:
-            primary_request_id = request_info.primary_request_id
-            if primary_request_id is None:
-                return
-            request_id = primary_request_id
 
         async with self.dispatch_queue_lock:
             current = self.reqs_in_flight.get(request_id)
@@ -2113,64 +2093,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     )
 
         return self.core_engines[eng_index]
-
-    def _make_shadow_request_id(self, request_id: str, eng_idx: int) -> str:
-        return f"{request_id}::shadow::{eng_idx}"
-
-    def _register_shadow_request(
-        self,
-        primary_request_id: str,
-        shadow_request_id: str,
-        engine: EngineIdentity,
-        prompt_token_ids: list[int] | None,
-    ) -> None:
-        self.shadow_req_to_primary[shadow_request_id] = primary_request_id
-        self.primary_req_to_shadows.setdefault(primary_request_id, []).append(
-            shadow_request_id
-        )
-        self.reqs_in_flight[shadow_request_id] = InFlightRequestInfo(
-            request_id=shadow_request_id,
-            engine=engine,
-            prompt_token_ids=prompt_token_ids,
-            is_shadow=True,
-            primary_request_id=primary_request_id,
-        )
-
-    def _cleanup_shadow_request(self, shadow_request_id: str) -> None:
-        primary_request_id = self.shadow_req_to_primary.pop(shadow_request_id, None)
-        self.reqs_in_flight.pop(shadow_request_id, None)
-        if primary_request_id is None:
-            return
-        shadow_ids = self.primary_req_to_shadows.get(primary_request_id)
-        if not shadow_ids:
-            return
-        remaining_shadow_ids = [
-            req_id for req_id in shadow_ids if req_id != shadow_request_id
-        ]
-        if remaining_shadow_ids:
-            self.primary_req_to_shadows[primary_request_id] = remaining_shadow_ids
-        else:
-            self.primary_req_to_shadows.pop(primary_request_id, None)
-
-    async def _abort_shadow_requests(self, primary_request_id: str) -> None:
-        shadow_ids = self.primary_req_to_shadows.pop(primary_request_id, [])
-        if not shadow_ids:
-            return
-
-        by_engine = defaultdict[EngineIdentity, list[str]](list)
-        for shadow_req_id in shadow_ids:
-            if request_info := self.reqs_in_flight.get(shadow_req_id):
-                by_engine[request_info.engine].append(shadow_req_id)
-            self.shadow_req_to_primary.pop(shadow_req_id, None)
-            self.reqs_in_flight.pop(shadow_req_id, None)
-
-        if by_engine:
-            await asyncio.gather(
-                *[
-                    self._abort_requests(req_ids, engine)
-                    for engine, req_ids in by_engine.items()
-                ]
-            )
 
     def _is_prefix_router_supported(self) -> bool:
         if not self.vllm_config.model_config.enable_prefix_affinity_routing:
@@ -2788,57 +2710,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     prompt_token_ids=list(request.prompt_token_ids),
                 )
             )
-        if self._should_broadcast_ep_request():
-            send_ops: list[Awaitable[Any]] = []
-            created_shadow_request_ids: list[str] = []
-            for eng_idx, engine in enumerate(self.core_engines):
-                if engine == chosen_engine:
-                    send_ops.append(
-                        self._send_input(EngineCoreRequestType.ADD, request, engine)
-                    )
-                    continue
-
-                shadow_request = copy.copy(request)
-                shadow_request.request_id = self._make_shadow_request_id(
-                    request.request_id, eng_idx
-                )
-                if shadow_request.sampling_params is not None:
-                    shadow_request.sampling_params = (
-                        shadow_request.sampling_params.clone()
-                    )
-                    shadow_request.sampling_params.skip_reading_prefix_cache = True
-                    shadow_request.sampling_params.skip_writing_prefix_cache = True
-                if shadow_request.pooling_params is not None:
-                    shadow_request.pooling_params = (
-                        shadow_request.pooling_params.clone()
-                    )
-                    shadow_request.pooling_params.skip_reading_prefix_cache = True
-                    shadow_request.pooling_params.skip_writing_prefix_cache = True
-                created_shadow_request_ids.append(shadow_request.request_id)
-                self._register_shadow_request(
-                    request.request_id,
-                    shadow_request.request_id,
-                    engine,
-                    request.prompt_token_ids,
-                )
-                send_ops.append(
-                    self._send_input(
-                        EngineCoreRequestType.ADD, shadow_request, engine
-                    )
-                )
-            to_await = asyncio.gather(*send_ops)
-        else:
-            created_shadow_request_ids = []
-            to_await = self._send_input(
-                EngineCoreRequestType.ADD, request, chosen_engine
-            )
+        to_await = self._send_input(
+            EngineCoreRequestType.ADD, request, chosen_engine
+        )
 
         if not self.engines_running:
-            wake_exclude = (
-                None
-                if self._should_broadcast_ep_request()
-                else self._engine_index_for_identity(chosen_engine)
-            )
+            wake_exclude = self._engine_index_for_identity(chosen_engine)
             req_msg = msgspec.msgpack.encode(("FIRST_REQ", wake_exclude))
             await self.first_req_send_socket.send(req_msg)
 
@@ -2847,10 +2724,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         except Exception:
             self.reqs_in_flight.pop(request.request_id, None)
             self.prefix_learning_context_by_request.pop(request.request_id, None)
-            self.primary_req_to_shadows.pop(request.request_id, None)
-            for shadow_request_id in created_shadow_request_ids:
-                self.shadow_req_to_primary.pop(shadow_request_id, None)
-                self.reqs_in_flight.pop(shadow_request_id, None)
             raise
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
@@ -2901,7 +2774,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     async def process_engine_outputs(
         self: "DPLBAsyncMPClient", outputs: EngineCoreOutputs
     ):
-        primary_ids_to_abort: set[str] = set()
         direct_prefix_owner_updates: list[tuple[str, list[int], int, int]] = []
 
         if outputs.prefix_router_placement_update is not None:
@@ -2933,17 +2805,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                         int(epoch),
                     )
                 )
-
-        if outputs.outputs:
-            filtered_outputs = []
-            for output in outputs.outputs:
-                request_info = self.reqs_in_flight.get(output.request_id)
-                if request_info is not None and request_info.is_shadow:
-                    if request_info.primary_request_id is not None:
-                        primary_ids_to_abort.add(request_info.primary_request_id)
-                    continue
-                filtered_outputs.append(output)
-            outputs.outputs = filtered_outputs
 
         if outputs.outputs:
             for output in outputs.outputs:
@@ -3020,24 +2881,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         if outputs.finished_requests and self.reqs_in_flight:
             filtered_finished_requests = set[str]()
             for req_id in outputs.finished_requests:
-                request_info = self.reqs_in_flight.get(req_id)
-                if request_info is not None and request_info.is_shadow:
-                    if request_info.primary_request_id is not None:
-                        primary_ids_to_abort.add(request_info.primary_request_id)
-                    self._cleanup_shadow_request(req_id)
-                    continue
                 await self._release_pending_slots_for_request(req_id)
                 filtered_finished_requests.add(req_id)
                 self.reqs_in_flight.pop(req_id, None)
             outputs.finished_requests = filtered_finished_requests or None
-
-        if outputs.outputs:
-            for output in outputs.outputs:
-                if output.finish_reason is not None:
-                    primary_ids_to_abort.add(output.request_id)
-
-        for primary_request_id in primary_ids_to_abort:
-            await self._abort_shadow_requests(primary_request_id)
 
     @staticmethod
     async def eep_process_engine_core_notification(
@@ -3131,32 +2978,17 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             # Fast-path common case.
             request_id = remaining_request_ids[0]
             if request_info := self.reqs_in_flight.get(request_id):
-                primary_request_id = (
-                    request_info.primary_request_id
-                    if request_info.is_shadow
-                    else request_id
-                )
-                self.prefix_learning_context_by_request.pop(primary_request_id, None)
+                self.prefix_learning_context_by_request.pop(request_id, None)
                 await self._abort_requests([request_id], request_info.engine)
-                await self._abort_shadow_requests(primary_request_id)
             return
 
         by_engine = defaultdict[EngineIdentity, list[str]](list)
-        primary_request_ids = set[str]()
         for req_id in remaining_request_ids:
             if request_info := self.reqs_in_flight.get(req_id):
                 by_engine[request_info.engine].append(req_id)
-                primary_request_id = (
-                    request_info.primary_request_id
-                    if request_info.is_shadow and request_info.primary_request_id
-                    else req_id
-                )
-                primary_request_ids.add(primary_request_id)
-                self.prefix_learning_context_by_request.pop(primary_request_id, None)
+                self.prefix_learning_context_by_request.pop(req_id, None)
         for engine, req_ids in by_engine.items():
             await self._abort_requests(req_ids, engine)
-        for primary_request_id in primary_request_ids:
-            await self._abort_shadow_requests(primary_request_id)
 
     async def _abort_requests(
         self, request_ids: list[str], engine: EngineIdentity
