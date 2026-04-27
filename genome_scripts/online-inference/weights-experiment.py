@@ -10,6 +10,8 @@ from transformers import AutoTokenizer
 import requests
 from datetime import datetime
 
+from prompt_datasets import WEIGHTS_EXPERIMENT_DATASETS
+
 # --------------------------
 # CONFIG
 # --------------------------
@@ -94,6 +96,9 @@ def build_messages(ex):
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": ex["question"]},
     ]
+
+
+DATASETS = WEIGHTS_EXPERIMENT_DATASETS
 
 
 def prepare_example(ex):
@@ -211,15 +216,16 @@ async def poisson_driver(session, sem, examples, rate, rate_mode):
     return await asyncio.gather(*tasks)
 
 #%%
-async def run_dataset(name, subset, log_path):
-    base_ds = load_dataset(name, subset, split="test")
+async def run_dataset(name, subset, formatter, split, log_path):
+    base_ds = load_dataset(name, subset, split=split)
+    base_ds = [formatter(ex) for ex in base_ds]
 
     random.seed(1234)
     np.random.seed(1234)
 
     warmup_epochs = 3
     measured_epochs = 5
-    prepared_base = [prepare_example(ex) for ex in base_ds]
+    prepared_base = [prepare_example(ex) for ex in base_ds if ex is not None]
     warmup_count = len(prepared_base) * warmup_epochs
     examples = prepared_base * (warmup_epochs + measured_epochs)
     mean_input_tokens = (
@@ -290,36 +296,53 @@ async def sweep():
         writer = csv.writer(f)
 
         writer.writerow([
+            "dataset", "subset",
             "expert", "kv", "load",
             "prefill_throughput",
             "avg_ttft", "p50_ttft", "p95_ttft", "p99_ttft"
         ])
 
-        for i in range(num_steps + 1):
-            for j in range(num_steps + 1 - i):
-                k = num_steps - i - j
+        for dataset_name, dataset_subset, dataset_formatter, dataset_split in DATASETS:
+            dataset_label = dataset_name.replace("/", "_")
+            subset_label = (dataset_subset or "none").replace("/", "_")
 
-                expert = i / num_steps
-                kv = j / num_steps
-                load = k / num_steps
+            for i in range(num_steps + 1):
+                for j in range(num_steps + 1 - i):
+                    k = num_steps - i - j
 
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                log_path = f"{LOG_DIR}/exp_{expert:.2f}_{kv:.2f}_{load:.2f}_{ts}.log"
+                    expert = i / num_steps
+                    kv = j / num_steps
+                    load = k / num_steps
 
-                print(f"\n### Running: expert={expert:.2f}, kv={kv:.2f}, load={load:.2f} ###")
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    log_path = (
+                        f"{LOG_DIR}/{dataset_label}_{subset_label}_"
+                        f"{expert:.2f}_{kv:.2f}_{load:.2f}_{ts}.log"
+                    )
 
-                set_vllm_config(expert, kv, load, step_interval)
+                    print(
+                        f"\n### Running: dataset={dataset_name}/{dataset_subset} "
+                        f"expert={expert:.2f}, kv={kv:.2f}, load={load:.2f} ###"
+                    )
 
-                prefill_tp, avg_ttft, p50, p95, p99 = await run_dataset(
-                    "cais/mmlu", "abstract_algebra", log_path
-                )
+                    set_vllm_config(expert, kv, load, step_interval)
 
-                writer.writerow([
-                    expert, kv, load,
-                    prefill_tp,
-                    avg_ttft, p50, p95, p99
-                ])
-                f.flush()
+                    prefill_tp, avg_ttft, p50, p95, p99 = await run_dataset(
+                        dataset_name,
+                        dataset_subset,
+                        dataset_formatter,
+                        dataset_split,
+                        log_path,
+                    )
+
+                    writer.writerow([
+                        dataset_name,
+                        dataset_subset,
+                        expert, kv, load,
+                        prefill_tp,
+                        avg_ttft, p50, p95, p99
+                    ])
+                    f.flush()
 
 #%%
 if __name__ == "__main__":

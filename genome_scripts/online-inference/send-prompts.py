@@ -9,6 +9,9 @@ import re
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
+from prompt_datasets import SEND_PROMPTS_DATASETS
+# Change which prompt datasets to test in prompt_datasets.py at the end of the file
+
 HOST = "http://0.0.0.0:8000"
 MODEL = "deepseek-ai/deepseek-moe-16b-chat"
 
@@ -16,7 +19,7 @@ SYSTEM_PROMPT = "You are a precise assistant. Answer clearly and concisely. Alwa
 POISSON_RATE_MODE = "tok_per_sec"
 POISSON_REQUESTS_PER_SEC = 1.0
 # POISSON_INPUT_TOKENS_PER_SEC = None
-POISSON_INPUT_TOKENS_PER_SEC = 1000
+POISSON_INPUT_TOKENS_PER_SEC = 1200
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -34,84 +37,6 @@ def extract_choice(text, num_choices):
             return letter
 
     return "INVALID"
-
-def format_hotpotqa(ex):
-    try:
-        sentences = ex.get("context", {}).get("sentences", [])
-        flat = []
-
-        for para in sentences:
-            flat.extend(para)
-
-        context = " ".join(flat[:50])
-        question = ex.get("question", "")
-
-        return {
-            "question": f"{context}\n\nQuestion: {question}",
-            "choices": ["Yes", "No"],
-            "answer": 0,
-        }
-    except Exception:
-        return None
-
-def format_pubmedqa(ex):
-    try:
-        contexts = ex.get("context", {}).get("contexts", [])
-        context = " ".join(contexts[:5])
-
-        question = ex.get("question", "")
-
-        choices = ["yes", "no", "maybe"]
-        answer_map = {"yes": 0, "no": 1, "maybe": 2}
-
-        answer = answer_map.get(ex.get("final_decision", ""), 0)
-
-        return {
-            "question": f"{context}\n\nQuestion: {question}",
-            "choices": choices,
-            "answer": answer,
-        }
-    except Exception:
-        return None
-
-def format_arc(ex):
-    return {
-        "question": ex["question"],
-        "choices": ex["choices"]["text"],
-        "answer": ord(ex["answerKey"]) - ord("A"),
-    }
-
-
-def format_openbookqa(ex):
-    return {
-        "question": ex["question_stem"],
-        "choices": ex["choices"]["text"],
-        "answer": ord(ex["answerKey"]) - ord("A"),
-    }
-
-
-def format_csqa(ex):
-    return {
-        "question": ex["question"],
-        "choices": ex["choices"]["text"],
-        "answer": ord(ex["answerKey"]) - ord("A"),
-    }
-
-
-def format_boolq(ex):
-    return {
-        "question": ex["question"],
-        "choices": ["True", "False"],
-        "answer": 0 if ex["answer"] else 1,
-    }
-
-
-def format_piqa(ex):
-    return {
-        "question": ex["goal"],
-        "choices": [ex["sol1"], ex["sol2"]],
-        "answer": ex["label"],
-    }
 
 
 def poisson_interarrival_req_sec(requests_per_sec):
@@ -403,16 +328,7 @@ def set_vllm_config(expert, kv, load, step_interval):
 
 
 
-DATASETS = [
-    ("hotpot_qa", "fullwiki", format_hotpotqa, "validation"),
-    # ("pubmed_qa", "pqa_labeled", format_pubmedqa, "train"),
-    # ("ai2_arc", "ARC-Challenge", format_arc, "validation"),
-    # ("ai2_arc", "ARC-Easy", format_arc, "validation"),
-    # ("openbookqa", "main", format_openbookqa, "validation"),
-    # ("commonsense_qa", None, format_csqa, "validation"),
-    # ("boolq", None, format_boolq, "validation"),
-    # ("piqa", None, format_piqa, "validation"),
-]
+DATASETS = SEND_PROMPTS_DATASETS
 
 
 async def main():
@@ -443,6 +359,6 @@ load_weight = float(sys.argv[3]) if len(sys.argv) > 3 else 0.34
 step_interval = int(sys.argv[4]) if len(sys.argv) > 4 else 30
 
 print(f"Setting LB weights: expert={expert_weight} kv={kv_weight} load={load_weight}")
-set_vllm_config(expert_weight, kv_weight, load_weight, step_interval)
+# set_vllm_config(expert_weight, kv_weight, load_weight, step_interval)
 
 asyncio.run(main())
