@@ -225,7 +225,7 @@ async def run_dataset(name, subset, formatter, split):
     # split = "test" if "test" in ds else "validation"
     base_ds = ds[split]
     # Setting 200 for now just for quick experiments. TODO: Remove it.
-    base_ds = base_ds.select(range(200))
+    base_ds = base_ds.select(range(400))
     print("Dataset split size:", len(base_ds))
 
     base_ds = base_ds.map(formatter)
@@ -261,6 +261,7 @@ async def run_dataset(name, subset, formatter, split):
     total_output = sum(r["output_tokens"] for r in measured)
 
     avg_ttft = sum(r["ttft"] for r in measured) / len(measured)
+    service_ttft = sum(r["service_ttft"] for r in measured) / len(measured)
     throughput = (total_input + total_output) / total_time
     # correct = sum(1 for r in measured if r["pred"].startswith(r["gt"]))
     correct = sum(1 for r in measured if r["pred"] == r["gt"])
@@ -270,27 +271,28 @@ async def run_dataset(name, subset, formatter, split):
         "subset": subset,
         "requests": len(measured),
         "avg_ttft": avg_ttft,
+        "service_ttft": service_ttft,
         "throughput": throughput,
         "accuracy": correct / len(measured),
     }
 
-    print(f"TTFT={avg_ttft:.4f}s | Throughput={throughput:.1f} tok/s | Acc={stats['accuracy']:.3f}")
+    print(f"TTFT={avg_ttft:.4f}s | SVC_TTFT={service_ttft:.4f} | Throughput={throughput:.1f} tok/s | Acc={stats['accuracy']:.3f}")
 
     return stats
 
 def set_vllm_config(expert, kv, load, step_interval):
-    resp = requests.post(
-      f"{HOST}/load_balancer/weights",
-      json={
-          "expert_affinity_routing_weight": expert,
-          "kv_block_prefix_routing_weight": kv,
-          "load_score_routing_weight": load,
-          "eplb_step_interval": step_interval, # this is a copy in the frontend
-      },
-      timeout=10,
-    )
-    resp.raise_for_status()
-    print("POST /load_balancer/weights ->", resp.json())
+    # resp = requests.post(
+    #   f"{HOST}/load_balancer/weights",
+    #   json={
+    #       "kv_block_prefix_routing_weight": kv,
+    #       "load_score_routing_weight": load,
+    #       "eplb_step_interval": step_interval, # this is a copy in the frontend
+    #       "expert_affinity_routing_weight": expert,
+    #   },
+    #   timeout=10,
+    # )
+    # resp.raise_for_status()
+    # print("POST /load_balancer/weights ->", resp.json())
 
 
     # eplb frequency of expert placement updates
@@ -317,12 +319,12 @@ def set_vllm_config(expert, kv, load, step_interval):
 
     
     # Checking if the updates are applied
-    resp = requests.get(
-      f"{HOST}/load_balancer/weights",
-      timeout=10,
-    )
-    resp.raise_for_status()
-    print("GET /load_balancer/weights ->", resp.json())
+    # resp = requests.get(
+    #   f"{HOST}/load_balancer/weights",
+    #   timeout=10,
+    # )
+    # resp.raise_for_status()
+    # print("GET /load_balancer/weights ->", resp.json())
 
     resp = requests.get(
       f"{HOST}/eplb/step_interval",
@@ -345,6 +347,7 @@ async def main():
         print(
             f"{stats['dataset']} / {stats['subset']} | "
             f"TTFT={stats['avg_ttft']:.3f}s | "
+            f"SVC_TTFT={stats['service_ttft']:.3f} |"
             f"Throughput={stats['throughput']:.1f} tok/s | "
             f"Acc={stats['accuracy']:.3f}"
         )
@@ -354,6 +357,7 @@ async def main():
         print(
             f"{r['dataset']} / {r['subset']} | "
             f"TTFT={r['avg_ttft']:.3f}s | "
+            f"SVC_TTFT={r['service_ttft']:.3f} |"
             f"Throughput={r['throughput']:.1f} tok/s | "
             f"Acc={r['accuracy']:.3f}"
         )
