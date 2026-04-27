@@ -19,7 +19,7 @@ SYSTEM_PROMPT = "You are a precise assistant. Answer clearly and concisely. Alwa
 POISSON_RATE_MODE = "tok_per_sec"
 POISSON_REQUESTS_PER_SEC = 1.0
 # POISSON_INPUT_TOKENS_PER_SEC = None
-POISSON_INPUT_TOKENS_PER_SEC = 1200
+POISSON_INPUT_TOKENS_PER_SEC = 8000
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
