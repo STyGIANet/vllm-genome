@@ -4,6 +4,8 @@ MODEL=${1:-deepseek-ai/deepseek-moe-16b-chat}
 
 export SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PLACEMENT_PATH="${SCRIPT_DIR}/expert-placement/placement_fns.py"
+
+# for eplb step interval runtime update
 export VLLM_SERVER_DEV_MODE=1
 
 # export NVSHMEM_DIR=/usr/local/nvshmem

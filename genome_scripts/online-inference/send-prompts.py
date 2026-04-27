@@ -6,13 +6,17 @@ import requests
 import sys
 import re
 
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset
 from transformers import AutoTokenizer
 
 HOST = "http://0.0.0.0:8000"
 MODEL = "deepseek-ai/deepseek-moe-16b-chat"
 
 SYSTEM_PROMPT = "You are a precise assistant. Answer clearly and concisely. Always answer in English."
+POISSON_RATE_MODE = "tok_per_sec"
+POISSON_REQUESTS_PER_SEC = 1.0
+# POISSON_INPUT_TOKENS_PER_SEC = None
+POISSON_INPUT_TOKENS_PER_SEC = 1000
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -110,45 +114,102 @@ def format_piqa(ex):
     }
 
 
-def poisson_interarrival(rate):
-    return random.expovariate(rate)
+def poisson_interarrival_req_sec(requests_per_sec):
+    if requests_per_sec <= 0:
+        raise ValueError("requests_per_sec must be > 0")
+    return random.expovariate(requests_per_sec)
+
+
+def poisson_interarrival_tok_sec(tokens_per_sec, input_tokens):
+    if tokens_per_sec <= 0:
+        raise ValueError("tokens_per_sec must be > 0")
+    return random.expovariate(tokens_per_sec / max(input_tokens, 1))
 
 
 def now_ns():
     return time.perf_counter_ns()
 
 
-def count_tokens(text):
-    return len(tokenizer.encode(text))
+def count_message_tokens(messages):
+    try:
+        return len(
+            tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+        )
+    except Exception:
+        return sum(len(tokenizer.encode(msg["content"])) for msg in messages)
 
 
-async def ask(session, sem, idx, ex):
+def resolve_poisson_rate(rate_mode, mean_input_tokens):
+    if rate_mode == "req_per_sec":
+        return POISSON_REQUESTS_PER_SEC
+    if rate_mode == "tok_per_sec":
+        if POISSON_INPUT_TOKENS_PER_SEC is not None:
+            return POISSON_INPUT_TOKENS_PER_SEC
+        return POISSON_REQUESTS_PER_SEC * mean_input_tokens
+    raise ValueError(f"Unsupported rate mode: {rate_mode}")
+
+
+def sample_poisson_interarrival(rate, rate_mode, input_tokens):
+    if rate_mode == "req_per_sec":
+        return poisson_interarrival_req_sec(rate)
+    if rate_mode == "tok_per_sec":
+        return poisson_interarrival_tok_sec(rate, input_tokens)
+    raise ValueError(f"Unsupported rate mode: {rate_mode}")
+
+
+async def sleep_until_ns(target_ns):
+    while True:
+        remaining_ns = target_ns - now_ns()
+        if remaining_ns <= 0:
+            return
+        if remaining_ns > 2_000_000:
+            await asyncio.sleep((remaining_ns / 1e9) * 0.5)
+        elif remaining_ns > 50_000:
+            await asyncio.sleep(remaining_ns / 1e9)
+        else:
+            await asyncio.sleep(0)
+
+
+def build_user_prompt(ex):
+    choices = ex["choices"]
+    letters = [chr(65 + i) for i in range(len(choices))]
+    options = "\n".join([f"{letters[i]}. {c}" for i, c in enumerate(choices)])
+
+    if len(choices) <= 4:
+        return f"{ex['question']}\n{options}\nAnswer with ONLY one letter: {', '.join(letters)}."
+    return f"{ex['question']}\nAnswer concisely."
+
+
+def prepare_example(ex):
+    user_prompt = build_user_prompt(ex)
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+    return {
+        **ex,
+        "user_prompt": user_prompt,
+        "messages": messages,
+        "input_tokens": count_message_tokens(messages),
+    }
+
+
+async def ask(session, sem, idx, ex, scheduled_arrival_ns):
     async with sem:
-        q = ex["question"]
         choices = ex["choices"]
         answer = ex["answer"]
-
-        letters = [chr(65 + i) for i in range(len(choices))]
-        options = "\n".join([f"{letters[i]}. {c}" for i, c in enumerate(choices)])
-
-        # user_prompt = f"{q}\n{options}\nAnswer with ONLY one Alphabet: {', '.join(letters)}."
-        if len(choices) <= 4:
-            user_prompt = f"{q}\n{options}\nAnswer with ONLY one letter: {', '.join(letters)}."
-        else:
-            user_prompt = f"{q}\nAnswer concisely."
-
-        # print(user_prompt, flush=True)
         payload = {
             "model": MODEL,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt}
-            ],
+            "messages": ex["messages"],
             "max_tokens": 1,
-            "temperature": 0.0
+            "temperature": 0.0,
         }
 
-        arrival_ns = now_ns()
+        dispatch_ns = now_ns()
 
         async with session.post(f"{HOST}/v1/chat/completions", json=payload) as resp:
             first_byte_ns = now_ns()
@@ -162,15 +223,20 @@ async def ask(session, sem, idx, ex):
                 pred = "ERROR"
 
         completion_ns = now_ns()
+        # Queueing here just the async io's queueing, not on the inference side
+        queue_delay = (dispatch_ns - scheduled_arrival_ns) / 1e9
+        ttft = (first_byte_ns - scheduled_arrival_ns) / 1e9
+        total_latency = (completion_ns - scheduled_arrival_ns) / 1e9
+        service_ttft = (first_byte_ns - dispatch_ns) / 1e9
+        service_latency = (completion_ns - dispatch_ns) / 1e9
 
-        ttft = (first_byte_ns - arrival_ns) / 1e9
-        total_latency = (completion_ns - arrival_ns) / 1e9
-
-        input_tokens = count_tokens(user_prompt)
+        input_tokens = ex["input_tokens"]
         output_tokens = 1
 
         print(
-            f"[{idx}] TTFT={ttft:.4f}s LAT={total_latency:.4f}s Pred={pred}, Tokens={input_tokens + output_tokens}", 
+            f"[{idx}] QD={queue_delay:.4f}s TTFT={ttft:.4f}s "
+            f"LAT={total_latency:.4f}s SVC_TTFT={service_ttft:.4f}s "
+            f"SVC_LAT={service_latency:.4f}s Pred={pred}, Tokens={input_tokens + output_tokens}",
             flush=True
         )
 
@@ -179,34 +245,43 @@ async def ask(session, sem, idx, ex):
             "gt": chr(65 + answer),
             "latency": total_latency,
             "ttft": ttft,
+            "service_ttft": service_ttft,
+            "service_latency": service_latency,
+            "queue_delay": queue_delay,
             "input_tokens": input_tokens,
-            "output_tokens": output_tokens
+            "output_tokens": output_tokens,
+            "scheduled_arrival_ns": scheduled_arrival_ns,
+            "dispatch_ns": dispatch_ns,
+            "first_byte_ns": first_byte_ns,
+            "completion_ns": completion_ns,
         }
 
 
-async def poisson_driver(ds, rate, warmup_count):
+async def poisson_driver(examples, rate, rate_mode, warmup_count):
     connector = aiohttp.TCPConnector(limit=100)
     sem = asyncio.Semaphore(40)
 
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = []
+        next_arrival_ns = now_ns()
 
-        start_ns = time.perf_counter_ns()
+        for i, ex in enumerate(examples):
+            next_arrival_ns += int(
+                sample_poisson_interarrival(rate, rate_mode, ex["input_tokens"]) * 1e9
+            )
+            await sleep_until_ns(next_arrival_ns)
+            tasks.append(asyncio.create_task(ask(session, sem, i, ex, next_arrival_ns)))
 
-        async def arrival_loop():
-            for i, ex in enumerate(ds):
-                await asyncio.sleep(poisson_interarrival(rate))
-                tasks.append(asyncio.create_task(ask(session, sem, i, ex)))
-
-        await arrival_loop()
         results = await asyncio.gather(*tasks)
-
-        end_ns = time.perf_counter_ns()
-
-    total_time = (end_ns - start_ns) / 1e9
     measured = results[warmup_count:]
+    if not measured:
+        return measured, 0.0
 
-    return measured, total_time
+    effective_time = (
+        measured[-1]["completion_ns"] - measured[0]["scheduled_arrival_ns"]
+    ) / 1e9
+
+    return measured, effective_time
 
 
 async def run_dataset(name, subset, formatter, split):
@@ -219,23 +294,38 @@ async def run_dataset(name, subset, formatter, split):
 
     # split = "test" if "test" in ds else "validation"
     base_ds = ds[split]
+    # Setting 200 for now just for quick experiments. TODO: Remove it.
     base_ds = base_ds.select(range(200))
     print("Dataset split size:", len(base_ds))
 
     base_ds = base_ds.map(formatter)
+    examples = [prepare_example(ex) for ex in base_ds if ex is not None]
 
-    print("Prompts:", len(base_ds))
+    print("Prompts:", len(examples))
 
     warmup_epochs = 0
     measured_epochs = 1
 
     num_repeats = warmup_epochs + measured_epochs
-    ds_full = concatenate_datasets([base_ds] * num_repeats)
-    warmup_count = len(base_ds) * warmup_epochs
+    examples_full = examples * num_repeats
+    warmup_count = len(examples) * warmup_epochs
 
-    rate = 1
+    mean_input_tokens = (
+        sum(ex["input_tokens"] for ex in examples) / len(examples) if examples else 0.0
+    )
+    rate = resolve_poisson_rate(POISSON_RATE_MODE, mean_input_tokens)
+    rate_units = "tok/s" if POISSON_RATE_MODE == "tok_per_sec" else "req/s"
+    print(
+        f"Poisson arrivals: mode={POISSON_RATE_MODE} rate={rate:.2f} {rate_units} "
+        f"(mean_input_tokens={mean_input_tokens:.2f})"
+    )
 
-    measured, total_time = await poisson_driver(ds_full, rate, warmup_count)
+    measured, total_time = await poisson_driver(
+        examples_full,
+        rate,
+        POISSON_RATE_MODE,
+        warmup_count,
+    )
 
     total_input = sum(r["input_tokens"] for r in measured)
     total_output = sum(r["output_tokens"] for r in measured)
@@ -258,27 +348,65 @@ async def run_dataset(name, subset, formatter, split):
 
     return stats
 
-
-
-def set_lb_weights(expert_weight, kv_weight, load_weight, step_interval):
+def set_vllm_config(expert, kv, load, step_interval):
     resp = requests.post(
-        f"{HOST}/load_balancer/weights",
-        json={
-            "expert_affinity_routing_weight": expert_weight,
-            "kv_block_prefix_routing_weight": kv_weight,
-            "load_score_routing_weight": load_weight,
-            "step_interval": step_interval,
-        },
-        timeout=10,
+      f"{HOST}/load_balancer/weights",
+      json={
+          "expert_affinity_routing_weight": expert,
+          "kv_block_prefix_routing_weight": kv,
+          "load_score_routing_weight": load,
+          "eplb_step_interval": step_interval, # this is a copy in the frontend
+      },
+      timeout=10,
     )
     resp.raise_for_status()
+    print("POST /load_balancer/weights ->", resp.json())
+
+
+    # eplb frequency of expert placement updates
+    # number of engine steps / forward passes
+    resp = requests.post(
+      f"{HOST}/eplb/step_interval",
+      json={"step_interval": step_interval},
+      timeout=10,
+    )
+    resp.raise_for_status()
+    print("POST /eplb/step_interval ->", resp.json())
+
+    # Clearing out kv so that the next experiment does not reuse previous ones
+    resp = requests.post(
+      f"{HOST}/reset_prefix_cache",
+      params={
+          "reset_running_requests": True,
+          "reset_external": True,
+      },
+      timeout=10,
+    )
+    resp.raise_for_status()
+    print("POST /reset_prefix_cache -> 200 OK")
+
+    
+    # Checking if the updates are applied
+    resp = requests.get(
+      f"{HOST}/load_balancer/weights",
+      timeout=10,
+    )
+    resp.raise_for_status()
+    print("GET /load_balancer/weights ->", resp.json())
+
+    resp = requests.get(
+      f"{HOST}/eplb/step_interval",
+      timeout=10,
+    )
+    resp.raise_for_status()
+    print("GET /eplb/step_interval ->", resp.json())
 
 
 
 DATASETS = [
     ("hotpot_qa", "fullwiki", format_hotpotqa, "validation"),
-    ("pubmed_qa", "pqa_labeled", format_pubmedqa, "train"),
-    ("ai2_arc", "ARC-Challenge", format_arc, "validation"),
+    # ("pubmed_qa", "pqa_labeled", format_pubmedqa, "train"),
+    # ("ai2_arc", "ARC-Challenge", format_arc, "validation"),
     # ("ai2_arc", "ARC-Easy", format_arc, "validation"),
     # ("openbookqa", "main", format_openbookqa, "validation"),
     # ("commonsense_qa", None, format_csqa, "validation"),
@@ -315,6 +443,6 @@ load_weight = float(sys.argv[3]) if len(sys.argv) > 3 else 0.34
 step_interval = int(sys.argv[4]) if len(sys.argv) > 4 else 30
 
 print(f"Setting LB weights: expert={expert_weight} kv={kv_weight} load={load_weight}")
-set_lb_weights(expert_weight, kv_weight, load_weight, step_interval)
+set_vllm_config(expert_weight, kv_weight, load_weight, step_interval)
 
 asyncio.run(main())
