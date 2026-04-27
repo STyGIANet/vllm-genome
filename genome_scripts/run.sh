@@ -35,9 +35,7 @@ vllm serve $MODEL \
 		--enable-prefix-affinity-routing \
 		--prefix-affinity-only-prefill \
 		--prefix-learning-algorithm prefixtrie \
-		--load-balancer-debug \
-		# --prefix-learning-algorithm ngramoverlap \
-		# --prefix-learning-algorithm tokenoverlap \
+		#--load-balancer-debug \
 
 
 # cleanup

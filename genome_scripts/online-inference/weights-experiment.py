@@ -200,4 +200,9 @@ async def sweep():
 
 #%%
 if __name__ == "__main__":
+    print("This was a bad idea to iterate over all experiments in a single launch!")
+    print("This can silently benefit KV cache hit rate since many runs may reuse the cache and distort results..!")
+    print("Note: Generally, it is best to relaunch vLLM, or find a way to clear out kv caches and any other state across iterations.")
+    print("Exiting....! Use this script for quick tests, but do not rely on results")
+
     asyncio.run(sweep())
