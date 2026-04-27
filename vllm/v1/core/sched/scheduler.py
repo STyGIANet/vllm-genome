@@ -1998,7 +1998,6 @@ class Scheduler(SchedulerInterface):
         request_id = request.request_id
         self.prefix_learning_pairs_by_request.pop(request_id, None)
         self.prefix_learning_owner_by_request.pop(request_id, None)
-        self.async_prefix_learning_owner_by_request.pop(request_id, None)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)

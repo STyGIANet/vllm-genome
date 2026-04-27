@@ -9,19 +9,24 @@ import re
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-from prompt_datasets import SEND_PROMPTS_DATASETS
+from prompt_datasets import SEND_PROMPTS_DATASETS, SYSTEM_PROMPTS
 # Change which prompt datasets to test in prompt_datasets.py at the end of the file
 
 HOST = "http://0.0.0.0:8000"
 MODEL = "deepseek-ai/deepseek-moe-16b-chat"
 
-SYSTEM_PROMPT = "You are a precise assistant. Answer clearly and concisely. Always answer in English."
 POISSON_RATE_MODE = "tok_per_sec"
 POISSON_REQUESTS_PER_SEC = 1.0
 # POISSON_INPUT_TOKENS_PER_SEC = None
-POISSON_INPUT_TOKENS_PER_SEC = 8000
+POISSON_INPUT_TOKENS_PER_SEC = 16000
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
+
+rng = random.Random(10)
+
+def pick_sysprompt_random(prompts):
+    idx = rng.randrange(len(prompts))
+    return prompts[idx]
 
 
 def extract_choice(text, num_choices):
@@ -42,13 +47,13 @@ def extract_choice(text, num_choices):
 def poisson_interarrival_req_sec(requests_per_sec):
     if requests_per_sec <= 0:
         raise ValueError("requests_per_sec must be > 0")
-    return random.expovariate(requests_per_sec)
+    return rng.expovariate(requests_per_sec)
 
 
 def poisson_interarrival_tok_sec(tokens_per_sec, input_tokens):
     if tokens_per_sec <= 0:
         raise ValueError("tokens_per_sec must be > 0")
-    return random.expovariate(tokens_per_sec / max(input_tokens, 1))
+    return rng.expovariate(tokens_per_sec / max(input_tokens, 1))
 
 
 def now_ns():
@@ -112,7 +117,7 @@ def build_user_prompt(ex):
 def prepare_example(ex):
     user_prompt = build_user_prompt(ex)
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": pick_sysprompt_random(SYSTEM_PROMPTS)},
         {"role": "user", "content": user_prompt},
     ]
     return {
@@ -359,6 +364,6 @@ load_weight = float(sys.argv[3]) if len(sys.argv) > 3 else 0.34
 step_interval = int(sys.argv[4]) if len(sys.argv) > 4 else 30
 
 print(f"Setting LB weights: expert={expert_weight} kv={kv_weight} load={load_weight}")
-# set_vllm_config(expert_weight, kv_weight, load_weight, step_interval)
+set_vllm_config(expert_weight, kv_weight, load_weight, step_interval)
 
 asyncio.run(main())

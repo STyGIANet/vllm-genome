@@ -7626,6 +7626,53 @@ class GPUModelRunner(
             )
         self._prefix_learning_pending_copy_jobs = remaining_jobs
 
+    def _force_drain_prefix_learning_pending_copy_jobs(
+        self,
+        required_step_seq: int,
+    ) -> None:
+        if not self._prefix_learning_pending_copy_jobs:
+            return
+
+        learner = self._prefix_learning_async_learner
+        if learner is None:
+            return
+
+        current_epoch = self._prefix_learning_owner_cache_epoch
+        if current_epoch is None:
+            return
+
+        remaining_jobs: list[_PrefixLearningPendingCopyJob] = []
+        max_enqueued_step_seq = 0
+        for job in self._prefix_learning_pending_copy_jobs:
+            if job.epoch != current_epoch or job.step_seq > required_step_seq:
+                remaining_jobs.append(job)
+                continue
+            if job.ready_event is not None:
+                job.ready_event.synchronize()
+            learner.enqueue_step(
+                _PrefixLearningAsyncStepJob(
+                    step_seq=job.step_seq,
+                    epoch=job.epoch,
+                    req_ids=job.req_ids,
+                    req_lengths=job.req_lengths,
+                    topk_by_layer={
+                        layer_id: tensor.numpy()
+                        for layer_id, tensor in job.topk_by_layer_cpu.items()
+                    },
+                )
+            )
+            max_enqueued_step_seq = max(max_enqueued_step_seq, job.step_seq)
+        self._prefix_learning_pending_copy_jobs = remaining_jobs
+
+        if max_enqueued_step_seq <= 0:
+            return
+
+        deadline = time.perf_counter() + 0.5
+        while learner.get_processed_step_seq() < max_enqueued_step_seq:
+            if time.perf_counter() >= deadline:
+                break
+            time.sleep(0.0005)
+
     def _update_prefix_learning_freeze_state(self) -> bool:
         return False
 
@@ -8146,6 +8193,18 @@ class GPUModelRunner(
         learner = self._prefix_learning_async_learner
         if learner is None:
             return None
+
+        required_step_seq = max(
+            (
+                self._prefix_learning_last_step_seq_by_req.get(
+                    req_id, self._prefix_learning_async_step_seq
+                )
+                for req_id in req_ids
+            ),
+            default=0,
+        )
+        if learner.get_processed_step_seq() < required_step_seq:
+            self._force_drain_prefix_learning_pending_copy_jobs(required_step_seq)
 
         epoch = self._prefix_learning_owner_cache_epoch
         results: dict[str, dict[str, int]] = {}
