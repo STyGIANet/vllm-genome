@@ -280,7 +280,7 @@ async def run_dataset(name, subset, formatter, split):
 
     return stats
 
-def set_vllm_config(expert, kv, load, step_interval):
+def set_vllm_config(expert, kv, load, step_interval, dump_dir):
     # resp = requests.post(
     #   f"{HOST}/load_balancer/weights",
     #   json={
@@ -317,6 +317,14 @@ def set_vllm_config(expert, kv, load, step_interval):
     resp.raise_for_status()
     print("POST /reset_prefix_cache -> 200 OK")
 
+
+    resp = requests.post(
+      f"{HOST}/eplb/placement_routing_dump",
+      json={"dump_dir": dump_dir},
+      timeout=10,
+    )
+    resp.raise_for_status()
+
     
     # Checking if the updates are applied
     # resp = requests.get(
@@ -333,15 +341,44 @@ def set_vllm_config(expert, kv, load, step_interval):
     resp.raise_for_status()
     print("GET /eplb/step_interval ->", resp.json())
 
+    resp = requests.get(f"{HOST}/eplb/placement_routing_dump", timeout=10)
+    resp.raise_for_status()
+    print("GET /eplb/placement_routing_dump ->", resp.json())
 
 
 DATASETS = SEND_PROMPTS_DATASETS
 
 
+def build_dump_dir(root_dump_dir, dataset_name, subset, split):
+    model_label = MODEL.rsplit("/", 1)[-1]
+    dataset_label = dataset_name.rsplit("/", 1)[-1]
+    subset_label = (subset or "none").replace("/", "_")
+    split_label = (split or "none").replace("/", "_")
+    root = root_dump_dir.rstrip("/")
+    return (
+        f"{root}/"
+        f"{model_label}-{dataset_label}-{subset_label}-{split_label}"
+    )
+
+
 async def main():
+    expert_weight = float(sys.argv[1]) if len(sys.argv) > 1 else 0.33
+    kv_weight = float(sys.argv[2]) if len(sys.argv) > 2 else 0.33
+    load_weight = float(sys.argv[3]) if len(sys.argv) > 3 else 0.34
+    step_interval = int(sys.argv[4]) if len(sys.argv) > 4 else 30
+    dump_dir = str(sys.argv[5]) if len(sys.argv) > 5 else "traces/"
+
+    print(f"Setting LB weights: expert={expert_weight} kv={kv_weight} load={load_weight}")
     results = []
 
     for name, subset, formatter, split in DATASETS:
+        set_vllm_config(
+            expert_weight,
+            kv_weight,
+            load_weight,
+            step_interval,
+            build_dump_dir(dump_dir, name, subset, split),
+        )
         stats = await run_dataset(name, subset, formatter, split)
         results.append(stats)
         print(
@@ -361,13 +398,5 @@ async def main():
             f"Throughput={r['throughput']:.1f} tok/s | "
             f"Acc={r['accuracy']:.3f}"
         )
-
-expert_weight = float(sys.argv[1]) if len(sys.argv) > 1 else 0.33
-kv_weight = float(sys.argv[2]) if len(sys.argv) > 2 else 0.33
-load_weight = float(sys.argv[3]) if len(sys.argv) > 3 else 0.34
-step_interval = int(sys.argv[4]) if len(sys.argv) > 4 else 30
-
-print(f"Setting LB weights: expert={expert_weight} kv={kv_weight} load={load_weight}")
-set_vllm_config(expert_weight, kv_weight, load_weight, step_interval)
 
 asyncio.run(main())

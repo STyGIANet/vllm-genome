@@ -60,7 +60,19 @@ def _is_tracking_enabled() -> bool:
 def _is_placement_capture_enabled() -> bool:
     """Check if routing capture for placement is enabled."""
     import os
-    return bool(int(os.getenv("VLLM_CAPTURE_ROUTING_FOR_PLACEMENT", "0")))
+    if bool(int(os.getenv("VLLM_CAPTURE_ROUTING_FOR_PLACEMENT", "0"))):
+        return True
+
+    try:
+        vllm_config = get_current_vllm_config()
+    except Exception:
+        return False
+
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return False
+
+    return bool(getattr(model_config, "placement_callback_path", None))
 
 
 def _is_any_routing_capture_enabled() -> bool:
@@ -731,11 +743,8 @@ class FusedMoE(CustomOp):
     def layer_id(self):
         # Delayed import to avoid circular dependency
         from vllm.model_executor.models.utils import extract_layer_index
-        import os
 
-        layer_idx = extract_layer_index(self.layer_name)
-        print(f"[DEBUG] FusedMoE.layer_id property called (PID: {os.getpid()}), layer_name: '{self.layer_name}', extracted layer_id: {layer_idx}")
-        return layer_idx
+        return extract_layer_index(self.layer_name)
 
     @property
     def gate(self) -> torch.nn.Module | None:

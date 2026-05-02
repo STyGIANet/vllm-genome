@@ -234,6 +234,10 @@ class ModelConfig:
     """Optional Python file that exports the EPLB/METIS placement callback."""
     placement_callback_func: str = "compute_placement"
     """Callback symbol name to load from ``placement_callback_path``."""
+    placement_routing_dump_dir: str | None = None
+    """Optional directory for dumping prefill-only routed-expert captures
+    grouped by custom EPLB trigger. When set, each worker writes one file per
+    captured forward pass under a per-trigger subdirectory."""
     # ///////////// Expert-based load balancing
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""

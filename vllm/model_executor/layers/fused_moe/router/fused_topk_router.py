@@ -14,15 +14,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 # Routing tracking — globals live in layer.py to avoid circular imports.
-from vllm.model_executor.layers.fused_moe.layer import (
-    _ROUTING_DATA,
-    _is_any_routing_capture_enabled,
-    _is_tracking_enabled,
-)
-from vllm.distributed import get_ep_group
-from vllm.forward_context import get_forward_context
-
-
 def vllm_topk_softmax(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -172,62 +163,5 @@ class FusedTopKRouter(BaseRouter):
             indices_type=indices_type,
             scoring_func=self.scoring_func,
         )
-        
-        # Capture routing data if offline tracking or placement capture is enabled.
-        if _is_any_routing_capture_enabled() and self._layer_id is not None:
-            # In DP+EP mode with do_naive_dispatch_combine=True, hidden_states
-            # is the all-gathered tensor from ALL DP ranks.  We must slice out
-            # only the tokens that belong to this rank to avoid N-fold counting.
-            #
-            # dp_metadata is only set when dp_size > 1.  When it is set the
-            # router always runs inside the sp_local_sizes() context manager
-            # (see default_moe_runner.py), so local_sizes is always valid here.
-            #
-            # The gathered tensor is contiguous by EP rank:
-            #   [rank0 tokens | rank1 tokens | … | rank(N-1) tokens]
-            # get_ep_group().rank_in_group is the index into local_sizes.
-            capture_ids = topk_ids
-            capture_weights = topk_weights if _is_tracking_enabled() else None
-            capture_num = hidden_states.shape[0]
-            capture_prefill_ranges: list[tuple[int, int]] | None = None
-            capture_prefill_req_ids: list[str] | None = None
-
-            ctx = get_forward_context()
-            if ctx is not None:
-                capture_prefill_ranges = list(
-                    ctx.additional_kwargs.get("routing_capture_prefill_ranges", [])
-                )
-                capture_prefill_req_ids = list(
-                    ctx.additional_kwargs.get("routing_capture_prefill_req_ids", [])
-                )
-            if ctx is not None and ctx.dp_metadata is not None:
-                try:
-                    ep_rank = get_ep_group().rank_in_group
-                    sizes = ctx.dp_metadata.get_chunk_sizes_across_dp_rank()
-                    start = sum(sizes[:ep_rank])
-                    end = start + sizes[ep_rank]
-                    # Only slice when the gathered tensor is larger than local.
-                    # .clone() makes an independent copy so the full gathered
-                    # tensor can be freed rather than being kept alive by a view.
-                    if end <= topk_ids.shape[0] and end > start:
-                        capture_ids = topk_ids[start:end].clone()
-                        if capture_weights is not None:
-                            capture_weights = topk_weights[start:end].clone()
-                        capture_num = sizes[ep_rank]
-                except Exception:
-                    capture_prefill_ranges = None
-                    capture_prefill_req_ids = None
-
-            if self._layer_id not in _ROUTING_DATA:
-                _ROUTING_DATA[self._layer_id] = []
-            capture_record = {
-                'topk_ids': capture_ids.detach(),
-                'num_tokens': capture_num,
-                'prefill_ranges': capture_prefill_ranges,
-                'prefill_req_ids': capture_prefill_req_ids,
-            }
-            if capture_weights is not None:
-                capture_record['topk_weights'] = capture_weights.detach()
-            _ROUTING_DATA[self._layer_id].append(capture_record)
 
         return topk_weights, topk_ids

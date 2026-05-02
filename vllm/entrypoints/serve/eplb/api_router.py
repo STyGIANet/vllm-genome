@@ -19,6 +19,10 @@ class EplbStepIntervalUpdateRequest(BaseModel):
     step_interval: int = Field(ge=1)
 
 
+class PlacementRoutingDumpUpdateRequest(BaseModel):
+    dump_dir: str | None = None
+
+
 def _engine_client(raw_request: Request):
     return raw_request.app.state.engine_client
 
@@ -70,6 +74,56 @@ async def update_eplb_step_interval(
         ) from exc
 
     logger.info("Updated runtime EPLB step_interval: %s", state)
+    return JSONResponse(content=state)
+
+
+@router.get("/eplb/placement_routing_dump")
+async def get_placement_routing_dump(raw_request: Request):
+    client = _engine_client(raw_request)
+    getter = getattr(client, "get_runtime_placement_routing_dump", None)
+    if getter is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=(
+                "Runtime placement routing dump control is unsupported for "
+                "this serving topology."
+            ),
+        )
+    try:
+        state = await getter()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=str(exc),
+        ) from exc
+    return JSONResponse(content=state)
+
+
+@router.post("/eplb/placement_routing_dump")
+async def update_placement_routing_dump(
+    raw_request: Request,
+    body: PlacementRoutingDumpUpdateRequest,
+):
+    client = _engine_client(raw_request)
+    updater = getattr(client, "update_runtime_placement_routing_dump", None)
+    if updater is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=(
+                "Runtime placement routing dump control is unsupported for "
+                "this serving topology."
+            ),
+        )
+
+    try:
+        state = await updater(dump_dir=body.dump_dir)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=str(exc),
+        ) from exc
+
+    logger.info("Updated runtime placement routing dump state: %s", state)
     return JSONResponse(content=state)
 
 

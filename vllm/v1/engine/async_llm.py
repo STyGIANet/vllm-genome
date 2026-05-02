@@ -118,8 +118,12 @@ class AsyncLLM(EngineClient):
             if vllm_config.parallel_config.enable_eplb
             else None
         )
+        self._runtime_placement_routing_dump_dir: str | None = (
+            self.model_config.placement_routing_dump_dir
+        )
         # ///////////// Expert-based load balancing
         self._placement_callback_registered = False
+        self._placement_routing_dump_synced = False
         placement_capture_enabled = bool(self.model_config.placement_callback_path)
         os.environ["VLLM_CAPTURE_ROUTING_FOR_PLACEMENT"] = (
             "1" if placement_capture_enabled else "0"
@@ -907,7 +911,7 @@ class AsyncLLM(EngineClient):
     # ///////////// Expert-based load balancing
     async def maybe_register_placement_callback(self) -> None:
         callback_path = self.model_config.placement_callback_path
-        if not callback_path or self._placement_callback_registered:
+        if not callback_path:
             return
 
         parallel_config = self.vllm_config.parallel_config
@@ -928,16 +932,26 @@ class AsyncLLM(EngineClient):
                 f"Placement callback file not found: {abs_callback_path}"
             )
 
-        await self.collective_rpc(
-            "register_placement_callback",
-            args=(abs_callback_path, self.model_config.placement_callback_func),
-        )
-        self._placement_callback_registered = True
-        logger.info(
-            "Registered placement callback %s:%s for online EPLB placement.",
-            abs_callback_path,
-            self.model_config.placement_callback_func,
-        )
+        if not self._placement_callback_registered:
+            await self.collective_rpc(
+                "register_placement_callback",
+                args=(abs_callback_path, self.model_config.placement_callback_func),
+            )
+            self._placement_callback_registered = True
+            logger.info(
+                "Registered placement callback %s:%s for online EPLB placement.",
+                abs_callback_path,
+                self.model_config.placement_callback_func,
+            )
+
+        if (
+            self.model_config.placement_routing_dump_dir
+            and not self._placement_routing_dump_synced
+        ):
+            await self.update_runtime_placement_routing_dump(
+                dump_dir=self.model_config.placement_routing_dump_dir
+            )
+            self._placement_routing_dump_synced = True
     # ///////////// Expert-based load balancing
 
     async def reset_prefix_cache(
@@ -1018,6 +1032,59 @@ class AsyncLLM(EngineClient):
             "steps_until_next_rearrangement_max": max(steps_until_next),
         }
 
+    @staticmethod
+    def _aggregate_runtime_placement_routing_dump_states(
+        worker_states: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not worker_states:
+            raise ValueError(
+                "No placement routing dump worker state was returned."
+            )
+        dump_dirs = {state["dump_dir"] for state in worker_states}
+        enabled_values = {bool(state["enabled"]) for state in worker_states}
+        if len(dump_dirs) != 1:
+            raise ValueError(
+                "Inconsistent runtime placement routing dump dir across "
+                f"workers: {sorted(dump_dirs)}"
+            )
+        if len(enabled_values) != 1:
+            raise ValueError(
+                "Inconsistent runtime placement routing dump enable state "
+                "across workers."
+            )
+        session_dirs = sorted(
+            {
+                str(state["session_dir"])
+                for state in worker_states
+                if state.get("session_dir") is not None
+            }
+        )
+        workers = sorted(
+            [
+                {
+                    "global_rank": state.get("global_rank"),
+                    "data_parallel_rank": state.get("data_parallel_rank"),
+                    "ep_rank": state.get("ep_rank"),
+                    "session_dir": state.get("session_dir"),
+                    "trigger_index": state.get("trigger_index"),
+                    "step_in_trigger": state.get("step_in_trigger"),
+                    "enabled": state.get("enabled"),
+                }
+                for state in worker_states
+            ],
+            key=lambda state: (
+                10**9 if state.get("data_parallel_rank") is None else int(state["data_parallel_rank"]),
+                10**9 if state.get("global_rank") is None else int(state["global_rank"]),
+            ),
+        )
+        return {
+            "dump_dir": next(iter(dump_dirs)),
+            "enabled": next(iter(enabled_values)),
+            "worker_count": len(worker_states),
+            "session_dirs": session_dirs,
+            "workers": workers,
+        }
+
     async def get_runtime_eplb_step_interval(self) -> dict[str, Any]:
         if self._runtime_eplb_step_interval is None:
             raise ValueError(
@@ -1044,6 +1111,38 @@ class AsyncLLM(EngineClient):
         )
         state = self._aggregate_runtime_eplb_step_interval_states(worker_states)
         self._runtime_eplb_step_interval = int(state["step_interval"])
+        return state
+
+    async def get_runtime_placement_routing_dump(self) -> dict[str, Any]:
+        worker_states = await self.collective_rpc(
+            "get_runtime_placement_routing_dump_state"
+        )
+        state = self._aggregate_runtime_placement_routing_dump_states(
+            worker_states
+        )
+        self._runtime_placement_routing_dump_dir = state["dump_dir"]
+        return state
+
+    async def update_runtime_placement_routing_dump(
+        self,
+        *,
+        dump_dir: str | None,
+    ) -> dict[str, Any]:
+        session_name = (
+            f"session_{time.time_ns()}" if dump_dir and dump_dir.strip() else None
+        )
+        worker_states = await self.collective_rpc(
+            "set_runtime_placement_routing_dump_dir",
+            args=(dump_dir, session_name),
+        )
+        state = self._aggregate_runtime_placement_routing_dump_states(
+            worker_states
+        )
+        normalized = dump_dir.strip() if isinstance(dump_dir, str) else None
+        if normalized == "":
+            normalized = None
+        self._runtime_placement_routing_dump_dir = normalized
+        self.model_config.placement_routing_dump_dir = normalized
         return state
 
     async def reset_encoder_cache(self) -> None:

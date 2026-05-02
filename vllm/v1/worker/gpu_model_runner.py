@@ -732,6 +732,13 @@ class GPUModelRunner(
             int(os.getenv("VLLM_PREFIX_LEARNING_DUMMY_OWNER", "0"))
         )
         self._skip_prefix_learning_capture_for_current_forward = False
+        self._placement_routing_dump_session_dir: str | None = None
+        if self.model_config.placement_routing_dump_dir:
+            self._placement_routing_dump_session_dir = (
+                self._make_placement_routing_dump_session_dir(
+                    self.model_config.placement_routing_dump_dir
+                )
+            )
         """
         State of the expert parallelism load balancer.
 
@@ -3369,12 +3376,79 @@ class GPUModelRunner(
             and self.parallel_config.eplb_config.policy == "custom"
         )
 
+    def _make_placement_routing_dump_session_dir(
+        self,
+        dump_dir: str,
+        session_name: str | None = None,
+    ) -> str:
+        if session_name is None:
+            session_name = f"session_{time.time_ns()}"
+        return os.path.join(dump_dir, session_name)
+
+    def get_runtime_placement_routing_dump_state(self) -> dict[str, Any]:
+        dp_rank = getattr(self.parallel_config, "data_parallel_rank", None)
+        ep_rank = None
+        dump_state: dict[str, Any] = {}
+        try:
+            ep_rank = int(get_ep_group().rank_in_group)
+        except Exception:
+            ep_rank = None
+        try:
+            from vllm.distributed.eplb.policy.custom_policy import StaticPlacementPolicy
+            dump_state = cast(
+                dict[str, Any],
+                StaticPlacementPolicy.get_placement_routing_dump_state(),
+            )
+        except Exception:
+            dump_state = {}
+        return {
+            "dump_dir": self.model_config.placement_routing_dump_dir,
+            "enabled": bool(dump_state.get("enabled", False)),
+            "session_dir": dump_state.get(
+                "session_dir", self._placement_routing_dump_session_dir
+            ),
+            "trigger_index": dump_state.get("trigger_index"),
+            "step_in_trigger": None,
+            "global_rank": int(getattr(self.parallel_config, "rank", -1)),
+            "data_parallel_rank": (
+                None if dp_rank is None else int(dp_rank)
+            ),
+            "ep_rank": ep_rank,
+        }
+
+    def set_runtime_placement_routing_dump_dir(
+        self,
+        dump_dir: str | None,
+        session_name: str | None = None,
+    ) -> dict[str, Any]:
+        normalized = dump_dir.strip() if isinstance(dump_dir, str) else None
+        if normalized == "":
+            normalized = None
+        self.model_config.placement_routing_dump_dir = normalized
+        self._placement_routing_dump_session_dir = (
+            self._make_placement_routing_dump_session_dir(
+                normalized,
+                session_name=session_name,
+            )
+            if normalized
+            else None
+        )
+        try:
+            from vllm.distributed.eplb.policy.custom_policy import StaticPlacementPolicy
+            StaticPlacementPolicy.set_placement_routing_dump_session_dir(
+                self._placement_routing_dump_session_dir
+            )
+        except Exception:
+            pass
+        return self.get_runtime_placement_routing_dump_state()
+
     def _filter_routing_snapshot_to_prefill(self, routing_snapshot: dict) -> dict:
         """Build a prefill-only routing snapshot from full-step captures."""
         filtered_snapshot: dict[int, list[dict[str, Any]]] = {}
         for layer_id, captures in routing_snapshot.items():
             filtered_captures: list[dict[str, Any]] = []
             for capture in captures:
+                topk_ids = capture["topk_ids"]
                 prefill_ranges = capture.get("prefill_ranges")
                 if not prefill_ranges:
                     continue
@@ -3384,7 +3458,11 @@ class GPUModelRunner(
                 for start, end in prefill_ranges:
                     if end <= start:
                         continue
-                    topk_ids_parts.append(capture["topk_ids"][start:end])
+                    start = max(0, int(start))
+                    end = min(int(end), int(topk_ids.shape[0]))
+                    if end <= start:
+                        continue
+                    topk_ids_parts.append(topk_ids[start:end])
                     num_tokens += end - start
 
                 if not topk_ids_parts:
@@ -3406,20 +3484,24 @@ class GPUModelRunner(
         routing_snapshot: dict,
         num_layers: int,
         num_experts: int,
-    ) -> tuple[torch.Tensor, list[int], int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, list[int], int]:
         """Build compact upper-triangular edge counts for local token co-activation.
 
         Returns:
             edge_weights: Tensor[num_nodes * (num_nodes - 1) // 2]
+            node_activation_counts: Tensor[num_nodes]
             layer_ids:    Sorted layer ids present in routing_snapshot.
             num_nodes:    num_layers * num_experts
         """
         num_nodes = num_layers * num_experts
         num_edges = num_nodes * (num_nodes - 1) // 2
         edge_weights = torch.zeros(num_edges, dtype=torch.int64, device=self.device)
+        node_activation_counts = torch.zeros(
+            num_nodes, dtype=torch.int64, device=self.device
+        )
 
         if not routing_snapshot:
-            return edge_weights, list(range(num_layers)), num_nodes
+            return edge_weights, node_activation_counts, list(range(num_layers)), num_nodes
 
         layer_ids = sorted(routing_snapshot.keys())
         per_layer_ids: list[torch.Tensor] = []
@@ -3429,7 +3511,7 @@ class GPUModelRunner(
         for layer_id in layer_ids:
             captures = routing_snapshot[layer_id]
             if not captures:
-                return edge_weights, layer_ids, num_nodes
+                return edge_weights, node_activation_counts, layer_ids, num_nodes
             layer_tensor = torch.cat(
                 [cap["topk_ids"] for cap in captures], dim=0
             ).to(torch.int64)
@@ -3442,11 +3524,11 @@ class GPUModelRunner(
                     "Skipping co-activation graph build due to inconsistent "
                     "routing tensor shapes across layers."
                 )
-                return edge_weights, layer_ids, num_nodes
+                return edge_weights, node_activation_counts, layer_ids, num_nodes
             per_layer_ids.append(layer_tensor)
 
         if total_tokens is None or total_tokens == 0:
-            return edge_weights, layer_ids, num_nodes
+            return edge_weights, node_activation_counts, layer_ids, num_nodes
 
         expert_ids = torch.stack(per_layer_ids, dim=1)  # [tokens, layers, top_k]
         layer_offsets = (
@@ -3455,7 +3537,20 @@ class GPUModelRunner(
         )
         flat_nodes = (expert_ids + layer_offsets).reshape(total_tokens, -1)
         if flat_nodes.shape[1] < 2:
-            return edge_weights, layer_ids, num_nodes
+            valid_nodes = flat_nodes.reshape(-1)
+            valid_nodes = valid_nodes[(valid_nodes >= 0) & (valid_nodes < num_nodes)]
+            if valid_nodes.numel() > 0:
+                node_activation_counts = torch.bincount(
+                    valid_nodes, minlength=num_nodes
+                )
+            return edge_weights, node_activation_counts, layer_ids, num_nodes
+
+        valid_nodes = flat_nodes.reshape(-1)
+        valid_nodes = valid_nodes[(valid_nodes >= 0) & (valid_nodes < num_nodes)]
+        if valid_nodes.numel() > 0:
+            node_activation_counts = torch.bincount(
+                valid_nodes, minlength=num_nodes
+            )
 
         row_idx, col_idx = torch.triu_indices(
             flat_nodes.shape[1], flat_nodes.shape[1], offset=1, device=self.device
@@ -3467,7 +3562,7 @@ class GPUModelRunner(
         edge_ids = lo * (2 * num_nodes - lo - 1) // 2 + (hi - lo - 1)
         edge_weights = torch.bincount(edge_ids.reshape(-1), minlength=num_edges)
 
-        return edge_weights, layer_ids, num_nodes
+        return edge_weights, node_activation_counts, layer_ids, num_nodes
 
     def _on_routing_step(self) -> None:
         """Called after each model forward pass, immediately before eplb_step().
@@ -3487,7 +3582,10 @@ class GPUModelRunner(
             push_step_snapshot,
         )
         self._accumulate_prefix_learning_step_capture()
-        if not _is_any_routing_capture_enabled():
+        if not (
+            _is_any_routing_capture_enabled()
+            or self._uses_graph_only_callback_placement()
+        ):
             return
 
         callback = self._compute_placement_callback
@@ -3504,10 +3602,18 @@ class GPUModelRunner(
                     first = next(iter(self.eplb_state.model_states.values()))
                     num_layers = first.model.num_moe_layers
                     num_experts = first.model.num_logical_experts
-                    coactivation_edges, _, _ = self._build_local_coactivation_edges(
+                    (
+                        coactivation_edges,
+                        node_activation_counts,
+                        _,
+                        _,
+                    ) = self._build_local_coactivation_edges(
                         placement_routing_snapshot, num_layers, num_experts
                     )
-                    self.eplb_state.record_coactivation_edges(coactivation_edges)
+                    self.eplb_state.record_coactivation_graph(
+                        coactivation_edges,
+                        node_activation_counts,
+                    )
             except Exception as exc:
                 logger.warning(
                     "local co-activation recording raised an exception: %s",
@@ -4283,9 +4389,13 @@ class GPUModelRunner(
         # Clear routing data from the previous step so _ROUTING_DATA always
         # reflects only the current step's captures (prefill or one decode step).
         from vllm.model_executor.layers.fused_moe.layer import (
-            _is_tracking_enabled, clear_routing_data,
+            _is_any_routing_capture_enabled,
+            clear_routing_data,
         )
-        if _is_tracking_enabled():
+        if (
+            _is_any_routing_capture_enabled()
+            or self._uses_graph_only_callback_placement()
+        ):
             clear_routing_data()
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens

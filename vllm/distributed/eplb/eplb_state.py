@@ -89,6 +89,12 @@ class EplbStats:
     (layer, expert) nodes for the interval since the previous rearrangement.
     Shape: [num_nodes * (num_nodes - 1) // 2]
     """
+    node_activation_counts: torch.Tensor | None = None
+    """
+    Per-node activation counts over unique (layer, expert) nodes for the
+    interval since the previous rearrangement.
+    Shape: [num_nodes]
+    """
 
 
 @dataclass
@@ -177,6 +183,11 @@ class EplbModelState:
     """
     Co-activation edge counts accumulated since the previous rearrangement.
     Shape: [num_nodes * (num_nodes - 1) // 2]
+    """
+    node_activation_count_pass: torch.Tensor
+    """
+    Per-node activation counts accumulated since the previous rearrangement.
+    Shape: [num_nodes]
     """
     model: MixtureOfExperts
     expert_buffer: list[torch.Tensor]
@@ -452,6 +463,11 @@ class EplbState:
             dtype=torch.int32,
             device=self.device,
         )
+        node_activation_count_pass = torch.zeros(
+            (num_nodes,),
+            dtype=torch.int32,
+            device=self.device,
+        )
         self.expert_load_window_size = self.parallel_config.eplb_config.window_size
         expert_load_window = torch.zeros(
             (
@@ -490,6 +506,7 @@ class EplbState:
             expert_load_window=expert_load_window,
             model_name=model_config.model,
             coactivation_edge_pass=coactivation_edge_pass,
+            node_activation_count_pass=node_activation_count_pass,
             model=model,
             expert_buffer=expert_buffer,
             buffer_lock=threading.Lock(),
@@ -549,6 +566,7 @@ class EplbState:
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
                 eplb_model_state.coactivation_edge_pass.zero_()
+                eplb_model_state.node_activation_count_pass.zero_()
 
         if (
             log_stats
@@ -687,6 +705,7 @@ class EplbState:
         )
         global_expert_load_windows = []
         coactivation_edge_passes = []
+        node_activation_count_passes = []
         for eplb_model_state in self.model_states.values():
             expert_load_window = eplb_model_state.expert_load_window[
                 :, :, : self.num_valid_physical_experts
@@ -715,14 +734,23 @@ class EplbState:
                 coactivation_edge_passes.append(
                     eplb_model_state.coactivation_edge_pass.clone()
                 )
+                node_activation_count_passes.append(
+                    eplb_model_state.node_activation_count_pass.clone()
+                )
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
         if callback_graph_required:
             global_coactivation_edge_passes = self._allreduce_vector_list(
                 coactivation_edge_passes
             )
+            global_node_activation_count_passes = self._allreduce_vector_list(
+                node_activation_count_passes
+            )
         else:
             global_coactivation_edge_passes = [None] * len(self.model_states)
+            global_node_activation_count_passes = [None] * len(
+                self.model_states
+            )
 
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
@@ -762,10 +790,16 @@ class EplbState:
                 self.policy.snapshot_for_rebalance()
 
         # Get new expert mappings
-        for eplb_model_state, global_expert_load_window, global_coactivation_edges in zip(
+        for (
+            eplb_model_state,
+            global_expert_load_window,
+            global_coactivation_edges,
+            global_node_activation_counts,
+        ) in zip(
             self.model_states.values(),
             global_expert_load_windows,
             global_coactivation_edge_passes,
+            global_node_activation_count_passes,
         ):
             if not self.is_async or is_profile:
                 # Get new expert mappings for the model.
@@ -779,12 +813,18 @@ class EplbState:
                     global_coactivation_edges is not None
                     and hasattr(self.policy, "set_graph_metadata")
                 ):
-                    self.policy.set_graph_metadata({
+                    graph_metadata = {
                         "coactivation_edges": global_coactivation_edges.cpu(),
+                        "node_activation_counts": (
+                            global_node_activation_counts.cpu()
+                            if global_node_activation_counts is not None
+                            else None
+                        ),
                         "num_layers": eplb_model_state.model.num_moe_layers,
                         "num_experts": eplb_model_state.model.num_logical_experts,
                         "num_gpus": num_gpus,
-                    })
+                    }
+                    self.policy.set_graph_metadata(graph_metadata)
 
                 new_physical_to_logical_map = self.policy.rebalance_experts(
                     global_expert_load_window.cpu(),
@@ -844,12 +884,18 @@ class EplbState:
                         global_coactivation_edges is not None
                         and hasattr(self.policy, "set_graph_metadata")
                     ):
-                        self.policy.set_graph_metadata({
+                        graph_metadata = {
                             "coactivation_edges": global_coactivation_edges.cpu(),
+                            "node_activation_counts": (
+                                global_node_activation_counts.cpu()
+                                if global_node_activation_counts is not None
+                                else None
+                            ),
                             "num_layers": eplb_model_state.model.num_moe_layers,
                             "num_experts": eplb_model_state.model.num_logical_experts,
                             "num_gpus": num_gpus,
-                        })
+                        }
+                        self.policy.set_graph_metadata(graph_metadata)
                     precomputed_async_map = self.policy.rebalance_experts(
                         global_expert_load_window.cpu(),
                         num_replicas,
@@ -873,6 +919,11 @@ class EplbState:
                         if global_coactivation_edges is not None
                         else None
                     ),
+                    node_activation_counts=(
+                        global_node_activation_counts.clone()
+                        if global_node_activation_counts is not None
+                        else None
+                    ),
                 )
                 if precomputed_async_map is None:
                     # Record event after clone to signal async worker
@@ -889,6 +940,7 @@ class EplbState:
                 eplb_model_state.pending_global_ready_check = True
             if not is_profile:
                 eplb_model_state.coactivation_edge_pass.zero_()
+                eplb_model_state.node_activation_count_pass.zero_()
         # Signal async thread to start transferring layers.
         if self.is_async and (not is_profile):
             self.rearrange_event.set()
@@ -1072,8 +1124,12 @@ class EplbState:
             offset += size
         return all_reduce_list
 
-    def record_coactivation_edges(self, coactivation_edges: torch.Tensor) -> None:
-        """Accumulate local co-activation edge counts on the forward path."""
+    def record_coactivation_graph(
+        self,
+        coactivation_edges: torch.Tensor,
+        node_activation_counts: torch.Tensor,
+    ) -> None:
+        """Accumulate local co-activation graph stats on the forward path."""
         if not self.model_states:
             return
         model_state = next(iter(self.model_states.values()))
@@ -1084,8 +1140,19 @@ class EplbState:
                 tuple(coactivation_edges.shape),
             )
             return
+        if model_state.node_activation_count_pass.shape != node_activation_counts.shape:
+            logger.warning(
+                "Skipping node-activation accumulation due to shape mismatch: "
+                "%s vs %s",
+                tuple(model_state.node_activation_count_pass.shape),
+                tuple(node_activation_counts.shape),
+            )
+            return
         model_state.coactivation_edge_pass.add_(
             coactivation_edges.to(model_state.coactivation_edge_pass)
+        )
+        model_state.node_activation_count_pass.add_(
+            node_activation_counts.to(model_state.node_activation_count_pass)
         )
 
     @classmethod

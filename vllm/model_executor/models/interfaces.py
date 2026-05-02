@@ -902,6 +902,16 @@ class MixtureOfExperts(Protocol):
             logical_replica_count: Count of replicas for each logical expert.
         """
         for layer_idx, layer in enumerate(self.moe_layers):
+            # Placement capture / routing graphs are indexed by dense MoE-layer
+            # ordinals, not raw transformer layer indices. Align the router id
+            # with the authoritative moe_layers order used by EPLB.
+            router = getattr(layer, "router", None)
+            if router is None:
+                experts = getattr(layer, "experts", None)
+                router = getattr(experts, "router", None)
+            if router is not None:
+                router._layer_id = layer_idx
+
             # Register the expert weights.
             self.expert_weights.append(layer.get_expert_weights())
             layer.set_eplb_state(

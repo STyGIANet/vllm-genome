@@ -398,6 +398,9 @@ class EngineArgs:
     )
     placement_callback_path: str | None = ModelConfig.placement_callback_path
     placement_callback_func: str = ModelConfig.placement_callback_func
+    placement_routing_dump_dir: str | None = (
+        ModelConfig.placement_routing_dump_dir
+    )
     # ///////////// Expert-based load balancing
     enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
     model_weights: str = ModelConfig.model_weights
@@ -795,6 +798,10 @@ class EngineArgs:
         model_group.add_argument(
             "--placement-callback-func",
             **model_kwargs["placement_callback_func"],
+        )
+        model_group.add_argument(
+            "--placement-routing-dump-dir",
+            **model_kwargs["placement_routing_dump_dir"],
         )
         # ///////////// Expert-based load balancing
         model_group.add_argument(
@@ -1514,6 +1521,7 @@ class EngineArgs:
             ),
             placement_callback_path=self.placement_callback_path,
             placement_callback_func=self.placement_callback_func,
+            placement_routing_dump_dir=self.placement_routing_dump_dir,
             enable_return_routed_experts=self.enable_return_routed_experts,
             # ///////////// Expert-based load balancing
             max_logprobs=self.max_logprobs,

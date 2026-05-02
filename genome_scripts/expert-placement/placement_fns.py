@@ -9,7 +9,6 @@ The callback runs on the normal EPLB rearrangement cadence.
 """
 
 import logging
-import sys
 
 import torch
 from vllm.logger import init_logger
@@ -21,15 +20,6 @@ except ImportError:
 
 
 logger = init_logger("vllm.genome.placement")
-
-
-def _get_layer_items(routing: dict) -> list[tuple[int, list[dict]]]:
-    return sorted(
-        (layer_id, captures)
-        for layer_id, captures in routing.items()
-        if isinstance(layer_id, int)
-    )
-
 
 def _greedy_pack(loads: list[float], num_gpus: int) -> dict[str, int]:
     gpu_loads = [0.0] * num_gpus
@@ -48,15 +38,18 @@ def _greedy_pack(loads: list[float], num_gpus: int) -> dict[str, int]:
         gpu_loads[gpu_id] += loads[expert_id]
     return assignment
 
-
-def _build_layer_loads(
-    layer_items: list[tuple[int, list[dict]]],
+def _build_layer_loads_from_node_activation_counts(
+    node_activation_counts: torch.Tensor,
+    num_layers: int,
+    num_experts: int,
 ) -> dict[int, list[int]]:
-    layer_loads: dict[int, list[int]] = {}
-    for layer_id, captures in layer_items:
-        layer_tensor = torch.stack([cap["expert_load"] for cap in captures]).sum(dim=0)
-        layer_loads[layer_id] = [int(v) for v in layer_tensor.tolist()]
-    return layer_loads
+    counts = node_activation_counts.to(torch.int64).cpu().reshape(
+        num_layers, num_experts
+    )
+    return {
+        int(layer_id): [int(v) for v in counts[layer_id].tolist()]
+        for layer_id in range(num_layers)
+    }
 
 
 def _build_metis_inputs(
@@ -165,37 +158,27 @@ def compute_placement(routing: dict) -> dict:
     if not routing:
         return {}
 
-    layer_items = _get_layer_items(routing)
-    if not layer_items:
-        return {}
-
-    first_cap = layer_items[0][1][0]
-    if "expert_load" not in first_cap:
-        return {}
-
     graph_meta = routing.get("__graph__", {})
     coactivation_edges = graph_meta.get("coactivation_edges")
-    if coactivation_edges is None:
+    node_activation_counts = graph_meta.get("node_activation_counts")
+    if coactivation_edges is None or node_activation_counts is None:
         return {}
 
-    layer_ids = [int(layer_id) for layer_id, _ in layer_items]
-    num_experts = int(graph_meta.get("num_experts", len(first_cap["expert_load"])))
-    num_gpus = int(first_cap["num_gpus"])
+    num_layers = int(graph_meta["num_layers"])
+    num_experts = int(graph_meta["num_experts"])
+    num_gpus = int(graph_meta["num_gpus"])
+    layer_ids = list(range(num_layers))
     num_nodes = len(layer_ids) * num_experts
 
     if logger.isEnabledFor(logging.INFO):
-        total = 0
-        for _layer_id, captures in layer_items:
-            total += (
-                captures[0]["expert_load"].nbytes
-                + sys.getsizeof(captures[0]["num_gpus"])
-            )
-            if "num_tokens" in captures[0]:
-                total += sys.getsizeof(captures[0]["num_tokens"])
-        total += coactivation_edges.nbytes
+        total = coactivation_edges.nbytes + node_activation_counts.nbytes
         logger.info("Total routing payload size: %s bytes", total)
 
-    layer_loads = _build_layer_loads(layer_items)
+    layer_loads = _build_layer_loads_from_node_activation_counts(
+        node_activation_counts=node_activation_counts,
+        num_layers=num_layers,
+        num_experts=num_experts,
+    )
 
     membership = _partition_with_metis(
         coactivation_edges=coactivation_edges,

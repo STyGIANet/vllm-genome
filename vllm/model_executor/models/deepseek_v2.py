@@ -1352,10 +1352,6 @@ class DeepseekV2ForCausalLM(
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-        # Set MoE hyperparameters
-        self.num_moe_layers = (
-            self.config.num_hidden_layers - self.config.first_k_dense_replace
-        )
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
@@ -1377,6 +1373,7 @@ class DeepseekV2ForCausalLM(
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
 
+        self.num_moe_layers = len(self.moe_layers)
         self.extract_moe_parameters(example_moe)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:

@@ -266,10 +266,57 @@ class WorkerBase:
         self.model_runner._compute_placement_callback = callback
         try:
             from vllm.distributed.eplb.policy.custom_policy import StaticPlacementPolicy
+            dp_rank = getattr(self.model_runner.parallel_config,
+                              "data_parallel_rank", None)
+            rank_name = (
+                f"rank_{int(dp_rank):04d}"
+                if dp_rank is not None else
+                f"rank_{int(getattr(self.model_runner.parallel_config, 'rank', -1)):04d}"
+            )
             StaticPlacementPolicy.set_compute_placement_callback(callback)
+            StaticPlacementPolicy.set_placement_routing_dump_session_dir(
+                getattr(
+                    self.model_runner,
+                    "_placement_routing_dump_session_dir",
+                    None,
+                )
+            )
+            StaticPlacementPolicy.set_placement_routing_dump_worker_identity(
+                rank_name=rank_name,
+                dp_rank=None if dp_rank is None else int(dp_rank),
+                global_rank=int(
+                    getattr(self.model_runner.parallel_config, "rank", -1)
+                ),
+            )
         except Exception:
             pass
         # ///////////// Expert-based load balancing
+
+    def get_runtime_placement_routing_dump_state(self) -> dict[str, Any]:
+        getter = getattr(
+            self.model_runner, "get_runtime_placement_routing_dump_state", None
+        )
+        if not callable(getter):
+            raise ValueError(
+                "Runtime placement routing dump control is unsupported for "
+                "this worker."
+            )
+        return getter()
+
+    def set_runtime_placement_routing_dump_dir(
+        self,
+        dump_dir: str | None,
+        session_name: str | None = None,
+    ) -> dict[str, Any]:
+        setter = getattr(
+            self.model_runner, "set_runtime_placement_routing_dump_dir", None
+        )
+        if not callable(setter):
+            raise ValueError(
+                "Runtime placement routing dump control is unsupported for "
+                "this worker."
+            )
+        return setter(dump_dir, session_name)
 
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""

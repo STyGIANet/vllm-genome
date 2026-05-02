@@ -100,6 +100,7 @@ def create_fused_moe_router(
             eplb_state=eplb_state,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            layer_id=layer_id,
         )
 
     if use_grouped_topk:
@@ -122,6 +123,7 @@ def create_fused_moe_router(
             num_fused_shared_experts=num_fused_shared_experts,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            layer_id=layer_id,
         )
         if (
             grouped_topk_router.routing_method_type != RoutingMethodType.Unspecified
@@ -145,6 +147,7 @@ def create_fused_moe_router(
             renormalize=renormalize,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            layer_id=layer_id,
         )
 
     if e_score_correction_bias is not None:
@@ -158,6 +161,7 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            layer_id=layer_id,
         )
 
     return FusedTopKRouter(

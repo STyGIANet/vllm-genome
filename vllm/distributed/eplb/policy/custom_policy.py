@@ -4,6 +4,7 @@ import threading
 import torch
 import os
 import json
+import time
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -47,6 +48,11 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
     _graph_metadata: dict | None = None
     _compute_placement_callback = None
     _placement_epoch: int = 0
+    _placement_routing_dump_session_dir: str | None = None
+    _placement_routing_dump_trigger_index: int = 0
+    _placement_routing_dump_rank_name: str = "global"
+    _placement_routing_dump_dp_rank: int | None = None
+    _placement_routing_dump_global_rank: int | None = None
     _config_lock: threading.Lock = threading.Lock()
 
     @classmethod
@@ -73,6 +79,43 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
     def set_graph_metadata(cls, graph_metadata: dict) -> None:
         with cls._config_lock:
             cls._graph_metadata = graph_metadata
+
+    @classmethod
+    def set_placement_routing_dump_session_dir(
+        cls,
+        session_dir: str | None,
+    ) -> None:
+        with cls._config_lock:
+            cls._placement_routing_dump_session_dir = session_dir
+            cls._placement_routing_dump_trigger_index = 0
+
+    @classmethod
+    def set_placement_routing_dump_worker_identity(
+        cls,
+        *,
+        rank_name: str,
+        dp_rank: int | None,
+        global_rank: int | None,
+    ) -> None:
+        with cls._config_lock:
+            cls._placement_routing_dump_rank_name = rank_name
+            cls._placement_routing_dump_dp_rank = dp_rank
+            cls._placement_routing_dump_global_rank = global_rank
+
+    @classmethod
+    def get_placement_routing_dump_state(cls) -> dict[str, object]:
+        with cls._config_lock:
+            return {
+                "enabled": bool(
+                    cls._placement_routing_dump_session_dir
+                    and cls._compute_placement_callback is not None
+                ),
+                "session_dir": cls._placement_routing_dump_session_dir,
+                "trigger_index": cls._placement_routing_dump_trigger_index,
+                "rank_name": cls._placement_routing_dump_rank_name,
+                "dp_rank": cls._placement_routing_dump_dp_rank,
+                "global_rank": cls._placement_routing_dump_global_rank,
+            }
 
     @classmethod
     def requires_callback_graph(cls) -> bool:
@@ -103,6 +146,32 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
             logger.isEnabledFor(logging.DEBUG)
             or bool(int(os.getenv("VLLM_CUSTOM_EPLB_VERBOSE", "0")))
         )
+
+    @classmethod
+    def _dump_callback_routing_payload(cls, routing: dict) -> None:
+        session_dir = cls._placement_routing_dump_session_dir
+        if not session_dir:
+            return
+        if cls._placement_routing_dump_dp_rank not in (None, 0):
+            return
+
+        os.makedirs(session_dir, exist_ok=True)
+        payload = {
+            "format": "metis_callback_routing_v1",
+            "timestamp_ns": time.time_ns(),
+            "trigger_index": cls._placement_routing_dump_trigger_index,
+            "placement_epoch": cls._placement_epoch,
+            "dp_rank": cls._placement_routing_dump_dp_rank,
+            "global_rank": cls._placement_routing_dump_global_rank,
+            "routing": routing,
+        }
+        path = os.path.join(
+            session_dir,
+            f"trigger_{cls._placement_routing_dump_trigger_index}.pt",
+        )
+        torch.save(payload, path)
+        cls._placement_routing_dump_trigger_index += 1
+
     # ///////////// Expert-based load balancing
 
     @classmethod
@@ -129,14 +198,8 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
         elif cls._compute_placement_callback is not None and cls._graph_metadata is not None:
             graph_metadata = cls._graph_metadata
             cls._graph_metadata = None
-            routing = {
-                layer_idx: [{
-                    "expert_load": global_expert_load[layer_idx],
-                    "num_gpus": num_gpus,
-                }]
-                for layer_idx in range(num_layers)
-            }
-            routing["__graph__"] = graph_metadata
+            routing = {"__graph__": graph_metadata}
+            cls._dump_callback_routing_payload(routing)
             user_config = cls._compute_placement_callback(routing)
             if not user_config:
                 user_config = None

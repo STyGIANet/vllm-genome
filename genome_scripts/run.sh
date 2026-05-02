@@ -17,6 +17,8 @@ export VLLM_SERVER_DEV_MODE=1
 # export VLLM_PREFIX_LEARNING_DUMMY_OWNER=1
 # export VLLM_FUSED_MOE_SLEEP_BEFORE_DISPATCH_MS=2.5
 
+export TRACE_DIR=${SCRIPT_DIR}/traces/
+
 vllm serve $MODEL \
 		--tensor-parallel-size 1 \
 		--data-parallel-size 8 \
@@ -29,9 +31,10 @@ vllm serve $MODEL \
 		--kv-block-prefix-routing-weight 0.5 \
 		--load-score-routing-weight 0.5 \
 		--enable-eplb \
-		# --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
-		# --placement-callback-path ${PLACEMENT_PATH} \
-		# --placement-callback-func compute_placement \
+		--eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
+		--placement-callback-path ${PLACEMENT_PATH} \
+		--placement-callback-func compute_placement \
+		--placement-routing-dump-dir ${TRACE_DIR}
 		# --max-pending-requests-per-engine 256 \
 		# --enable-load-score-routing \
 		# --enable-kv-block-prefix-routing \
@@ -70,3 +73,14 @@ for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format
       # 
 	  # --disable-custom-all-reduce \
 	  # --max-model-len 200 \
+
+
+
+# # EPLB async 64
+# TTFT=41.7281s | SVC_TTFT=0.9131 | Throughput=11100.9 tok/s | Acc=0.289
+# cais/mmlu / all | TTFT=41.728s | SVC_TTFT=0.913 |Throughput=11100.9 tok/s | Acc=0.289
+
+
+# # Metis async 64
+# TTFT=23.6025s | SVC_TTFT=0.7655 | Throughput=13243.4 tok/s | Acc=0.292
+# cais/mmlu / all | TTFT=23.602s | SVC_TTFT=0.765 |Throughput=13243.4 tok/s | Acc=0.292
