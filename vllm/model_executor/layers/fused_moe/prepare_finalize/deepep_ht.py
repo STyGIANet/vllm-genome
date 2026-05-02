@@ -7,6 +7,9 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.prepare_finalize.dispatch_sleep import (
+    maybe_sleep_before_dispatch,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
@@ -133,6 +136,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         token_data = tokens
         if has_scales:
             token_data = (tokens, token_scales)
+
+        maybe_sleep_before_dispatch()
 
         (
             token_data,

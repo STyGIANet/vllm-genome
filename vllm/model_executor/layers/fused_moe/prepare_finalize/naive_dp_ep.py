@@ -5,6 +5,9 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_ep_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.prepare_finalize.dispatch_sleep import (
+    maybe_sleep_before_dispatch,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
@@ -123,6 +126,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
 
         a1q, scales = _quantize_and_setup_dispatch(a1, quant_config, defer_input_quant)
 
+        maybe_sleep_before_dispatch()
         res = get_ep_group().dispatch(
             a1q,
             topk_weights,
@@ -209,6 +213,7 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
 
         a1q, scales = _quantize_and_setup_dispatch(a1, quant_config, defer_input_quant)
 
+        maybe_sleep_before_dispatch()
         res = get_ep_group().dispatch_router_logits(
             a1q,
             router_logits,

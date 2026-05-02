@@ -9,6 +9,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.prepare_finalize.dispatch_sleep import (
+    maybe_sleep_before_dispatch,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
@@ -291,6 +294,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         # Dispatch
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
+        maybe_sleep_before_dispatch()
         if current_platform.is_rocm():
             (
                 expert_x,
