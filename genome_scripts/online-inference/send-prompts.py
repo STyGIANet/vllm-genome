@@ -6,6 +6,7 @@ import requests
 import sys
 import re
 import os
+import math
 
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
@@ -81,6 +82,28 @@ def poisson_interarrival_tok_sec(tokens_per_sec, input_tokens):
 
 def now_ns():
     return time.perf_counter_ns()
+
+
+def percentile(values, q):
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    if not 0.0 <= q <= 1.0:
+        raise ValueError("q must be in [0, 1]")
+
+    sorted_values = sorted(float(v) for v in values)
+    pos = q * (len(sorted_values) - 1)
+    lo = math.floor(pos)
+    hi = math.ceil(pos)
+    if lo == hi:
+        return sorted_values[lo]
+
+    frac = pos - lo
+    return (
+        sorted_values[lo] * (1.0 - frac)
+        + sorted_values[hi] * frac
+    )
 
 
 def load_dataset_compat(name, subset):
@@ -303,6 +326,10 @@ async def run_dataset(name, subset, formatter, split):
 
     avg_ttft = sum(r["ttft"] for r in measured) / len(measured)
     service_ttft = sum(r["service_ttft"] for r in measured) / len(measured)
+    service_ttft_values = [r["service_ttft"] for r in measured]
+    service_ttft_p50 = percentile(service_ttft_values, 0.50)
+    service_ttft_p95 = percentile(service_ttft_values, 0.95)
+    service_ttft_p99 = percentile(service_ttft_values, 0.99)
     throughput = (total_input + total_output) / total_time
     # correct = sum(1 for r in measured if r["pred"].startswith(r["gt"]))
     correct = sum(1 for r in measured if r["pred"] == r["gt"])
@@ -313,11 +340,22 @@ async def run_dataset(name, subset, formatter, split):
         "requests": len(measured),
         "avg_ttft": avg_ttft,
         "service_ttft": service_ttft,
+        "service_ttft_p50": service_ttft_p50,
+        "service_ttft_p95": service_ttft_p95,
+        "service_ttft_p99": service_ttft_p99,
         "throughput": throughput,
         "accuracy": correct / len(measured),
     }
 
-    print(f"TTFT={avg_ttft:.4f}s | SVC_TTFT={service_ttft:.4f} | Throughput={throughput:.1f} tok/s | Acc={stats['accuracy']:.3f}")
+    print(
+        f"TTFT={avg_ttft:.4f}s | "
+        f"SVC_TTFT={service_ttft:.4f}s | "
+        f"SVC_TTFT_P50={service_ttft_p50:.4f}s | "
+        f"SVC_TTFT_P95={service_ttft_p95:.4f}s | "
+        f"SVC_TTFT_P99={service_ttft_p99:.4f}s | "
+        f"Throughput={throughput:.1f} tok/s | "
+        f"Acc={stats['accuracy']:.3f}"
+    )
 
     return stats
 
@@ -413,6 +451,29 @@ def build_dump_dir(root_dump_dir, dataset_name, subset, split):
     )
 
 
+def build_summary_path(root_dump_dir):
+    model_label = MODEL.rsplit("/", 1)[-1]
+    root = root_dump_dir.rstrip("/") or "."
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    return os.path.join(root, f"{model_label}_final_summary.csv")
+
+
+def format_summary_lines(results):
+    lines = ["dataset,ttft,svcttft,svcttft50,svcttft95,svcttft99,throughput,accuracy"]
+    for r in results:
+        lines.append(
+            f"{r['dataset']}/{r['subset']},"
+            f"{r['avg_ttft']:.3f},"
+            f"{r['service_ttft']:.3f},"
+            f"{r['service_ttft_p50']:.3f},"
+            f"{r['service_ttft_p95']:.3f},"
+            f"{r['service_ttft_p99']:.3f},"
+            f"{r['throughput']:.1f},"
+            f"{r['accuracy']:.3f}"
+        )
+    return lines
+
+
 async def main():
     expert_weight = float(sys.argv[1]) if len(sys.argv) > 1 else 0.33
     kv_weight = float(sys.argv[2]) if len(sys.argv) > 2 else 0.33
@@ -420,6 +481,7 @@ async def main():
     step_interval = int(sys.argv[4]) if len(sys.argv) > 4 else 30
     expert_dump_dir = str(sys.argv[5]) if len(sys.argv) > 5 else "traces/"
     traffic_dump_dir = str(sys.argv[6]) if len(sys.argv) > 6 else "traffic/"
+    summary_dir = str(sys.argv[7]) if len(sys.argv) > 7 else "summary/"
 
     print(f"Setting LB weights: expert={expert_weight} kv={kv_weight} load={load_weight}")
     results = []
@@ -442,19 +504,23 @@ async def main():
         print(
             f"{stats['dataset']} / {stats['subset']} | "
             f"TTFT={stats['avg_ttft']:.3f}s | "
-            f"SVC_TTFT={stats['service_ttft']:.3f} |"
+            f"SVC_TTFT={stats['service_ttft']:.3f}s | "
+            f"SVC_TTFT_P50={stats['service_ttft_p50']:.3f}s | "
+            f"SVC_TTFT_P95={stats['service_ttft_p95']:.3f}s | "
+            f"SVC_TTFT_P99={stats['service_ttft_p99']:.3f}s | "
             f"Throughput={stats['throughput']:.1f} tok/s | "
             f"Acc={stats['accuracy']:.3f}"
         )
 
-    print("\n### FINAL SUMMARY ###")
-    for r in results:
-        print(
-            f"{r['dataset']} / {r['subset']} | "
-            f"TTFT={r['avg_ttft']:.3f}s | "
-            f"SVC_TTFT={r['service_ttft']:.3f} |"
-            f"Throughput={r['throughput']:.1f} tok/s | "
-            f"Acc={r['accuracy']:.3f}"
-        )
+    summary_lines = format_summary_lines(results)
+    print()
+    for line in summary_lines:
+        print(line)
+
+    summary_path = build_summary_path(summary_dir)
+    # os.makedirs(summary_path, exist_ok=True)
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(summary_lines) + "\n")
+    print(f"Wrote final summary to {summary_path}")
 
 asyncio.run(main())

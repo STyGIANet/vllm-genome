@@ -34,11 +34,10 @@ vllm serve $MODEL \
 		--kv-block-prefix-routing-weight 0.5 \
 		--load-score-routing-weight 0.5 \
 		--enable-eplb \
-		--eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
 		--moe-dispatch-traffic-dump-dir ${TRAFFIC_DIR} \
-		# --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
-		# --placement-callback-path ${PLACEMENT_PATH} \
-		# --placement-callback-func compute_placement \
+		--eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
+		--placement-callback-path ${PLACEMENT_PATH} \
+		--placement-callback-func compute_placement \
 		# --placement-routing-dump-dir ${TRACE_DIR} \
 		# --max-pending-requests-per-engine 256 \
 		# --enable-load-score-routing \
@@ -47,6 +46,7 @@ vllm serve $MODEL \
 		# --prefix-affinity-only-prefill \
 		# --prefix-learning-algorithm prefixtrie \
 		# --load-balancer-debug \
+		# --eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
 
 
 # cleanup
