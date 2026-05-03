@@ -19,8 +19,8 @@ export VLLM_SERVER_DEV_MODE=1
 
 export TRACE_DIR=${SCRIPT_DIR}/traces/
 export TRAFFIC_DIR=${SCRIPT_DIR}/traffic/
-mkdir -p ${TRACE_DIR}
-mkdir -p ${TRAFFIC_DIR}
+# mkdir -p ${TRACE_DIR}
+# mkdir -p ${TRAFFIC_DIR}
 
 vllm serve $MODEL \
 		--tensor-parallel-size 1 \
@@ -34,18 +34,18 @@ vllm serve $MODEL \
 		--kv-block-prefix-routing-weight 0.5 \
 		--load-score-routing-weight 0.5 \
 		--enable-eplb \
-		--eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
-		--placement-callback-path ${PLACEMENT_PATH} \
-		--placement-callback-func compute_placement \
-		--placement-routing-dump-dir ${TRACE_DIR} \
+		--eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
 		--moe-dispatch-traffic-dump-dir ${TRAFFIC_DIR} \
+		# --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
+		# --placement-callback-path ${PLACEMENT_PATH} \
+		# --placement-callback-func compute_placement \
+		# --placement-routing-dump-dir ${TRACE_DIR} \
 		# --max-pending-requests-per-engine 256 \
 		# --enable-load-score-routing \
 		# --enable-kv-block-prefix-routing \
 		# --enable-prefix-affinity-routing \
 		# --prefix-affinity-only-prefill \
 		# --prefix-learning-algorithm prefixtrie \
-		# --eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
 		# --load-balancer-debug \
 
 
@@ -77,14 +77,3 @@ for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format
       # 
 	  # --disable-custom-all-reduce \
 	  # --max-model-len 200 \
-
-
-
-# # EPLB async 64
-# TTFT=41.7281s | SVC_TTFT=0.9131 | Throughput=11100.9 tok/s | Acc=0.289
-# cais/mmlu / all | TTFT=41.728s | SVC_TTFT=0.913 |Throughput=11100.9 tok/s | Acc=0.289
-
-
-# # Metis async 64
-# TTFT=23.6025s | SVC_TTFT=0.7655 | Throughput=13243.4 tok/s | Acc=0.292
-# cais/mmlu / all | TTFT=23.602s | SVC_TTFT=0.765 |Throughput=13243.4 tok/s | Acc=0.292

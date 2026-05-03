@@ -8,6 +8,7 @@ import re
 import os
 
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 
 from prompt_datasets import SEND_PROMPTS_DATASETS, SYSTEM_PROMPTS
@@ -24,6 +25,27 @@ POISSON_INPUT_TOKENS_PER_SEC = 16000
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
 rng = random.Random(10)
+
+PARQUET_DATASET_OVERRIDES = {
+    "gimmaru/piqa": {
+        "repo_id": "gimmaru/piqa",
+        "files_by_split": {
+            "validation": [
+                "data/validation-00000-of-00001-26538eb75c618d24.parquet",
+            ],
+        },
+    },
+    # Keep a compatibility alias in case an older dataset registry still
+    # points to the original script-backed repo id.
+    "ybisk/piqa": {
+        "repo_id": "gimmaru/piqa",
+        "files_by_split": {
+            "validation": [
+                "data/validation-00000-of-00001-26538eb75c618d24.parquet",
+            ],
+        },
+    },
+}
 
 def pick_sysprompt_random(prompts):
     idx = rng.randrange(len(prompts))
@@ -59,6 +81,27 @@ def poisson_interarrival_tok_sec(tokens_per_sec, input_tokens):
 
 def now_ns():
     return time.perf_counter_ns()
+
+
+def load_dataset_compat(name, subset):
+    override = PARQUET_DATASET_OVERRIDES.get(name)
+    if override is not None:
+        data_files = {
+            split_name: [
+                hf_hub_download(
+                    repo_id=override["repo_id"],
+                    filename=filename,
+                    repo_type="dataset",
+                )
+                for filename in filenames
+            ]
+            for split_name, filenames in override["files_by_split"].items()
+        }
+        return load_dataset("parquet", data_files=data_files)
+
+    if subset is None:
+        return load_dataset(name)
+    return load_dataset(name, subset)
 
 
 def count_message_tokens(messages):
@@ -218,10 +261,7 @@ async def poisson_driver(examples, rate, rate_mode, warmup_count):
 async def run_dataset(name, subset, formatter, split):
     print(f"\n### Running: {name} / {subset} ###")
 
-    if subset is None:
-        ds = load_dataset(name)
-    else:
-        ds = load_dataset(name, subset)
+    ds = load_dataset_compat(name, subset)
 
     # split = "test" if "test" in ds else "validation"
     base_ds = ds[split]

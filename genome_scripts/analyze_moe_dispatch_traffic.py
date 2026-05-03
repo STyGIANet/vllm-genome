@@ -54,7 +54,7 @@ _maybe_enable_spyder_inline_backend()
 import matplotlib.pyplot as plt
 
 
-DEFAULT_TRACE_ROOT = Path(__file__).resolve().parent / "traffic"
+DEFAULT_TRACE_ROOT = Path(__file__).resolve().parent / "traffic-metis/deepseek-moe-16b-chat-mmlu-all-test"
 DEFAULT_SHOW_PLOTS = _running_in_spyder() or hasattr(sys, "ps1")
 
 
@@ -658,12 +658,12 @@ if __name__ == "__main__":
 #%%
 
 
-with open("traffic/deepseek-moe-16b-chat-mmlu-all-test/analysis/traffic_matrices.pkl", "rb") as f:
+with open("traffic-eplb/deepseek-moe-16b-chat-mmlu-all-test/analysis/traffic_matrices.pkl", "rb") as f:
     data = pickle.load(f)
 
 pass_id = 100
 for layer in range(1,len(data["per_pass_per_layer"][100])+1):
     a2a = data["per_pass_per_layer"][pass_id][layer]
     fig, ax = plt.subplots(1,1)
-    ax = sns.heatmap(a2a)
+    ax = sns.heatmap(a2a, cmap='coolwarm')
     ax.set_title(f'layer={layer}, pass={pass_id}')

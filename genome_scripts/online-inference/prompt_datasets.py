@@ -168,49 +168,49 @@ ALL_DATASETS: dict[str, DatasetSpec] = {
         "test",
     ),
     "hotpot_qa_fullwiki": (
-        "hotpot_qa",
+        "hotpotqa/hotpot_qa",
         "fullwiki",
         format_hotpotqa,
         "validation",
     ),
     "pubmed_qa_pqa_labeled": (
-        "pubmed_qa",
+        "qiaojin/PubMedQA",
         "pqa_labeled",
         format_pubmedqa,
         "train",
     ),
     "arc_challenge": (
-        "ai2_arc",
+        "allenai/ai2_arc",
         "ARC-Challenge",
         format_arc,
         "validation",
     ),
     "arc_easy": (
-        "ai2_arc",
+        "allenai/ai2_arc",
         "ARC-Easy",
         format_arc,
         "validation",
     ),
     "openbookqa_main": (
-        "openbookqa",
+        "allenai/openbookqa",
         "main",
         format_openbookqa,
         "validation",
     ),
     "commonsense_qa": (
-        "commonsense_qa",
+        "tau/commonsense_qa",
         None,
         format_csqa,
         "validation",
     ),
     "boolq": (
-        "boolq",
+        "google/boolq",
         None,
         format_boolq,
         "validation",
     ),
     "piqa": (
-        "piqa",
+        "gimmaru/piqa",
         None,
         format_piqa,
         "validation",
@@ -231,6 +231,7 @@ ALL_DATASETS.update(
 
 
 SEND_PROMPTS_DATASETS: list[DatasetSpec] = [
+    ALL_DATASETS["piqa"],
     *[ALL_DATASETS[f"mmlu_{subject}"] for subject in MMLU_SUBJECTS],
     ALL_DATASETS["hotpot_qa_fullwiki"],
     ALL_DATASETS["mmlu_all"],
@@ -240,7 +241,6 @@ SEND_PROMPTS_DATASETS: list[DatasetSpec] = [
     ALL_DATASETS["openbookqa_main"],
     ALL_DATASETS["commonsense_qa"],
     ALL_DATASETS["boolq"],
-    ALL_DATASETS["piqa"],
 ]
 
 
