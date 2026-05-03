@@ -238,6 +238,10 @@ class ModelConfig:
     """Optional directory for dumping prefill-only routed-expert captures
     grouped by custom EPLB trigger. When set, each worker writes one file per
     captured forward pass under a per-trigger subdirectory."""
+    moe_dispatch_traffic_dump_dir: str | None = None
+    """Optional directory for dumping per-rank pre-dispatch MoE token
+    destination counts. When set, each worker writes a JSONL stream that
+    records how many tokens are destined to each EP rank, including self."""
     # ///////////// Expert-based load balancing
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""

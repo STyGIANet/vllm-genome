@@ -318,6 +318,31 @@ class WorkerBase:
             )
         return setter(dump_dir, session_name)
 
+    def get_runtime_moe_dispatch_traffic_dump_state(self) -> dict[str, Any]:
+        getter = getattr(
+            self.model_runner, "get_runtime_moe_dispatch_traffic_dump_state", None
+        )
+        if not callable(getter):
+            raise ValueError(
+                "Runtime MoE dispatch traffic dump control is unsupported for "
+                "this worker."
+            )
+        return getter()
+
+    def set_runtime_moe_dispatch_traffic_dump_dir(
+        self,
+        dump_dir: str | None,
+    ) -> dict[str, Any]:
+        setter = getattr(
+            self.model_runner, "set_runtime_moe_dispatch_traffic_dump_dir", None
+        )
+        if not callable(setter):
+            raise ValueError(
+                "Runtime MoE dispatch traffic dump control is unsupported for "
+                "this worker."
+            )
+        return setter(dump_dir)
+
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""
         raise NotImplementedError

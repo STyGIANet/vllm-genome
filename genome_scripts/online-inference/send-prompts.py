@@ -5,6 +5,7 @@ import random
 import requests
 import sys
 import re
+import os
 
 from datasets import load_dataset
 from transformers import AutoTokenizer
@@ -280,7 +281,7 @@ async def run_dataset(name, subset, formatter, split):
 
     return stats
 
-def set_vllm_config(expert, kv, load, step_interval, dump_dir):
+def set_vllm_config(expert, kv, load, step_interval, expert_dump_dir, traffic_dump_dir):
     # resp = requests.post(
     #   f"{HOST}/load_balancer/weights",
     #   json={
@@ -320,7 +321,14 @@ def set_vllm_config(expert, kv, load, step_interval, dump_dir):
 
     resp = requests.post(
       f"{HOST}/eplb/placement_routing_dump",
-      json={"dump_dir": dump_dir},
+      json={"dump_dir": expert_dump_dir},
+      timeout=10,
+    )
+    resp.raise_for_status()
+
+    resp = requests.post(
+      f"{HOST}/eplb/moe_dispatch_traffic_dump",
+      json={"dump_dir": traffic_dump_dir},
       timeout=10,
     )
     resp.raise_for_status()
@@ -346,6 +354,10 @@ def set_vllm_config(expert, kv, load, step_interval, dump_dir):
     print("GET /eplb/placement_routing_dump ->", resp.json())
 
 
+    resp = requests.get(f"{HOST}/eplb/moe_dispatch_traffic_dump", timeout=10)
+    resp.raise_for_status()
+    print("GET /eplb/moe_dispatch_traffic_dump ->", resp.json())
+
 DATASETS = SEND_PROMPTS_DATASETS
 
 
@@ -366,18 +378,24 @@ async def main():
     kv_weight = float(sys.argv[2]) if len(sys.argv) > 2 else 0.33
     load_weight = float(sys.argv[3]) if len(sys.argv) > 3 else 0.34
     step_interval = int(sys.argv[4]) if len(sys.argv) > 4 else 30
-    dump_dir = str(sys.argv[5]) if len(sys.argv) > 5 else "traces/"
+    expert_dump_dir = str(sys.argv[5]) if len(sys.argv) > 5 else "traces/"
+    traffic_dump_dir = str(sys.argv[6]) if len(sys.argv) > 6 else "traffic/"
 
     print(f"Setting LB weights: expert={expert_weight} kv={kv_weight} load={load_weight}")
     results = []
 
     for name, subset, formatter, split in DATASETS:
+        expert_trace = build_dump_dir(expert_dump_dir, name, subset, split)
+        os.makedirs(expert_trace, exist_ok=True)
+        traffic_trace = build_dump_dir(traffic_dump_dir, name, subset, split)
+        os.makedirs(traffic_trace, exist_ok=True)
         set_vllm_config(
             expert_weight,
             kv_weight,
             load_weight,
             step_interval,
-            build_dump_dir(dump_dir, name, subset, split),
+            expert_trace,
+            traffic_trace
         )
         stats = await run_dataset(name, subset, formatter, split)
         results.append(stats)

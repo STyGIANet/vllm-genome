@@ -3,6 +3,7 @@
 
 import functools
 import gc
+import hashlib
 import itertools
 import os
 import queue
@@ -2337,6 +2338,41 @@ class GPUModelRunner(
             spec_decode_metadata,
         )
 
+    def _build_moe_dispatch_traffic_batch_signature(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> str:
+        num_reqs = self.input_batch.num_reqs
+        req_ids = self.input_batch.req_ids[:num_reqs]
+
+        hasher = hashlib.sha256()
+        hasher.update(b"scheduled-batch-v1")
+        hasher.update(len(req_ids).to_bytes(8, "little", signed=False))
+
+        for req_id in req_ids:
+            req_index = self.input_batch.req_id_to_index[req_id]
+            num_scheduled = int(scheduler_output.num_scheduled_tokens[req_id])
+            num_computed = int(self.input_batch.num_computed_tokens_cpu[req_index])
+
+            req_id_bytes = req_id.encode("utf-8")
+            hasher.update(len(req_id_bytes).to_bytes(8, "little", signed=False))
+            hasher.update(req_id_bytes)
+            hasher.update(num_scheduled.to_bytes(8, "little", signed=False))
+            hasher.update(num_computed.to_bytes(8, "little", signed=False))
+
+        return hasher.hexdigest()
+
+    def _build_profile_moe_dispatch_traffic_batch_signature(
+        self,
+        num_scheduled_tokens: np.ndarray,
+    ) -> str:
+        hasher = hashlib.sha256()
+        hasher.update(b"profile-batch-v1")
+        hasher.update(len(num_scheduled_tokens).to_bytes(8, "little", signed=False))
+        for num_scheduled in num_scheduled_tokens.tolist():
+            hasher.update(int(num_scheduled).to_bytes(8, "little", signed=False))
+        return hasher.hexdigest()
+
     def _build_attention_metadata(
         self,
         num_tokens: int,
@@ -3416,6 +3452,23 @@ class GPUModelRunner(
             "ep_rank": ep_rank,
         }
 
+    def get_runtime_moe_dispatch_traffic_dump_state(self) -> dict[str, Any]:
+        dp_rank = getattr(self.parallel_config, "data_parallel_rank", None)
+        ep_rank = None
+        try:
+            ep_rank = int(get_ep_group().rank_in_group)
+        except Exception:
+            ep_rank = None
+        return {
+            "dump_dir": self.model_config.moe_dispatch_traffic_dump_dir,
+            "enabled": bool(self.model_config.moe_dispatch_traffic_dump_dir),
+            "global_rank": int(getattr(self.parallel_config, "rank", -1)),
+            "data_parallel_rank": (
+                None if dp_rank is None else int(dp_rank)
+            ),
+            "ep_rank": ep_rank,
+        }
+
     def set_runtime_placement_routing_dump_dir(
         self,
         dump_dir: str | None,
@@ -3441,6 +3494,28 @@ class GPUModelRunner(
         except Exception:
             pass
         return self.get_runtime_placement_routing_dump_state()
+
+    def set_runtime_moe_dispatch_traffic_dump_dir(
+        self,
+        dump_dir: str | None,
+    ) -> dict[str, Any]:
+        normalized = dump_dir.strip() if isinstance(dump_dir, str) else None
+        if normalized == "":
+            normalized = None
+
+        old_dir = self.model_config.moe_dispatch_traffic_dump_dir
+        if old_dir != normalized:
+            from vllm.model_executor.layers.fused_moe.dispatch_traffic_trace import (
+                reset_moe_dispatch_traffic_writer,
+            )
+
+            reset_moe_dispatch_traffic_writer(
+                old_dir,
+                int(getattr(self.parallel_config, "rank", -1)),
+            )
+
+        self.model_config.moe_dispatch_traffic_dump_dir = normalized
+        return self.get_runtime_moe_dispatch_traffic_dump_state()
 
     def _filter_routing_snapshot_to_prefill(self, routing_snapshot: dict) -> dict:
         """Build a prefill-only routing snapshot from full-step captures."""
@@ -4634,6 +4709,11 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 additional_forward_context={
+                    "moe_dispatch_traffic_batch_signature": (
+                        self._build_moe_dispatch_traffic_batch_signature(
+                            scheduler_output
+                        )
+                    ),
                     "routing_capture_prefill_ranges": prefill_capture_ranges,
                     "routing_capture_prefill_req_ids": prefill_capture_req_ids,
                     "routing_capture_prefill_only_for_placement": bool(
@@ -6204,6 +6284,11 @@ class GPUModelRunner(
                         ubatch_slices=ubatch_slices_padded,
                         slot_mapping=slot_mappings,
                         additional_forward_context={
+                            "moe_dispatch_traffic_batch_signature": (
+                                self._build_profile_moe_dispatch_traffic_batch_signature(
+                                    num_scheduled_tokens
+                                )
+                            ),
                             "routing_capture_prefill_ranges": prefill_capture_ranges,
                             "routing_capture_prefill_req_ids": [],
                             "routing_capture_prefill_only_for_placement": bool(

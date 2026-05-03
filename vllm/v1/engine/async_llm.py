@@ -121,6 +121,9 @@ class AsyncLLM(EngineClient):
         self._runtime_placement_routing_dump_dir: str | None = (
             self.model_config.placement_routing_dump_dir
         )
+        self._runtime_moe_dispatch_traffic_dump_dir: str | None = (
+            self.model_config.moe_dispatch_traffic_dump_dir
+        )
         # ///////////// Expert-based load balancing
         self._placement_callback_registered = False
         self._placement_routing_dump_synced = False
@@ -1085,6 +1088,48 @@ class AsyncLLM(EngineClient):
             "workers": workers,
         }
 
+    @staticmethod
+    def _aggregate_runtime_moe_dispatch_traffic_dump_states(
+        worker_states: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not worker_states:
+            raise ValueError(
+                "No MoE dispatch traffic dump worker state was returned."
+            )
+        dump_dirs = {state["dump_dir"] for state in worker_states}
+        enabled_values = {bool(state["enabled"]) for state in worker_states}
+        if len(dump_dirs) != 1:
+            raise ValueError(
+                "Inconsistent runtime MoE dispatch traffic dump dir across "
+                f"workers: {sorted(dump_dirs)}"
+            )
+        if len(enabled_values) != 1:
+            raise ValueError(
+                "Inconsistent runtime MoE dispatch traffic dump enable state "
+                "across workers."
+            )
+        workers = sorted(
+            [
+                {
+                    "global_rank": state.get("global_rank"),
+                    "data_parallel_rank": state.get("data_parallel_rank"),
+                    "ep_rank": state.get("ep_rank"),
+                    "enabled": state.get("enabled"),
+                }
+                for state in worker_states
+            ],
+            key=lambda state: (
+                10**9 if state.get("data_parallel_rank") is None else int(state["data_parallel_rank"]),
+                10**9 if state.get("global_rank") is None else int(state["global_rank"]),
+            ),
+        )
+        return {
+            "dump_dir": next(iter(dump_dirs)),
+            "enabled": next(iter(enabled_values)),
+            "worker_count": len(worker_states),
+            "workers": workers,
+        }
+
     async def get_runtime_eplb_step_interval(self) -> dict[str, Any]:
         if self._runtime_eplb_step_interval is None:
             raise ValueError(
@@ -1123,6 +1168,16 @@ class AsyncLLM(EngineClient):
         self._runtime_placement_routing_dump_dir = state["dump_dir"]
         return state
 
+    async def get_runtime_moe_dispatch_traffic_dump(self) -> dict[str, Any]:
+        worker_states = await self.collective_rpc(
+            "get_runtime_moe_dispatch_traffic_dump_state"
+        )
+        state = self._aggregate_runtime_moe_dispatch_traffic_dump_states(
+            worker_states
+        )
+        self._runtime_moe_dispatch_traffic_dump_dir = state["dump_dir"]
+        return state
+
     async def update_runtime_placement_routing_dump(
         self,
         *,
@@ -1143,6 +1198,25 @@ class AsyncLLM(EngineClient):
             normalized = None
         self._runtime_placement_routing_dump_dir = normalized
         self.model_config.placement_routing_dump_dir = normalized
+        return state
+
+    async def update_runtime_moe_dispatch_traffic_dump(
+        self,
+        *,
+        dump_dir: str | None,
+    ) -> dict[str, Any]:
+        worker_states = await self.collective_rpc(
+            "set_runtime_moe_dispatch_traffic_dump_dir",
+            args=(dump_dir,),
+        )
+        state = self._aggregate_runtime_moe_dispatch_traffic_dump_states(
+            worker_states
+        )
+        normalized = dump_dir.strip() if isinstance(dump_dir, str) else None
+        if normalized == "":
+            normalized = None
+        self._runtime_moe_dispatch_traffic_dump_dir = normalized
+        self.model_config.moe_dispatch_traffic_dump_dir = normalized
         return state
 
     async def reset_encoder_cache(self) -> None:

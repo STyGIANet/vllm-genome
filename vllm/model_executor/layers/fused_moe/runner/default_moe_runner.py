@@ -22,6 +22,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
+from vllm.model_executor.layers.fused_moe.dispatch_traffic_trace import (
+    is_moe_dispatch_traffic_dump_enabled,
+    maybe_dump_moe_dispatch_traffic,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -489,6 +493,12 @@ class DefaultMoERunner(MoERunner):
             shared_output = self._apply_shared_experts(shared_input, False)
 
         if self.quant_method.is_monolithic:
+            if is_moe_dispatch_traffic_dump_enabled(layer):
+                _, traced_topk_ids = self.router.peek_experts(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                )
+                maybe_dump_moe_dispatch_traffic(layer, traced_topk_ids)
             result = self.quant_method.apply_monolithic(
                 layer=layer,
                 x=hidden_states,
@@ -499,6 +509,7 @@ class DefaultMoERunner(MoERunner):
                 hidden_states=hidden_states,
                 router_logits=router_logits,
             )
+            maybe_dump_moe_dispatch_traffic(layer, topk_ids)
 
             result = self.quant_method.apply(
                 layer=layer,

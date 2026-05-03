@@ -18,6 +18,9 @@ export VLLM_SERVER_DEV_MODE=1
 # export VLLM_FUSED_MOE_SLEEP_BEFORE_DISPATCH_MS=2.5
 
 export TRACE_DIR=${SCRIPT_DIR}/traces/
+export TRAFFIC_DIR=${SCRIPT_DIR}/traffic/
+mkdir -p ${TRACE_DIR}
+mkdir -p ${TRAFFIC_DIR}
 
 vllm serve $MODEL \
 		--tensor-parallel-size 1 \
@@ -34,7 +37,8 @@ vllm serve $MODEL \
 		--eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
 		--placement-callback-path ${PLACEMENT_PATH} \
 		--placement-callback-func compute_placement \
-		--placement-routing-dump-dir ${TRACE_DIR}
+		--placement-routing-dump-dir ${TRACE_DIR} \
+		--moe-dispatch-traffic-dump-dir ${TRAFFIC_DIR} \
 		# --max-pending-requests-per-engine 256 \
 		# --enable-load-score-routing \
 		# --enable-kv-block-prefix-routing \

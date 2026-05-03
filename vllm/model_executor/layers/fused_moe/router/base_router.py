@@ -154,7 +154,12 @@ class BaseRouter(FusedMoERouter):
             self.indices_type_getter() if self.indices_type_getter is not None else None
         )
 
-    def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
+    def _apply_eplb_mapping(
+        self,
+        topk_ids: torch.Tensor,
+        *,
+        record_load: bool = True,
+    ) -> torch.Tensor:
         """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
         if self.enable_eplb:
             assert self.eplb_state.expert_load_view is not None
@@ -166,37 +171,38 @@ class BaseRouter(FusedMoERouter):
                 logical_replica_count=self.eplb_state.logical_replica_count,
             )
 
-            prefill_record_ranges: list[tuple[int, int]] | None = None
-            if is_forward_context_available():
-                forward_context = get_forward_context()
-                if bool(
-                    forward_context.additional_kwargs.get(
-                        "routing_capture_skip_expert_load", False
-                    )
-                ):
-                    return physical_topk_ids
-                capture_prefill_only = bool(
-                    forward_context.additional_kwargs.get(
-                        "routing_capture_prefill_only_for_placement", False
-                    )
-                )
-                if capture_prefill_only:
-                    prefill_record_ranges = list(
+            if record_load:
+                prefill_record_ranges: list[tuple[int, int]] | None = None
+                if is_forward_context_available():
+                    forward_context = get_forward_context()
+                    if bool(
                         forward_context.additional_kwargs.get(
-                            "routing_capture_prefill_ranges", []
+                            "routing_capture_skip_expert_load", False
+                        )
+                    ):
+                        return physical_topk_ids
+                    capture_prefill_only = bool(
+                        forward_context.additional_kwargs.get(
+                            "routing_capture_prefill_only_for_placement", False
                         )
                     )
+                    if capture_prefill_only:
+                        prefill_record_ranges = list(
+                            forward_context.additional_kwargs.get(
+                                "routing_capture_prefill_ranges", []
+                            )
+                        )
 
-            if prefill_record_ranges is None:
-                record_expert_load(
-                    physical_topk_ids, self.eplb_state.expert_load_view
-                )
-            else:
-                record_expert_load_ranges(
-                    physical_topk_ids,
-                    self.eplb_state.expert_load_view,
-                    prefill_record_ranges,
-                )
+                if prefill_record_ranges is None:
+                    record_expert_load(
+                        physical_topk_ids, self.eplb_state.expert_load_view
+                    )
+                else:
+                    record_expert_load_ranges(
+                        physical_topk_ids,
+                        self.eplb_state.expert_load_view,
+                        prefill_record_ranges,
+                    )
             return physical_topk_ids
         return topk_ids
 
@@ -423,4 +429,19 @@ class BaseRouter(FusedMoERouter):
         # Step 5: Convert indices dtype
         topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
 
+        return topk_weights, topk_ids
+
+    def peek_experts(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute expert routing without mutating capture or EPLB load state."""
+        self._validate_eplb_state()
+        indices_type = self._get_indices_type()
+        topk_weights, topk_ids = self._compute_routing(
+            hidden_states, router_logits, indices_type
+        )
+        topk_ids = self._apply_eplb_mapping(topk_ids, record_load=False)
+        topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
         return topk_weights, topk_ids

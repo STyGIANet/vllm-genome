@@ -235,6 +235,7 @@ class ForwardContext:
     # into the graph. Otherwise, the moe custom ops will pop a string from this list.
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
+    forward_pass_idx: int = -1
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
@@ -245,6 +246,7 @@ class ForwardContext:
 
 
 _forward_context: ForwardContext | None = None
+_forward_pass_counter: int = 0
 
 
 def get_forward_context() -> ForwardContext:
@@ -270,6 +272,7 @@ def create_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
+    forward_pass_idx: int = -1,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -286,6 +289,7 @@ def create_forward_context(
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
+        forward_pass_idx=forward_pass_idx,
         additional_kwargs=additional_kwargs or {},
     )
 
@@ -323,6 +327,7 @@ def set_forward_context(
     Here we can inject common logic for every model forward pass.
     """
     global forward_start_time
+    global _forward_pass_counter
     need_to_track_batchsize = track_batchsize and attn_metadata is not None
     if need_to_track_batchsize:
         forward_start_time = time.perf_counter()
@@ -371,6 +376,9 @@ def set_forward_context(
             **additional_forward_context,
         }
 
+    forward_pass_idx = _forward_pass_counter
+    _forward_pass_counter += 1
+
     forward_context = create_forward_context(
         attn_metadata,
         vllm_config,
@@ -381,6 +389,7 @@ def set_forward_context(
         slot_mapping,
         additional_kwargs,
         skip_compiled,
+        forward_pass_idx,
     )
 
     try:
