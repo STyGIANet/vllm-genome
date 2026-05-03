@@ -3630,12 +3630,32 @@ class GPUModelRunner(
         row_idx, col_idx = torch.triu_indices(
             flat_nodes.shape[1], flat_nodes.shape[1], offset=1, device=self.device
         )
-        src_nodes = flat_nodes[:, row_idx]
-        dst_nodes = flat_nodes[:, col_idx]
-        lo = torch.minimum(src_nodes, dst_nodes)
-        hi = torch.maximum(src_nodes, dst_nodes)
-        edge_ids = lo * (2 * num_nodes - lo - 1) // 2 + (hi - lo - 1)
-        edge_weights = torch.bincount(edge_ids.reshape(-1), minlength=num_edges)
+        pair_count = row_idx.numel()
+        if pair_count == 0:
+            return edge_weights, node_activation_counts, layer_ids, num_nodes
+
+        # Chunk pairwise edge construction to cap peak GPU memory usage.
+        # Each chunk materializes src/dst/lo/hi/edge_ids as int64 tensors of
+        # shape [total_tokens, chunk_pairs], so keep the chunk size small
+        # enough to fit comfortably alongside the model forward.
+        target_temp_bytes = 32 * 1024 * 1024
+        tensors_per_chunk = 5
+        bytes_per_pair = max(total_tokens, 1) * 8 * tensors_per_chunk
+        chunk_pairs = max(
+            1,
+            min(pair_count, target_temp_bytes // max(bytes_per_pair, 1)),
+        )
+
+        for start in range(0, pair_count, chunk_pairs):
+            end = min(start + chunk_pairs, pair_count)
+            src_nodes = flat_nodes[:, row_idx[start:end]]
+            dst_nodes = flat_nodes[:, col_idx[start:end]]
+            lo = torch.minimum(src_nodes, dst_nodes)
+            hi = torch.maximum(src_nodes, dst_nodes)
+            edge_ids = lo * (2 * num_nodes - lo - 1) // 2 + (hi - lo - 1)
+            edge_weights.add_(
+                torch.bincount(edge_ids.reshape(-1), minlength=num_edges)
+            )
 
         return edge_weights, node_activation_counts, layer_ids, num_nodes
 
@@ -8013,14 +8033,14 @@ class GPUModelRunner(
         self._prefix_learning_step_req_lengths = req_lengths
         self._prefix_learning_step_total_prompt_tokens = total_prompt_tokens
 
-        if trace_enabled:
-            logger.warning(
-                "PrefixTrace worker step_capture_begin ts_ns=%d reqs=%d prompt_tokens=%d duration_ms=%.3f",
-                start_ns,
-                len(active_req_ids),
-                total_prompt_tokens,
-                (time.perf_counter_ns() - start_ns) / 1e6,
-            )
+        # if trace_enabled:
+        #     logger.warning(
+        #         "PrefixTrace worker step_capture_begin ts_ns=%d reqs=%d prompt_tokens=%d duration_ms=%.3f",
+        #         start_ns,
+        #         len(active_req_ids),
+        #         total_prompt_tokens,
+        #         (time.perf_counter_ns() - start_ns) / 1e6,
+        #     )
 
     def _accumulate_prefix_learning_step_capture(self) -> None:
         trace_enabled = self._prefix_learning_trace_debug
@@ -8160,16 +8180,16 @@ class GPUModelRunner(
         self._prefix_learning_step_req_lengths = []
         self._prefix_learning_step_total_prompt_tokens = 0
         self._prefix_learning_step_topk_by_layer = {}
-        if trace_enabled:
-            logger.warning(
-                "PrefixTrace worker step_accumulate ts_ns=%d reqs=%d layers=%d captured_tokens=%d copy_enqueue_ms=%.3f duration_ms=%.3f",
-                start_ns,
-                req_count,
-                total_layers,
-                total_captured_tokens,
-                total_copy_enqueue_ms,
-                (time.perf_counter_ns() - start_ns) / 1e6,
-            )
+        # if trace_enabled:
+        #     logger.warning(
+        #         "PrefixTrace worker step_accumulate ts_ns=%d reqs=%d layers=%d captured_tokens=%d copy_enqueue_ms=%.3f duration_ms=%.3f",
+        #         start_ns,
+        #         req_count,
+        #         total_layers,
+        #         total_captured_tokens,
+        #         total_copy_enqueue_ms,
+        #         (time.perf_counter_ns() - start_ns) / 1e6,
+        #     )
 
     def _accumulate_prefix_learning_from_routing_snapshot(
         self,
@@ -8228,15 +8248,15 @@ class GPUModelRunner(
                     updated_reqs += 1
                     updated_pairs += int(valid_experts.numel())
 
-        if trace_enabled:
-            logger.warning(
-                "PrefixTrace worker snapshot_accumulate ts_ns=%d layers=%d req_updates=%d new_pairs=%d duration_ms=%.3f",
-                start_ns,
-                len(routing_snapshot),
-                updated_reqs,
-                updated_pairs,
-                (time.perf_counter_ns() - start_ns) / 1e6,
-            )
+        # if trace_enabled:
+        #     logger.warning(
+        #         "PrefixTrace worker snapshot_accumulate ts_ns=%d layers=%d req_updates=%d new_pairs=%d duration_ms=%.3f",
+        #         start_ns,
+        #         len(routing_snapshot),
+        #         updated_reqs,
+        #         updated_pairs,
+        #         (time.perf_counter_ns() - start_ns) / 1e6,
+        #     )
 
     def _extract_prefix_learning_pairs_for_slot(
         self, slot: int
@@ -8299,20 +8319,20 @@ class GPUModelRunner(
         self._prefix_learning_step_topk_by_layer.setdefault(
             int(layer_id), []).append(captured)
         mark_stage("store")
-        if trace_enabled:
-            logger.warning(
-                "PrefixTrace worker hook_capture ts_ns=%d layer_id=%d ranges=%d captured_tokens=%d active_reqs=%d topk=%d slice_ms=%.3f concat_ms=%.3f store_ms=%.3f duration_ms=%.3f",
-                start_ns,
-                int(layer_id),
-                len(self._current_prefill_capture_ranges),
-                int(captured.shape[0]),
-                len(self._prefix_learning_step_req_ids),
-                int(captured.shape[1]) if captured.ndim >= 2 else 0,
-                stage_ms.get("slice", 0.0),
-                stage_ms.get("concat", 0.0),
-                stage_ms.get("store", 0.0),
-                (time.perf_counter_ns() - start_ns) / 1e6,
-            )
+        # if trace_enabled:
+        #     logger.warning(
+        #         "PrefixTrace worker hook_capture ts_ns=%d layer_id=%d ranges=%d captured_tokens=%d active_reqs=%d topk=%d slice_ms=%.3f concat_ms=%.3f store_ms=%.3f duration_ms=%.3f",
+        #         start_ns,
+        #         int(layer_id),
+        #         len(self._current_prefill_capture_ranges),
+        #         int(captured.shape[0]),
+        #         len(self._prefix_learning_step_req_ids),
+        #         int(captured.shape[1]) if captured.ndim >= 2 else 0,
+        #         stage_ms.get("slice", 0.0),
+        #         stage_ms.get("concat", 0.0),
+        #         stage_ms.get("store", 0.0),
+        #         (time.perf_counter_ns() - start_ns) / 1e6,
+        #     )
 
     def _get_prefix_learning_pairs_for_requests(
         self, req_ids: list[str]
@@ -8326,40 +8346,40 @@ class GPUModelRunner(
         for req_id in req_ids:
             slot = self._prefix_learning_req_slot_by_id.get(req_id)
             if slot is None:
-                if trace_enabled:
-                    logger.warning(
-                        "PrefixTrace worker pairs_take_missing ts_ns=%d request_id=%s",
-                        time.perf_counter_ns(),
-                        req_id,
-                    )
+                # if trace_enabled:
+                #     logger.warning(
+                #         "PrefixTrace worker pairs_take_missing ts_ns=%d request_id=%s",
+                #         time.perf_counter_ns(),
+                #         req_id,
+                #     )
                 continue
             pairs = self._extract_prefix_learning_pairs_for_slot(slot)
             if not pairs:
                 self._free_prefix_learning_slot(req_id)
-                if trace_enabled:
-                    logger.warning(
-                        "PrefixTrace worker pairs_take_empty ts_ns=%d request_id=%s",
-                        time.perf_counter_ns(),
-                        req_id,
-                    )
+                # if trace_enabled:
+                #     logger.warning(
+                #         "PrefixTrace worker pairs_take_empty ts_ns=%d request_id=%s",
+                #         time.perf_counter_ns(),
+                #         req_id,
+                #     )
                 continue
             results[req_id] = pairs
-            if trace_enabled:
-                logger.warning(
-                    "PrefixTrace worker pairs_take ts_ns=%d request_id=%s pairs=%d",
-                    time.perf_counter_ns(),
-                    req_id,
-                    len(results[req_id]),
-                )
+            # if trace_enabled:
+                # logger.warning(
+                #     "PrefixTrace worker pairs_take ts_ns=%d request_id=%s pairs=%d",
+                #     time.perf_counter_ns(),
+                #     req_id,
+                #     len(results[req_id]),
+                # )
             self._free_prefix_learning_slot(req_id)
-        if trace_enabled:
-            logger.warning(
-                "PrefixTrace worker pairs_take_done ts_ns=%d reqs=%d emitted=%d duration_ms=%.3f",
-                start_ns,
-                len(req_ids),
-                len(results),
-                (time.perf_counter_ns() - start_ns) / 1e6,
-            )
+        # if trace_enabled:
+            # logger.warning(
+            #     "PrefixTrace worker pairs_take_done ts_ns=%d reqs=%d emitted=%d duration_ms=%.3f",
+            #     start_ns,
+            #     len(req_ids),
+            #     len(results),
+            #     (time.perf_counter_ns() - start_ns) / 1e6,
+            # )
         return results or None
 
     def _get_prefix_learning_owners_for_requests(

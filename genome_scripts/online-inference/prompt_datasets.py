@@ -5,6 +5,10 @@ from typing import Any, Callable
 DatasetFormatter = Callable[[dict[str, Any]], dict[str, Any] | None]
 DatasetSpec = tuple[str, str | None, DatasetFormatter, str]
 
+MIXED_HOTPOT_BOOLQ_NAME = "synthetic/mixed_hotpot_boolq"
+MIXED_DATASET_SHUFFLE_SEED = 17
+MIXED_DATASET_STRIDE = 1
+
 
 def format_hotpotqa(ex):
     try:
@@ -97,6 +101,10 @@ def format_mmlu(ex):
         "choices": list(ex["choices"]),
         "answer": int(answer),
     }
+
+
+def format_passthrough(ex):
+    return ex
 
 
 MMLU_SUBJECTS: list[str] = [
@@ -209,6 +217,12 @@ ALL_DATASETS: dict[str, DatasetSpec] = {
         format_boolq,
         "validation",
     ),
+    "mixed_hotpot_boolq": (
+        MIXED_HOTPOT_BOOLQ_NAME,
+        None,
+        format_passthrough,
+        "validation",
+    ),
     "piqa": (
         "gimmaru/piqa",
         None,
@@ -231,6 +245,7 @@ ALL_DATASETS.update(
 
 
 SEND_PROMPTS_DATASETS: list[DatasetSpec] = [
+    ALL_DATASETS["mixed_hotpot_boolq"],
     ALL_DATASETS["piqa"],
     *[ALL_DATASETS[f"mmlu_{subject}"] for subject in MMLU_SUBJECTS],
     ALL_DATASETS["hotpot_qa_fullwiki"],

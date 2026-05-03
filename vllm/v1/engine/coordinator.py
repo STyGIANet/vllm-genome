@@ -346,7 +346,7 @@ class DPCoordinatorProc:
             score = index.score(prompt_token_ids)
             if score > 0.0:
                 scores[rank] = score
-        return scores
+        return self._normalize_score_map(scores)
 
     def _get_kv_block_prefix_scores(
         self,
@@ -369,7 +369,7 @@ class DPCoordinatorProc:
             )
             if matched_blocks > 0:
                 scores[rank] = matched_blocks / query.kv_total_blocks
-        return scores
+        return self._normalize_score_map(scores)
 
     def _get_load_scores(self) -> dict[int, float]:
         if not self.load_score_enabled or not self.engines:
@@ -382,13 +382,87 @@ class DPCoordinatorProc:
         min_raw = min(raw_scores)
         max_raw = max(raw_scores)
         if max_raw == min_raw:
-            return {idx: 1.0 for idx in range(len(raw_scores))}
+            return self._normalize_score_map(
+                {idx: 1.0 for idx in range(len(raw_scores))}
+            )
 
         span = float(max_raw - min_raw)
-        return {
+        return self._normalize_score_map({
             idx: (max_raw - raw_score) / span
             for idx, raw_score in enumerate(raw_scores)
+        })
+
+    @staticmethod
+    def _normalize_score_map(scores: dict[int, float]) -> dict[int, float]:
+        if not scores:
+            return {}
+
+        total = sum(score for score in scores.values() if score > 0.0)
+        if total <= 0.0:
+            return {}
+
+        return {
+            idx: score / total
+            for idx, score in scores.items()
+            if score > 0.0
         }
+
+    def _get_routing_score_precedence(
+        self,
+        expert_scores: dict[int, float],
+        kv_scores: dict[int, float],
+        load_scores: dict[int, float],
+    ) -> list[tuple[str, float, dict[int, float]]]:
+        precedence: list[tuple[str, float, dict[int, float]]] = []
+        if self.expert_affinity_weight > 0.0:
+            precedence.append(
+                ("expert_affinity", self.expert_affinity_weight, expert_scores)
+            )
+        if self.kv_block_prefix_weight > 0.0:
+            precedence.append(
+                ("kv_block_prefix", self.kv_block_prefix_weight, kv_scores)
+            )
+        if self.load_score_weight > 0.0:
+            precedence.append(("load_score", self.load_score_weight, load_scores))
+
+        tie_break_order = {
+            "expert_affinity": 0,
+            "kv_block_prefix": 1,
+            "load_score": 2,
+        }
+        precedence.sort(key=lambda item: (-item[1], tie_break_order[item[0]]))
+        return precedence
+
+    def _select_candidates_by_routing_precedence(
+        self,
+        expert_scores: dict[int, float],
+        kv_scores: dict[int, float],
+        load_scores: dict[int, float],
+    ) -> tuple[list[int] | None, list[str]]:
+        precedence = self._get_routing_score_precedence(
+            expert_scores,
+            kv_scores,
+            load_scores,
+        )
+        if not precedence:
+            return None, []
+
+        candidate_indices = list(range(len(self.engines)))
+        selection_trace: list[str] = []
+        for name, _, scores in precedence:
+            candidate_scores = {
+                idx: scores.get(idx, 0.0) for idx in candidate_indices
+            }
+            best_score = max(candidate_scores.values(), default=0.0)
+            candidate_indices = [
+                idx for idx, score in candidate_scores.items()
+                if score == best_score
+            ]
+            selection_trace.append(f"{name}:{best_score:.4f}->{candidate_indices}")
+            if len(candidate_indices) <= 1:
+                break
+
+        return candidate_indices, selection_trace
 
     # ///////////// Expert-based load balancing
     @staticmethod
@@ -447,31 +521,15 @@ class DPCoordinatorProc:
             if self.load_score_weight > 0.0
             else {}
         )
-        score_by_index: dict[int, float] = {}
+        matched_indices, selection_trace = (
+            self._select_candidates_by_routing_precedence(
+                expert_scores,
+                kv_scores,
+                load_scores,
+            )
+        )
 
-        if self.expert_affinity_weight > 0.0:
-            for idx, score in expert_scores.items():
-                score_by_index[idx] = score_by_index.get(idx, 0.0) + (
-                    self.expert_affinity_weight * score
-                )
-
-        if self.kv_block_prefix_weight > 0.0:
-            for idx, score in kv_scores.items():
-                score_by_index[idx] = score_by_index.get(idx, 0.0) + (
-                    self.kv_block_prefix_weight * score
-                )
-
-        if self.load_score_weight > 0.0:
-            for idx, score in load_scores.items():
-                score_by_index[idx] = score_by_index.get(idx, 0.0) + (
-                    self.load_score_weight * score
-                )
-
-        if score_by_index:
-            best_score = max(score_by_index.values())
-            matched_indices = [
-                idx for idx, score in score_by_index.items() if score == best_score
-            ]
+        if matched_indices is not None:
             chosen_index = self._choose_engine_by_load(
                 query.client_index,
                 query.client_count,
@@ -480,19 +538,18 @@ class DPCoordinatorProc:
             if self.load_balancer_debug:
                 logger.warning(
                     "LB route request_id=%s expert_scores=%s kv_scores=%s "
-                    "load_scores=%s final_scores=%s chosen_engine=%d best_score=%.4f",
+                    "load_scores=%s precedence=%s chosen_engine=%d",
                     query.request_id,
                     self._format_score_map(expert_scores),
                     self._format_score_map(kv_scores),
                     self._format_score_map(load_scores),
-                    self._format_score_map(score_by_index),
+                    selection_trace,
                     chosen_index,
-                    best_score,
                 )
             return CoordinatorRouteResponse(
                 call_id=query.call_id,
                 engine_index=chosen_index,
-                score=best_score,
+                score=1.0 if len(matched_indices) == 1 else 0.0,
             )
 
         chosen_index = self._choose_engine_by_load(

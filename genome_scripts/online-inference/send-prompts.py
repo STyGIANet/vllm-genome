@@ -8,11 +8,18 @@ import re
 import os
 import math
 
-from datasets import load_dataset
+from datasets import Dataset, DatasetDict, load_dataset
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 
-from prompt_datasets import SEND_PROMPTS_DATASETS, SYSTEM_PROMPTS
+from prompt_datasets import (
+    ALL_DATASETS,
+    MIXED_DATASET_SHUFFLE_SEED,
+    MIXED_DATASET_STRIDE,
+    MIXED_HOTPOT_BOOLQ_NAME,
+    SEND_PROMPTS_DATASETS,
+    SYSTEM_PROMPTS,
+)
 # Change which prompt datasets to test in prompt_datasets.py at the end of the file
 
 HOST = "http://0.0.0.0:8000"
@@ -21,7 +28,7 @@ MODEL = "deepseek-ai/deepseek-moe-16b-chat"
 POISSON_RATE_MODE = "tok_per_sec"
 POISSON_REQUESTS_PER_SEC = 1.0
 # POISSON_INPUT_TOKENS_PER_SEC = None
-POISSON_INPUT_TOKENS_PER_SEC = 16000
+POISSON_INPUT_TOKENS_PER_SEC = 24000
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -107,6 +114,37 @@ def percentile(values, q):
 
 
 def load_dataset_compat(name, subset):
+    if name == MIXED_HOTPOT_BOOLQ_NAME:
+        hotpot_name, hotpot_subset, hotpot_formatter, hotpot_split = (
+            ALL_DATASETS["hotpot_qa_fullwiki"]
+        )
+        boolq_name, boolq_subset, boolq_formatter, boolq_split = ALL_DATASETS["boolq"]
+
+        hotpot_ds = load_dataset_compat(hotpot_name, hotpot_subset)[hotpot_split]
+        boolq_ds = load_dataset_compat(boolq_name, boolq_subset)[boolq_split]
+
+        hotpot_ds = hotpot_ds.select(range(0, len(hotpot_ds), MIXED_DATASET_STRIDE))
+        boolq_ds = boolq_ds.select(range(0, len(boolq_ds), MIXED_DATASET_STRIDE))
+
+        mixed_examples = [
+            formatted
+            for formatted in (
+                hotpot_formatter(ex) for ex in hotpot_ds
+            )
+            if formatted is not None
+        ]
+        mixed_examples.extend(
+            formatted
+            for formatted in (
+                boolq_formatter(ex) for ex in boolq_ds
+            )
+            if formatted is not None
+        )
+
+        mixed_rng = random.Random(MIXED_DATASET_SHUFFLE_SEED)
+        mixed_rng.shuffle(mixed_examples)
+        return DatasetDict({"validation": Dataset.from_list(mixed_examples)})
+
     override = PARQUET_DATASET_OVERRIDES.get(name)
     if override is not None:
         data_files = {
@@ -360,18 +398,18 @@ async def run_dataset(name, subset, formatter, split):
     return stats
 
 def set_vllm_config(expert, kv, load, step_interval, expert_dump_dir, traffic_dump_dir):
-    # resp = requests.post(
-    #   f"{HOST}/load_balancer/weights",
-    #   json={
-    #       "kv_block_prefix_routing_weight": kv,
-    #       "load_score_routing_weight": load,
-    #       "eplb_step_interval": step_interval, # this is a copy in the frontend
-    #       "expert_affinity_routing_weight": expert,
-    #   },
-    #   timeout=10,
-    # )
-    # resp.raise_for_status()
-    # print("POST /load_balancer/weights ->", resp.json())
+    resp = requests.post(
+      f"{HOST}/load_balancer/weights",
+      json={
+          "kv_block_prefix_routing_weight": kv,
+          "load_score_routing_weight": load,
+          "eplb_step_interval": step_interval, # this is a copy in the frontend
+          "expert_affinity_routing_weight": expert,
+      },
+      timeout=10,
+    )
+    resp.raise_for_status()
+    print("POST /load_balancer/weights ->", resp.json())
 
 
     # eplb frequency of expert placement updates
@@ -413,12 +451,12 @@ def set_vllm_config(expert, kv, load, step_interval, expert_dump_dir, traffic_du
 
     
     # Checking if the updates are applied
-    # resp = requests.get(
-    #   f"{HOST}/load_balancer/weights",
-    #   timeout=10,
-    # )
-    # resp.raise_for_status()
-    # print("GET /load_balancer/weights ->", resp.json())
+    resp = requests.get(
+      f"{HOST}/load_balancer/weights",
+      timeout=10,
+    )
+    resp.raise_for_status()
+    print("GET /load_balancer/weights ->", resp.json())
 
     resp = requests.get(
       f"{HOST}/eplb/step_interval",
@@ -517,8 +555,8 @@ async def main():
     for line in summary_lines:
         print(line)
 
+    os.makedirs(summary_dir, exist_ok=True)
     summary_path = build_summary_path(summary_dir)
-    # os.makedirs(summary_path, exist_ok=True)
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write("\n".join(summary_lines) + "\n")
     print(f"Wrote final summary to {summary_path}")

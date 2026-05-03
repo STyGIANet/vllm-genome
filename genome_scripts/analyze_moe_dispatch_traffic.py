@@ -15,7 +15,7 @@ import seaborn as sns
 
 import matplotlib
 import numpy as np
-
+import pandas as pd
 
 
 # Example:
@@ -667,3 +667,49 @@ for layer in range(1,len(data["per_pass_per_layer"][100])+1):
     fig, ax = plt.subplots(1,1)
     ax = sns.heatmap(a2a, cmap='coolwarm')
     ax.set_title(f'layer={layer}, pass={pass_id}')
+    
+    
+#%%
+
+
+dfeplb = pd.read_csv("summary-eplb/deepseek-moe-16b-chat_final_summary.csv")
+
+dfmetis = pd.read_csv("summary-metis/deepseek-moe-16b-chat_final_summary.csv")
+
+
+figttft, axttft = plt.subplots(1,1,figsize=(16,4))
+figthroughput, axthroughput = plt.subplots(1,1,figsize=(16,4))
+
+ttft99eplb = list()
+throughputeplb = list()
+ttft99metis = list()
+throughputmetis = list()
+
+for dataset in dfeplb["dataset"]:
+    ttft99eplb.append(dfeplb[(dfeplb["dataset"]==dataset)]["svcttft99"])
+    ttft99metis.append(dfmetis[(dfmetis["dataset"]==dataset)]["svcttft99"])
+    
+    throughputeplb.append(dfeplb[(dfeplb["dataset"]==dataset)]["throughput"])
+    throughputmetis.append(dfmetis[(dfmetis["dataset"]==dataset)]["throughput"])
+    
+
+datasets = dfeplb["dataset"]
+
+# axttft.plot(np.arange(len(datasets)), ttft99eplb, c='r')
+# axttft.plot(np.arange(len(datasets)), ttft99metis, c='k')
+
+
+# axthroughput.plot(np.arange(len(datasets)), throughputeplb, c='r')
+# axthroughput.plot(np.arange(len(datasets)), throughputmetis, c='k')
+
+axttft.plot(np.arange(len(datasets)), [ttft99eplb[i]/ttft99metis[i] for i in range(len(datasets))], c='r')
+axttft.axhline(y=1, c='k', ls='--')
+axttft.set_xticks(np.arange(len(datasets)))
+axttft.set_xticklabels(datasets,fontsize=8,rotation=45)
+axttft.set_ylabel("TTFT 99-pct Speedup $x$")
+
+axthroughput.plot(np.arange(len(datasets)), [throughputmetis[i]/throughputeplb[i] for i in range(len(datasets))], c='r')
+axthroughput.axhline(y=1, c='k', ls='--')
+axthroughput.set_xticks(np.arange(len(datasets)))
+axthroughput.set_xticklabels(datasets,fontsize=8,rotation=45)
+axthroughput.set_ylabel("Throughput Speedup $x$")
