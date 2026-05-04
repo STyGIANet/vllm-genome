@@ -28,7 +28,7 @@ MODEL = "deepseek-ai/deepseek-moe-16b-chat"
 POISSON_RATE_MODE = "tok_per_sec"
 POISSON_REQUESTS_PER_SEC = 1.0
 # POISSON_INPUT_TOKENS_PER_SEC = None
-POISSON_INPUT_TOKENS_PER_SEC = 24000
+POISSON_INPUT_TOKENS_PER_SEC = 16000
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
