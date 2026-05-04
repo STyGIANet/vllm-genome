@@ -245,8 +245,8 @@ ALL_DATASETS.update(
 
 
 SEND_PROMPTS_DATASETS: list[DatasetSpec] = [
-    ALL_DATASETS["mixed_hotpot_boolq"],
     ALL_DATASETS["piqa"],
+    ALL_DATASETS["mixed_hotpot_boolq"],
     *[ALL_DATASETS[f"mmlu_{subject}"] for subject in MMLU_SUBJECTS],
     ALL_DATASETS["hotpot_qa_fullwiki"],
     ALL_DATASETS["mmlu_all"],

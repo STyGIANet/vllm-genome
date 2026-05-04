@@ -222,7 +222,7 @@ def build_user_prompt(ex):
 def prepare_example(ex):
     user_prompt = build_user_prompt(ex)
     messages = [
-        {"role": "system", "content": pick_sysprompt_random(SYSTEM_PROMPTS)},
+        {"role": "system", "content": "Always answer in English."}, # pick_sysprompt_random(SYSTEM_PROMPTS)
         {"role": "user", "content": user_prompt},
     ]
     return {
