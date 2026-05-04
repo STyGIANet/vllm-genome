@@ -13,6 +13,7 @@ export TRAFFIC_DIR=${SCRIPT_DIR}/traffic/
 # mkdir -p ${TRACE_DIR}
 # mkdir -p ${TRAFFIC_DIR}
 
+##############################################################
 echo "Running Moor 0 0 0 experiment"
 vllm serve $MODEL \
 		--tensor-parallel-size 1 \
@@ -28,16 +29,13 @@ vllm serve $MODEL \
 		--enable-eplb \
 		--eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
 		--placement-callback-path ${PLACEMENT_PATH} \
-		--placement-callback-func compute_placement &
-		# --load-balancer-debug \
-		# --moe-dispatch-traffic-dump-dir ${TRAFFIC_DIR} \
-		# --placement-routing-dump-dir ${TRACE_DIR} \
-		# --eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
+		--placement-callback-func compute_placement  > /dev/null 2> /dev/null&
 
+sleep 60
 
-sleep 30
-
-python3 python send-prompts.py 1 2 3 64 ${SCRIPT_DIR}/traces-moor-0-0-0/ ${SCRIPT_DIR}/traffic-moor-0-0-0/ ${SCRIPT_DIR}/../summary-moor-0-0-0/
+mkdir -p ${SCRIPT_DIR}/../summary-moor-0-0-0
+python3 python send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-moor-0-0-0/ ${SCRIPT_DIR}/traffic-moor-0-0-0/ ${SCRIPT_DIR}/../summary-moor-0-0-0/ \
+	> ${SCRIPT_DIR}/../summary-moor-0-0-0/all-results.txt 2> ${SCRIPT_DIR}/../summary-moor-0-0-0/all-results.txt
 
 
 # cleanup
@@ -60,14 +58,12 @@ vllm serve $MODEL \
 		--load-score-routing-weight 0.5 \
 		--enable-eplb \
 		--eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' > /dev/null 2> /dev/null&
-		# --load-balancer-debug \
-		# --moe-dispatch-traffic-dump-dir ${TRAFFIC_DIR} \
-		# --placement-routing-dump-dir ${TRACE_DIR} \
 
+sleep 60
 
-sleep 30
-
-python3 python send-prompts.py 1 2 3 64 ${SCRIPT_DIR}/traces-eplb/ ${SCRIPT_DIR}/traffic-eplb/ ${SCRIPT_DIR}/../summary-eplb/
+mkdir -p ${SCRIPT_DIR}/../summary-eplb
+python3 python send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-eplb/ ${SCRIPT_DIR}/traffic-eplb/ ${SCRIPT_DIR}/../summary-eplb/ \
+	> ${SCRIPT_DIR}/../summary-eplb/all-results.txt 2> ${SCRIPT_DIR}/../summary-eplb/all-results.txt
 
 
 # cleanup
@@ -99,9 +95,11 @@ vllm serve $MODEL \
 		--prefix-learning-algorithm prefixtrie > /dev/null 2> /dev/null &
 
 
-sleep 30
+sleep 60
 
-python3 python send-prompts.py 1 2 3 64 ${SCRIPT_DIR}/traces-moor-1-2-3/ ${SCRIPT_DIR}/traffic-moor-1-2-3/ ${SCRIPT_DIR}/../summary-moor-1-2-3/ 
+mkdir -p ${SCRIPT_DIR}/../summary-moor-1-2-3
+python3 python send-prompts.py 1 2 3 64 ${SCRIPT_DIR}/traces-moor-1-2-3/ ${SCRIPT_DIR}/traffic-moor-1-2-3/ ${SCRIPT_DIR}/../summary-moor-1-2-3/ \
+	> ${SCRIPT_DIR}/../summary-moor-1-2-3/all-results.txt 2> ${SCRIPT_DIR}/../summary-moor-1-2-3/all-results.txt
 
 
 # cleanup
@@ -133,9 +131,11 @@ vllm serve $MODEL \
 		--prefix-learning-algorithm prefixtrie > /dev/null 2> /dev/null &
 
 
-sleep 30
+sleep 60
 
-python3 python send-prompts.py 3 2 1 64 ${SCRIPT_DIR}/traces-moor-3-2-1/ ${SCRIPT_DIR}/traffic-moor-3-2-1/ ${SCRIPT_DIR}/../summary-moor-3-2-1/
+mkdir -p ${SCRIPT_DIR}/../summary-moor-3-2-1
+python3 python send-prompts.py 3 2 1 64 ${SCRIPT_DIR}/traces-moor-3-2-1/ ${SCRIPT_DIR}/traffic-moor-3-2-1/ ${SCRIPT_DIR}/../summary-moor-3-2-1/ \
+	> ${SCRIPT_DIR}/../summary-moor-3-2-1/all-results.txt 2> ${SCRIPT_DIR}/../summary-moor-3-2-1/all-results.txt
 
 
 # cleanup
@@ -167,9 +167,11 @@ vllm serve $MODEL \
 		--prefix-learning-algorithm prefixtrie > /dev/null 2> /dev/null &
 
 
-sleep 30
+sleep 60
 
-python3 python send-prompts.py 2 3 1 64 ${SCRIPT_DIR}/traces-moor-2-3-1/ ${SCRIPT_DIR}/traffic-moor-2-3-1/ ${SCRIPT_DIR}/../summary-moor-2-3-1/
+mkdir -p ${SCRIPT_DIR}/../summary-moor-2-3-1
+python3 python send-prompts.py 2 3 1 64 ${SCRIPT_DIR}/traces-moor-2-3-1/ ${SCRIPT_DIR}/traffic-moor-2-3-1/ ${SCRIPT_DIR}/../summary-moor-2-3-1/ \
+	> ${SCRIPT_DIR}/../summary-moor-2-3-1/all-results.txt 2> ${SCRIPT_DIR}/../summary-moor-2-3-1/all-results.txt
 
 
 # cleanup

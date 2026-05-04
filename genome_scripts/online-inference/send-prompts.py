@@ -8,12 +8,13 @@ import re
 import os
 import math
 
-from datasets import Dataset, DatasetDict, load_dataset
+from datasets import Dataset, DatasetDict, get_dataset_config_names, load_dataset
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 
 from prompt_datasets import (
     ALL_DATASETS,
+    BBH_ALL_NAME,
     MIXED_DATASET_SHUFFLE_SEED,
     MIXED_DATASET_STRIDE,
     MIXED_HOTPOT_BOOLQ_NAME,
@@ -145,6 +146,22 @@ def load_dataset_compat(name, subset):
         mixed_rng.shuffle(mixed_examples)
         return DatasetDict({"validation": Dataset.from_list(mixed_examples)})
 
+    if name == BBH_ALL_NAME:
+        bbh_configs = sorted(get_dataset_config_names("lukaemon/bbh"))
+        bbh_examples: list[dict[str, str]] = []
+
+        for config_name in bbh_configs:
+            subset_ds = load_dataset("lukaemon/bbh", config_name)["test"]
+            bbh_examples.extend(
+                {
+                    "question": ex["input"],
+                    "task": config_name,
+                }
+                for ex in subset_ds
+            )
+
+        return DatasetDict({"test": Dataset.from_list(bbh_examples)})
+
     override = PARQUET_DATASET_OVERRIDES.get(name)
     if override is not None:
         data_files = {
@@ -210,7 +227,10 @@ async def sleep_until_ns(target_ns):
 
 
 def build_user_prompt(ex):
-    choices = ex["choices"]
+    choices = ex.get("choices")
+    if not choices:
+        return f"{ex['question']}\nAnswer concisely."
+
     letters = [chr(65 + i) for i in range(len(choices))]
     options = "\n".join([f"{letters[i]}. {c}" for i, c in enumerate(choices)])
 
@@ -235,8 +255,7 @@ def prepare_example(ex):
 
 async def ask(session, sem, idx, ex, scheduled_arrival_ns):
     async with sem:
-        choices = ex["choices"]
-        answer = ex["answer"]
+        choices = ex.get("choices")
         payload = {
             "model": MODEL,
             "messages": ex["messages"],
@@ -252,8 +271,10 @@ async def ask(session, sem, idx, ex, scheduled_arrival_ns):
             try:
                 data = await resp.json()
                 raw_pred = data["choices"][0]["message"]["content"]
-                pred = extract_choice(raw_pred, len(choices))
-                # pred = data["choices"][0]["message"]["content"].strip()
+                if choices and answer is not None:
+                    pred = extract_choice(raw_pred, len(choices))
+                else:
+                    pred = raw_pred.strip()
             except Exception:
                 pred = "ERROR"
 
@@ -276,8 +297,6 @@ async def ask(session, sem, idx, ex, scheduled_arrival_ns):
         )
 
         return {
-            "pred": pred,
-            "gt": chr(65 + answer),
             "latency": total_latency,
             "ttft": ttft,
             "service_ttft": service_ttft,
@@ -369,8 +388,6 @@ async def run_dataset(name, subset, formatter, split):
     service_ttft_p95 = percentile(service_ttft_values, 0.95)
     service_ttft_p99 = percentile(service_ttft_values, 0.99)
     throughput = (total_input + total_output) / total_time
-    # correct = sum(1 for r in measured if r["pred"].startswith(r["gt"]))
-    correct = sum(1 for r in measured if r["pred"] == r["gt"])
 
     stats = {
         "dataset": name,
@@ -382,7 +399,6 @@ async def run_dataset(name, subset, formatter, split):
         "service_ttft_p95": service_ttft_p95,
         "service_ttft_p99": service_ttft_p99,
         "throughput": throughput,
-        "accuracy": correct / len(measured),
     }
 
     print(
@@ -391,8 +407,7 @@ async def run_dataset(name, subset, formatter, split):
         f"SVC_TTFT_P50={service_ttft_p50:.4f}s | "
         f"SVC_TTFT_P95={service_ttft_p95:.4f}s | "
         f"SVC_TTFT_P99={service_ttft_p99:.4f}s | "
-        f"Throughput={throughput:.1f} tok/s | "
-        f"Acc={stats['accuracy']:.3f}"
+        f"Throughput={throughput:.1f} tok/s"
     )
 
     return stats
@@ -499,7 +514,7 @@ def build_summary_path(root_dump_dir):
 
 
 def format_summary_lines(results):
-    lines = ["dataset,ttft,svcttft,svcttft50,svcttft95,svcttft99,throughput,accuracy"]
+    lines = ["dataset,ttft,svcttft,svcttft50,svcttft95,svcttft99,throughput"]
     for r in results:
         lines.append(
             f"{r['dataset']}/{r['subset']},"
@@ -508,8 +523,7 @@ def format_summary_lines(results):
             f"{r['service_ttft_p50']:.3f},"
             f"{r['service_ttft_p95']:.3f},"
             f"{r['service_ttft_p99']:.3f},"
-            f"{r['throughput']:.1f},"
-            f"{r['accuracy']:.3f}"
+            f"{r['throughput']:.1f}"
         )
     return lines
 
@@ -548,8 +562,7 @@ async def main():
             f"SVC_TTFT_P50={stats['service_ttft_p50']:.3f}s | "
             f"SVC_TTFT_P95={stats['service_ttft_p95']:.3f}s | "
             f"SVC_TTFT_P99={stats['service_ttft_p99']:.3f}s | "
-            f"Throughput={stats['throughput']:.1f} tok/s | "
-            f"Acc={stats['accuracy']:.3f}"
+            f"Throughput={stats['throughput']:.1f} tok/s"
         )
 
     summary_lines = format_summary_lines(results)

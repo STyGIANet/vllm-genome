@@ -6,6 +6,7 @@ DatasetFormatter = Callable[[dict[str, Any]], dict[str, Any] | None]
 DatasetSpec = tuple[str, str | None, DatasetFormatter, str]
 
 MIXED_HOTPOT_BOOLQ_NAME = "synthetic/mixed_hotpot_boolq"
+BBH_ALL_NAME = "synthetic/bbh_all"
 MIXED_DATASET_SHUFFLE_SEED = 17
 MIXED_DATASET_STRIDE = 10
 
@@ -105,6 +106,37 @@ def format_mmlu(ex):
 
 def format_passthrough(ex):
     return ex
+
+
+def format_humaneval(ex):
+    return {
+        "question": (
+            "Complete the following Python function.\n\n"
+            f"{ex['prompt']}"
+        ),
+    }
+
+
+def format_mbpp(ex):
+    prompt = ex.get("prompt") or ex.get("text") or ""
+    return {
+        "question": (
+            "Write Python code for the following task.\n\n"
+            f"{prompt}"
+        ),
+    }
+
+
+def format_gsm8k(ex):
+    return {
+        "question": ex["question"],
+    }
+
+
+def format_bbh(ex):
+    return {
+        "question": ex["input"],
+    }
 
 
 MMLU_SUBJECTS: list[str] = [
@@ -223,11 +255,35 @@ ALL_DATASETS: dict[str, DatasetSpec] = {
         format_passthrough,
         "validation",
     ),
+    "bbh_all": (
+        BBH_ALL_NAME,
+        None,
+        format_passthrough,
+        "test",
+    ),
     "piqa": (
         "gimmaru/piqa",
         None,
         format_piqa,
         "validation",
+    ),
+    "humaneval": (
+        "openai/openai_humaneval",
+        None,
+        format_humaneval,
+        "test",
+    ),
+    "mbpp_sanitized": (
+        "mbpp",
+        "sanitized",
+        format_mbpp,
+        "test",
+    ),
+    "gsm8k_main": (
+        "openai/gsm8k",
+        "main",
+        format_gsm8k,
+        "test",
     ),
 }
 
@@ -245,18 +301,78 @@ ALL_DATASETS.update(
 
 
 SEND_PROMPTS_DATASETS: list[DatasetSpec] = [
+    ALL_DATASETS["gsm8k_main"],
+    ALL_DATASETS["bbh_all"],
+    ALL_DATASETS["humaneval"],
     ALL_DATASETS["hotpot_qa_fullwiki"],
-    ALL_DATASETS["piqa"],
     ALL_DATASETS["mixed_hotpot_boolq"],
-    *[ALL_DATASETS[f"mmlu_{subject}"] for subject in MMLU_SUBJECTS],
+    ALL_DATASETS["mmlu_abstract_algebra"],
+    ALL_DATASETS["mmlu_astronomy"],
+    ALL_DATASETS["mmlu_business_ethics"],
+    ALL_DATASETS["mmlu_clinical_knowledge"],
+    ALL_DATASETS["mmlu_college_biology"],
+    ALL_DATASETS["mmlu_college_chemistry"],
+    ALL_DATASETS["mmlu_conceptual_physics"],
+    ALL_DATASETS["mmlu_elementary_mathematics"],
+    ALL_DATASETS["mmlu_formal_logic"],
+    ALL_DATASETS["mmlu_global_facts"],
+    ALL_DATASETS["mmlu_high_school_biology"],
+    ALL_DATASETS["mmlu_high_school_chemistry"],
+    ALL_DATASETS["mmlu_high_school_computer_science"],
+    ALL_DATASETS["mmlu_high_school_european_history"],
+    ALL_DATASETS["mmlu_high_school_macroeconomics"],
+    ALL_DATASETS["mmlu_high_school_microeconomics"],
+    ALL_DATASETS["mmlu_high_school_psychology"],
+    ALL_DATASETS["mmlu_high_school_us_history"],
+    ALL_DATASETS["mmlu_high_school_world_history"],
+    ALL_DATASETS["mmlu_human_aging"],
+    ALL_DATASETS["mmlu_human_sexuality"],
+    ALL_DATASETS["mmlu_international_law"],
+    ALL_DATASETS["mmlu_jurisprudence"],
+    ALL_DATASETS["mmlu_machine_learning"],
+    ALL_DATASETS["mmlu_management"],
+    ALL_DATASETS["mmlu_medical_genetics"],
+    ALL_DATASETS["mmlu_moral_disputes"],
+    ALL_DATASETS["mmlu_nutrition"],
+    ALL_DATASETS["mmlu_prehistory"],
+    ALL_DATASETS["mmlu_professional_medicine"],
+    ALL_DATASETS["mmlu_professional_psychology"],
+    ALL_DATASETS["mmlu_sociology"],
+    ALL_DATASETS["mmlu_us_foreign_policy"],
+    ALL_DATASETS["mmlu_world_religions"],
     ALL_DATASETS["mmlu_all"],
-    ALL_DATASETS["pubmed_qa_pqa_labeled"],
-    ALL_DATASETS["arc_challenge"],
-    ALL_DATASETS["arc_easy"],
     ALL_DATASETS["openbookqa_main"],
     ALL_DATASETS["commonsense_qa"],
     ALL_DATASETS["boolq"],
 ]
+
+    # ALL_DATASETS["piqa"],
+    # ALL_DATASETS["pubmed_qa_pqa_labeled"],
+    # ALL_DATASETS["arc_challenge"],
+    # ALL_DATASETS["arc_easy"],
+    # ALL_DATASETS["mmlu_anatomy"],
+    # ALL_DATASETS["mmlu_college_computer_science"],
+    # ALL_DATASETS["mmlu_college_mathematics"],
+    # ALL_DATASETS["mmlu_college_medicine"],
+    # ALL_DATASETS["mmlu_college_physics"],
+    # ALL_DATASETS["mmlu_computer_security"],
+    # ALL_DATASETS["mmlu_econometrics"],
+    # ALL_DATASETS["mmlu_electrical_engineering"],
+    # ALL_DATASETS["mmlu_high_school_geography"],
+    # ALL_DATASETS["mmlu_high_school_government_and_politics"],
+    # ALL_DATASETS["mmlu_high_school_mathematics"],
+    # ALL_DATASETS["mmlu_high_school_physics"],
+    # ALL_DATASETS["mmlu_high_school_statistics"],
+    # ALL_DATASETS["mmlu_logical_fallacies"],
+    # ALL_DATASETS["mmlu_marketing"],
+    # ALL_DATASETS["mmlu_miscellaneous"],
+    # ALL_DATASETS["mmlu_moral_scenarios"],
+    # ALL_DATASETS["mmlu_philosophy"],
+    # ALL_DATASETS["mmlu_professional_accounting"],
+    # ALL_DATASETS["mmlu_professional_law"],
+    # ALL_DATASETS["mmlu_public_relations"],
+    # ALL_DATASETS["mmlu_security_studies"],
+    # ALL_DATASETS["mmlu_virology"],
 
 
 WEIGHTS_EXPERIMENT_DATASETS: list[DatasetSpec] = [

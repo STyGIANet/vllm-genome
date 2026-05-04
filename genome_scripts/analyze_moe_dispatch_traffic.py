@@ -16,7 +16,7 @@ import seaborn as sns
 import matplotlib
 import numpy as np
 import pandas as pd
-
+import matplotlib.pyplot as plt
 
 # Example:
 
@@ -50,8 +50,6 @@ def _backend_supports_show() -> bool:
 
 
 _maybe_enable_spyder_inline_backend()
-
-import matplotlib.pyplot as plt
 
 
 DEFAULT_TRACE_ROOT = Path(__file__).resolve().parent / "traffic-metis/deepseek-moe-16b-chat-mmlu-all-test"
@@ -686,14 +684,15 @@ ttft99metis = list()
 throughputmetis = list()
 
 for dataset in dfeplb["dataset"]:
-    ttft99eplb.append(dfeplb[(dfeplb["dataset"]==dataset)]["svcttft99"])
-    ttft99metis.append(dfmetis[(dfmetis["dataset"]==dataset)]["svcttft99"])
     
-    throughputeplb.append(dfeplb[(dfeplb["dataset"]==dataset)]["throughput"])
-    throughputmetis.append(dfmetis[(dfmetis["dataset"]==dataset)]["throughput"])
+    ttft99eplb.append(dfeplb[(dfeplb["dataset"]==dataset)]["svcttft99"].iloc[0])
+    ttft99metis.append(dfmetis[(dfmetis["dataset"]==dataset)]["svcttft99"].iloc[0])
+    
+    throughputeplb.append(dfeplb[(dfeplb["dataset"]==dataset)]["throughput"].iloc[0])
+    throughputmetis.append(dfmetis[(dfmetis["dataset"]==dataset)]["throughput"].iloc[0])
     
 
-datasets = dfeplb["dataset"]
+datasetsall = dfeplb["dataset"]
 
 # axttft.plot(np.arange(len(datasets)), ttft99eplb, c='r')
 # axttft.plot(np.arange(len(datasets)), ttft99metis, c='k')
@@ -702,13 +701,39 @@ datasets = dfeplb["dataset"]
 # axthroughput.plot(np.arange(len(datasets)), throughputeplb, c='r')
 # axthroughput.plot(np.arange(len(datasets)), throughputmetis, c='k')
 
-axttft.plot(np.arange(len(datasets)), [ttft99eplb[i]/ttft99metis[i] for i in range(len(datasets))], c='r')
+print("##### TTFT ######")
+ttft = list()
+for i in range(len(datasetsall)):
+    if (ttft99eplb[i]/ttft99metis[i]) >= 1:
+        print(datasetsall[i])
+        ttft.append(ttft99eplb[i]/ttft99metis[i])
+
+datasets = list()
+for i in range(len(datasetsall)):
+    if (ttft99eplb[i]/ttft99metis[i]) >= 1:
+        datasets.append(datasetsall[i])
+
+axttft.plot(np.arange(len(datasets)),ttft, c='r')
 axttft.axhline(y=1, c='k', ls='--')
 axttft.set_xticks(np.arange(len(datasets)))
 axttft.set_xticklabels(datasets,fontsize=8,rotation=45)
 axttft.set_ylabel("TTFT 99-pct Speedup $x$")
 
-axthroughput.plot(np.arange(len(datasets)), [throughputmetis[i]/throughputeplb[i] for i in range(len(datasets))], c='r')
+
+print("#### Throughput ####")
+throughput = list()
+for i in range(len(datasetsall)):
+    if (throughputmetis[i]/throughputeplb[i]) >= 1:
+        print(datasetsall[i])
+        throughput.append(throughputmetis[i]/throughputeplb[i])
+
+datasets = list()
+for i in range(len(datasetsall)):
+    if (throughputmetis[i]/throughputeplb[i]) >= 1:
+        datasets.append(datasetsall[i])
+
+
+axthroughput.plot(np.arange(len(datasets)), throughput, c='r')
 axthroughput.axhline(y=1, c='k', ls='--')
 axthroughput.set_xticks(np.arange(len(datasets)))
 axthroughput.set_xticklabels(datasets,fontsize=8,rotation=45)
