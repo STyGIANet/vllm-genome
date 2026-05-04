@@ -12,10 +12,13 @@ export TRACE_DIR=${SCRIPT_DIR}/traces/
 export TRAFFIC_DIR=${SCRIPT_DIR}/traffic/
 # mkdir -p ${TRACE_DIR}
 # mkdir -p ${TRAFFIC_DIR}
+source ${SCRIPT_DIR}/../.venv/bin/activate
 
 ##############################################################
 echo "Running Moor 0 0 0 experiment"
-vllm serve $MODEL \
+mkdir -p ${SCRIPT_DIR}/summary-moor-0-0-0
+
+(vllm serve $MODEL \
 		--tensor-parallel-size 1 \
 		--data-parallel-size 8 \
 		--enable-expert-parallel \
@@ -29,13 +32,12 @@ vllm serve $MODEL \
 		--enable-eplb \
 		--eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
 		--placement-callback-path ${PLACEMENT_PATH} \
-		--placement-callback-func compute_placement  > /dev/null 2> /dev/null&
+		--placement-callback-func compute_placement  > ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt) &
 
 sleep 60
-
-mkdir -p ${SCRIPT_DIR}/../summary-moor-0-0-0
-python3 python send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-moor-0-0-0/ ${SCRIPT_DIR}/traffic-moor-0-0-0/ ${SCRIPT_DIR}/../summary-moor-0-0-0/ \
-	> ${SCRIPT_DIR}/../summary-moor-0-0-0/all-results.txt 2> ${SCRIPT_DIR}/../summary-moor-0-0-0/all-results.txt
+cd ${SCRIPT_DIR}/online-inference/
+python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-moor-0-0-0/ ${SCRIPT_DIR}/traffic-moor-0-0-0/ ${SCRIPT_DIR}/summary-moor-0-0-0/ \
+	> ${SCRIPT_DIR}/summary-moor-0-0-0/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-0-0-0/all-results.txt
 
 
 # cleanup
@@ -45,7 +47,9 @@ for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format
 
 ##############################################################
 echo "Running EPLB experiment"
-vllm serve $MODEL \
+mkdir -p ${SCRIPT_DIR}/summary-eplb
+
+(vllm serve $MODEL \
 		--tensor-parallel-size 1 \
 		--data-parallel-size 8 \
 		--enable-expert-parallel \
@@ -57,13 +61,13 @@ vllm serve $MODEL \
 		--kv-block-prefix-routing-weight 0.5 \
 		--load-score-routing-weight 0.5 \
 		--enable-eplb \
-		--eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' > /dev/null 2> /dev/null&
+		--eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' > ${SCRIPT_DIR}/summary-eplb/vllm-log.txt 2> ${SCRIPT_DIR}/summary-eplb/vllm-log.txt )&
 
 sleep 60
 
-mkdir -p ${SCRIPT_DIR}/../summary-eplb
-python3 python send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-eplb/ ${SCRIPT_DIR}/traffic-eplb/ ${SCRIPT_DIR}/../summary-eplb/ \
-	> ${SCRIPT_DIR}/../summary-eplb/all-results.txt 2> ${SCRIPT_DIR}/../summary-eplb/all-results.txt
+cd ${SCRIPT_DIR}/online-inference/
+python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-eplb/ ${SCRIPT_DIR}/traffic-eplb/ ${SCRIPT_DIR}/summary-eplb/ \
+	> ${SCRIPT_DIR}/summary-eplb/all-results.txt 2> ${SCRIPT_DIR}/summary-eplb/all-results.txt
 
 
 # cleanup
@@ -72,7 +76,9 @@ for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format
 
 ##############################################################
 echo "Running Moor 1 2 3 experiment"
-vllm serve $MODEL \
+mkdir -p ${SCRIPT_DIR}/summary-moor-1-2-3
+
+(vllm serve $MODEL \
 		--tensor-parallel-size 1 \
 		--data-parallel-size 8 \
 		--enable-expert-parallel \
@@ -92,14 +98,14 @@ vllm serve $MODEL \
 		--enable-kv-block-prefix-routing \
 		--enable-prefix-affinity-routing \
 		--prefix-affinity-only-prefill \
-		--prefix-learning-algorithm prefixtrie > /dev/null 2> /dev/null &
+		--prefix-learning-algorithm prefixtrie > ${SCRIPT_DIR}/summary-moor-1-2-3/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-1-2-3/vllm-log.txt )&
 
 
 sleep 60
 
-mkdir -p ${SCRIPT_DIR}/../summary-moor-1-2-3
-python3 python send-prompts.py 1 2 3 64 ${SCRIPT_DIR}/traces-moor-1-2-3/ ${SCRIPT_DIR}/traffic-moor-1-2-3/ ${SCRIPT_DIR}/../summary-moor-1-2-3/ \
-	> ${SCRIPT_DIR}/../summary-moor-1-2-3/all-results.txt 2> ${SCRIPT_DIR}/../summary-moor-1-2-3/all-results.txt
+cd ${SCRIPT_DIR}/online-inference/
+python3 send-prompts.py 1 2 3 64 ${SCRIPT_DIR}/traces-moor-1-2-3/ ${SCRIPT_DIR}/traffic-moor-1-2-3/ ${SCRIPT_DIR}/summary-moor-1-2-3/ \
+	> ${SCRIPT_DIR}/summary-moor-1-2-3/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-1-2-3/all-results.txt
 
 
 # cleanup
@@ -108,7 +114,9 @@ for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format
 
 ##############################################################
 echo "Running Moor 3 2 1 experiment"
-vllm serve $MODEL \
+mkdir -p ${SCRIPT_DIR}/summary-moor-3-2-1
+
+(vllm serve $MODEL \
 		--tensor-parallel-size 1 \
 		--data-parallel-size 8 \
 		--enable-expert-parallel \
@@ -128,14 +136,14 @@ vllm serve $MODEL \
 		--enable-kv-block-prefix-routing \
 		--enable-prefix-affinity-routing \
 		--prefix-affinity-only-prefill \
-		--prefix-learning-algorithm prefixtrie > /dev/null 2> /dev/null &
+		--prefix-learning-algorithm prefixtrie > ${SCRIPT_DIR}/summary-moor-3-2-1/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-3-2-1/vllm-log.txt )&
 
 
 sleep 60
 
-mkdir -p ${SCRIPT_DIR}/../summary-moor-3-2-1
-python3 python send-prompts.py 3 2 1 64 ${SCRIPT_DIR}/traces-moor-3-2-1/ ${SCRIPT_DIR}/traffic-moor-3-2-1/ ${SCRIPT_DIR}/../summary-moor-3-2-1/ \
-	> ${SCRIPT_DIR}/../summary-moor-3-2-1/all-results.txt 2> ${SCRIPT_DIR}/../summary-moor-3-2-1/all-results.txt
+cd ${SCRIPT_DIR}/online-inference/
+python3 send-prompts.py 3 2 1 64 ${SCRIPT_DIR}/traces-moor-3-2-1/ ${SCRIPT_DIR}/traffic-moor-3-2-1/ ${SCRIPT_DIR}/summary-moor-3-2-1/ \
+	> ${SCRIPT_DIR}/summary-moor-3-2-1/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-3-2-1/all-results.txt
 
 
 # cleanup
@@ -144,7 +152,9 @@ for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format
 
 ##############################################################
 echo "Running Moor 2 3 1 experiment"
-vllm serve $MODEL \
+mkdir -p ${SCRIPT_DIR}/summary-moor-2-3-1
+
+(vllm serve $MODEL \
 		--tensor-parallel-size 1 \
 		--data-parallel-size 8 \
 		--enable-expert-parallel \
@@ -164,14 +174,14 @@ vllm serve $MODEL \
 		--enable-kv-block-prefix-routing \
 		--enable-prefix-affinity-routing \
 		--prefix-affinity-only-prefill \
-		--prefix-learning-algorithm prefixtrie > /dev/null 2> /dev/null &
+		--prefix-learning-algorithm prefixtrie > ${SCRIPT_DIR}/summary-moor-2-3-1/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-2-3-1/vllm-log.txt ) &
 
 
 sleep 60
 
-mkdir -p ${SCRIPT_DIR}/../summary-moor-2-3-1
-python3 python send-prompts.py 2 3 1 64 ${SCRIPT_DIR}/traces-moor-2-3-1/ ${SCRIPT_DIR}/traffic-moor-2-3-1/ ${SCRIPT_DIR}/../summary-moor-2-3-1/ \
-	> ${SCRIPT_DIR}/../summary-moor-2-3-1/all-results.txt 2> ${SCRIPT_DIR}/../summary-moor-2-3-1/all-results.txt
+cd ${SCRIPT_DIR}/online-inference/
+python3 send-prompts.py 2 3 1 64 ${SCRIPT_DIR}/traces-moor-2-3-1/ ${SCRIPT_DIR}/traffic-moor-2-3-1/ ${SCRIPT_DIR}/summary-moor-2-3-1/ \
+	> ${SCRIPT_DIR}/summary-moor-2-3-1/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-2-3-1/all-results.txt
 
 
 # cleanup
