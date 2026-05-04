@@ -407,7 +407,7 @@ def set_vllm_config(expert, kv, load, step_interval, expert_dump_dir, traffic_du
               "eplb_step_interval": step_interval, # this is a copy in the frontend
               "expert_affinity_routing_weight": expert,
           },
-          timeout=10,
+          timeout=100,
         )
         resp.raise_for_status()
         print("POST /load_balancer/weights ->", resp.json())
@@ -418,7 +418,7 @@ def set_vllm_config(expert, kv, load, step_interval, expert_dump_dir, traffic_du
     resp = requests.post(
       f"{HOST}/eplb/step_interval",
       json={"step_interval": step_interval},
-      timeout=10,
+      timeout=100,
     )
     resp.raise_for_status()
     print("POST /eplb/step_interval ->", resp.json())
@@ -430,7 +430,7 @@ def set_vllm_config(expert, kv, load, step_interval, expert_dump_dir, traffic_du
           "reset_running_requests": True,
           "reset_external": True,
       },
-      timeout=10,
+      timeout=100,
     )
     resp.raise_for_status()
     print("POST /reset_prefix_cache -> 200 OK")
@@ -439,14 +439,14 @@ def set_vllm_config(expert, kv, load, step_interval, expert_dump_dir, traffic_du
     resp = requests.post(
       f"{HOST}/eplb/placement_routing_dump",
       json={"dump_dir": expert_dump_dir},
-      timeout=10,
+      timeout=100,
     )
     resp.raise_for_status()
 
     resp = requests.post(
       f"{HOST}/eplb/moe_dispatch_traffic_dump",
       json={"dump_dir": traffic_dump_dir},
-      timeout=10,
+      timeout=100,
     )
     resp.raise_for_status()
 
@@ -455,24 +455,24 @@ def set_vllm_config(expert, kv, load, step_interval, expert_dump_dir, traffic_du
     if expert > 0 or kv > 0 or load > 0:
         resp = requests.get(
           f"{HOST}/load_balancer/weights",
-          timeout=10,
+          timeout=100,
         )
         resp.raise_for_status()
         print("GET /load_balancer/weights ->", resp.json())
 
     resp = requests.get(
       f"{HOST}/eplb/step_interval",
-      timeout=10,
+      timeout=100,
     )
     resp.raise_for_status()
     print("GET /eplb/step_interval ->", resp.json())
 
-    resp = requests.get(f"{HOST}/eplb/placement_routing_dump", timeout=10)
+    resp = requests.get(f"{HOST}/eplb/placement_routing_dump", timeout=100)
     resp.raise_for_status()
     print("GET /eplb/placement_routing_dump ->", resp.json())
 
 
-    resp = requests.get(f"{HOST}/eplb/moe_dispatch_traffic_dump", timeout=10)
+    resp = requests.get(f"{HOST}/eplb/moe_dispatch_traffic_dump", timeout=100)
     resp.raise_for_status()
     print("GET /eplb/moe_dispatch_traffic_dump ->", resp.json())
 
