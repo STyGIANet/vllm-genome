@@ -44,43 +44,6 @@ class RecvMetadata:
 MoveToBufferResult = tuple[np.ndarray, np.ndarray, RecvMetadata]
 
 
-def warmup_eplb_p2p_channels(device: torch.device) -> None:
-    """Pre-warm NCCL P2P channels across the default process group.
-
-    NCCL establishes P2P channels lazily on first use of each peer pair.
-    When EPLB async transfer later uses only a subset of ranks for a given
-    layer, first-use channel setup can stall waiting for peers that do not
-    participate in that particular exchange. A one-time all-to-all warmup
-    avoids that first-use stall.
-    """
-    world_size = torch.distributed.get_world_size()
-    if world_size <= 1:
-        return
-
-    my_rank = torch.distributed.get_rank()
-    dummy_send = torch.zeros(1, dtype=torch.float32, device=device)
-    recv_buffers: list[torch.Tensor] = []
-    warmup_ops: list[P2POp] = []
-
-    for peer in range(world_size):
-        if peer == my_rank:
-            continue
-        recv_buffer = torch.zeros(1, dtype=torch.float32, device=device)
-        recv_buffers.append(recv_buffer)
-        warmup_ops.append(P2POp(torch.distributed.isend, dummy_send, peer))
-        warmup_ops.append(
-            P2POp(
-                torch.distributed.irecv,
-                recv_buffer,
-                peer,
-            )
-        )
-
-    warmup_reqs = batch_isend_irecv(warmup_ops)
-    for req in warmup_reqs:
-        req.wait()
-
-
 def get_ep_ranks_with_experts_batch(
     expert_ids: np.ndarray,
     num_local_experts: int,
@@ -660,7 +623,36 @@ def rearrange_expert_weights_inplace(
                 group=ep_group,
             )
 
-        warmup_eplb_p2p_channels(first_layer_weights[0].device)
+        # Pre-warm NCCL P2P channels on the default (WORLD) group.
+        # NCCL establishes P2P channels lazily on first use of each pair.
+        # Channel setup blocks inside ncclGroupEnd() until both endpoints
+        # are ready — but only the FIRST time a pair is used. By doing a
+        # full all-to-all warmup here (all N×(N-1) sends+recvs with all
+        # ranks present), every possible pair gets its channel established
+        # upfront. After this, any subset of ranks can exchange freely
+        # without channel-setup stalls, even when some ranks have no ops.
+        world_size = torch.distributed.get_world_size()
+        if world_size > 1:
+            my_rank = torch.distributed.get_rank()
+            device = first_layer_weights[0].device
+            dummy_send = torch.zeros(1, dtype=torch.float32, device=device)
+            warmup_ops: list[P2POp] = []
+            for peer in range(world_size):
+                if peer == my_rank:
+                    continue
+                warmup_ops.append(
+                    P2POp(torch.distributed.isend, dummy_send, peer)
+                )
+                warmup_ops.append(
+                    P2POp(
+                        torch.distributed.irecv,
+                        torch.zeros(1, dtype=torch.float32, device=device),
+                        peer,
+                    )
+                )
+            warmup_reqs = batch_isend_irecv(warmup_ops)
+            for req in warmup_reqs:
+                req.wait()
         return
 
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
