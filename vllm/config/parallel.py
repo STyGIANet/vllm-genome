@@ -83,6 +83,16 @@ class EPLBConfig:
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 
+    graph_ema_alpha: float = Field(default=1.0, gt=0.0, le=1.0)
+    """
+    EMA factor for the custom callback co-activation graph.
+
+    `1.0` keeps the current behavior and uses only the latest interval's
+    co-activation edges and node activation counts. Lower values smooth the
+    graph across rearrangement intervals before passing it to the custom
+    placement callback.
+    """
+
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.log_balancedness and self.log_balancedness_interval <= 0:

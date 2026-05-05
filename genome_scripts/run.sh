@@ -35,7 +35,7 @@ vllm serve $MODEL \
 		--load-score-routing-weight 0.5 \
 		--enable-eplb \
 		--eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
-		# --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
+		# --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0,"graph_ema_alpha":0.5}' \
 		# --placement-callback-path ${PLACEMENT_PATH} \
 		# --placement-callback-func compute_placement \
 		# --max-pending-requests-per-engine 256 \

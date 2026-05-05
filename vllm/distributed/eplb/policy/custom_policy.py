@@ -183,6 +183,9 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
         num_gpus,
         step=0,
         global_expert_load: torch.Tensor | None = None,
+        num_groups: int | None = None,
+        num_nodes: int | None = None,
+        current_physical_to_logical_map: torch.Tensor | None = None,
     ):
         user_config = None
         # ///////////// Expert-based load balancing
@@ -198,7 +201,27 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
         elif cls._compute_placement_callback is not None and cls._graph_metadata is not None:
             graph_metadata = cls._graph_metadata
             cls._graph_metadata = None
-            routing = {"__graph__": graph_metadata}
+            routing = {
+                "__graph__": graph_metadata,
+                "__eplb__": {
+                    "global_expert_load": (
+                        global_expert_load.cpu()
+                        if global_expert_load is not None
+                        else None
+                    ),
+                    "num_layers": int(num_layers),
+                    "num_physical_experts": int(num_physical_experts),
+                    "num_gpus": int(num_gpus),
+                    "num_groups": None if num_groups is None else int(num_groups),
+                    "num_nodes": None if num_nodes is None else int(num_nodes),
+                    "step": int(step),
+                    "current_physical_to_logical_map": (
+                        current_physical_to_logical_map.cpu()
+                        if current_physical_to_logical_map is not None
+                        else None
+                    ),
+                },
+            }
             cls._dump_callback_routing_payload(routing)
             user_config = cls._compute_placement_callback(routing)
             if not user_config:
@@ -213,17 +236,33 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
             with open(config_path, 'r') as f:
                 user_config = json.load(f)
 
-        # Multi-step support: cycle through a list of configs, one per rebalance call.
-        if "steps" in user_config:
+        direct_map = None
+        if isinstance(user_config, torch.Tensor):
+            direct_map = user_config
+        elif isinstance(user_config, dict) and "steps" in user_config:
             steps_list = user_config["steps"]
             effective_step = step % len(steps_list)
             step_config = steps_list[effective_step]
+            direct_map = step_config.get("physical_to_logical_map")
             layer_configs = step_config.get("layer_configs", {})
             global_config = step_config.get("expert_to_gpu", {})
         else:
+            if isinstance(user_config, dict):
+                direct_map = user_config.get("physical_to_logical_map")
             layer_configs = user_config.get("layer_configs", {})
             global_config = user_config.get("expert_to_gpu", {})
-        
+
+        if direct_map is not None:
+            direct_map_tensor = torch.as_tensor(direct_map, dtype=torch.int32)
+            expected_shape = (num_layers, num_physical_experts)
+            if tuple(direct_map_tensor.shape) != expected_shape:
+                raise ValueError(
+                    "physical_to_logical_map has shape "
+                    f"{tuple(direct_map_tensor.shape)}, expected {expected_shape}."
+                )
+            return direct_map_tensor.contiguous()
+
+        # Multi-step support: cycle through a list of configs, one per rebalance call.
         slots_per_gpu = num_physical_experts // num_gpus
         full_2d_map = torch.full((num_layers, num_physical_experts), -1, dtype=torch.int32)
 
@@ -352,6 +391,9 @@ class StaticPlacementPolicy(AbstractEplbPolicy):
             num_gpus,
             step=cls._step,
             global_expert_load=global_expert_load,
+            num_groups=num_groups,
+            num_nodes=num_nodes,
+            current_physical_to_logical_map=current_physical_to_logical_map,
         )
 
         if is_rank0:

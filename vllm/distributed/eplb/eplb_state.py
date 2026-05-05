@@ -86,13 +86,16 @@ class EplbStats:
     coactivation_edges: torch.Tensor | None = None
     """
     Compact upper-triangular co-activation edge counts over unique
-    (layer, expert) nodes for the interval since the previous rearrangement.
+    (layer, expert) nodes passed to the custom callback graph. When
+    `graph_ema_alpha < 1`, these values are EMA-smoothed across
+    rearrangement intervals.
     Shape: [num_nodes * (num_nodes - 1) // 2]
     """
     node_activation_counts: torch.Tensor | None = None
     """
-    Per-node activation counts over unique (layer, expert) nodes for the
-    interval since the previous rearrangement.
+    Per-node activation counts over unique (layer, expert) nodes passed to the
+    custom callback graph. When `graph_ema_alpha < 1`, these values are
+    EMA-smoothed across rearrangement intervals.
     Shape: [num_nodes]
     """
 
@@ -187,6 +190,18 @@ class EplbModelState:
     node_activation_count_pass: torch.Tensor
     """
     Per-node activation counts accumulated since the previous rearrangement.
+    Shape: [num_nodes]
+    """
+    coactivation_edge_ema: torch.Tensor | None
+    """
+    EMA-smoothed co-activation edge counts used by the custom callback graph.
+    Stored on CPU as float32 and updated once per rearrangement interval.
+    Shape: [num_nodes * (num_nodes - 1) // 2]
+    """
+    node_activation_count_ema: torch.Tensor | None
+    """
+    EMA-smoothed node activation counts used by the custom callback graph.
+    Stored on CPU as float32 and updated once per rearrangement interval.
     Shape: [num_nodes]
     """
     model: MixtureOfExperts
@@ -322,6 +337,53 @@ class EplbState:
             self.cuda_device_index = self.device.index
             if self.cuda_device_index is None and torch.cuda.is_available():
                 self.cuda_device_index = torch.accelerator.current_device_index()
+
+    def _prepare_callback_graph_metadata(
+        self,
+        model_state: EplbModelState,
+        coactivation_edges: torch.Tensor | None,
+        node_activation_counts: torch.Tensor | None,
+        *,
+        is_profile: bool,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Prepare the graph payload passed to custom placement callbacks."""
+        if coactivation_edges is None or node_activation_counts is None:
+            return coactivation_edges, node_activation_counts
+
+        alpha = self.parallel_config.eplb_config.graph_ema_alpha
+        if is_profile or alpha >= 1.0:
+            return (
+                coactivation_edges.to(torch.int64).cpu(),
+                node_activation_counts.to(torch.int64).cpu(),
+            )
+
+        edge_values = coactivation_edges.to(torch.float32).cpu()
+        node_values = node_activation_counts.to(torch.float32).cpu()
+
+        if (
+            model_state.coactivation_edge_ema is None
+            or model_state.coactivation_edge_ema.shape != edge_values.shape
+        ):
+            model_state.coactivation_edge_ema = edge_values.clone()
+        else:
+            model_state.coactivation_edge_ema.mul_(1.0 - alpha).add_(
+                edge_values, alpha=alpha
+            )
+
+        if (
+            model_state.node_activation_count_ema is None
+            or model_state.node_activation_count_ema.shape != node_values.shape
+        ):
+            model_state.node_activation_count_ema = node_values.clone()
+        else:
+            model_state.node_activation_count_ema.mul_(1.0 - alpha).add_(
+                node_values, alpha=alpha
+            )
+
+        return (
+            torch.round(model_state.coactivation_edge_ema).to(torch.int64),
+            torch.round(model_state.node_activation_count_ema).to(torch.int64),
+        )
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -507,6 +569,8 @@ class EplbState:
             model_name=model_config.model,
             coactivation_edge_pass=coactivation_edge_pass,
             node_activation_count_pass=node_activation_count_pass,
+            coactivation_edge_ema=None,
+            node_activation_count_ema=None,
             model=model,
             expert_buffer=expert_buffer,
             buffer_lock=threading.Lock(),
@@ -801,6 +865,19 @@ class EplbState:
             global_coactivation_edge_passes,
             global_node_activation_count_passes,
         ):
+            callback_coactivation_edges = global_coactivation_edges
+            callback_node_activation_counts = global_node_activation_counts
+            if callback_graph_required:
+                (
+                    callback_coactivation_edges,
+                    callback_node_activation_counts,
+                ) = self._prepare_callback_graph_metadata(
+                    eplb_model_state,
+                    global_coactivation_edges,
+                    global_node_activation_counts,
+                    is_profile=is_profile,
+                )
+
             if not self.is_async or is_profile:
                 # Get new expert mappings for the model.
                 # For profile runs, save and restore the policy step counter so
@@ -810,14 +887,14 @@ class EplbState:
                     _saved_policy_step = self.policy._step
 
                 if (
-                    global_coactivation_edges is not None
+                    callback_coactivation_edges is not None
                     and hasattr(self.policy, "set_graph_metadata")
                 ):
                     graph_metadata = {
-                        "coactivation_edges": global_coactivation_edges.cpu(),
+                        "coactivation_edges": callback_coactivation_edges,
                         "node_activation_counts": (
-                            global_node_activation_counts.cpu()
-                            if global_node_activation_counts is not None
+                            callback_node_activation_counts
+                            if callback_node_activation_counts is not None
                             else None
                         ),
                         "num_layers": eplb_model_state.model.num_moe_layers,
@@ -881,14 +958,14 @@ class EplbState:
                     # in the async transfer thread. Precompute the new mapping
                     # here and let the async worker handle only weight transfer.
                     if (
-                        global_coactivation_edges is not None
+                        callback_coactivation_edges is not None
                         and hasattr(self.policy, "set_graph_metadata")
                     ):
                         graph_metadata = {
-                            "coactivation_edges": global_coactivation_edges.cpu(),
+                            "coactivation_edges": callback_coactivation_edges,
                             "node_activation_counts": (
-                                global_node_activation_counts.cpu()
-                                if global_node_activation_counts is not None
+                                callback_node_activation_counts
+                                if callback_node_activation_counts is not None
                                 else None
                             ),
                             "num_layers": eplb_model_state.model.num_moe_layers,
@@ -915,13 +992,13 @@ class EplbState:
                     num_nodes=num_nodes,
                     num_gpus=num_gpus,
                     coactivation_edges=(
-                        global_coactivation_edges.clone()
-                        if global_coactivation_edges is not None
+                        callback_coactivation_edges.clone()
+                        if callback_coactivation_edges is not None
                         else None
                     ),
                     node_activation_counts=(
-                        global_node_activation_counts.clone()
-                        if global_node_activation_counts is not None
+                        callback_node_activation_counts.clone()
+                        if callback_node_activation_counts is not None
                         else None
                     ),
                 )

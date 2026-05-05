@@ -75,6 +75,11 @@ def run_rebalance_experts(
     if hasattr(eplb_state.policy, "set_graph_metadata") and eplb_stats.coactivation_edges is not None:
         eplb_state.policy.set_graph_metadata({
             "coactivation_edges": eplb_stats.coactivation_edges.cpu(),
+            "node_activation_counts": (
+                eplb_stats.node_activation_counts.cpu()
+                if eplb_stats.node_activation_counts is not None
+                else None
+            ),
             "num_layers": model_state.model.num_moe_layers,
             "num_experts": model_state.model.num_logical_experts,
             "num_gpus": eplb_stats.num_gpus,

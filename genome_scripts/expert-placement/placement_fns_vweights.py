@@ -1,5 +1,5 @@
 """
-placement_fns.py - Expert placement callback for combined_launch.py.
+placement_fns_vweights.py - Expert placement callback with METIS vertex weights.
 
 Registered via:
     llm.collective_rpc("register_placement_callback",
@@ -19,7 +19,8 @@ except ImportError:
     pymetis = None
 
 
-logger = init_logger("vllm.genome.placement")
+logger = init_logger("vllm.genome.placement_vweights")
+
 
 def _greedy_pack(loads: list[float], num_gpus: int) -> dict[str, int]:
     gpu_loads = [0.0] * num_gpus
@@ -37,6 +38,7 @@ def _greedy_pack(loads: list[float], num_gpus: int) -> dict[str, int]:
         gpu_counts[gpu_id] += 1
         gpu_loads[gpu_id] += loads[expert_id]
     return assignment
+
 
 def _build_layer_loads_from_node_activation_counts(
     node_activation_counts: torch.Tensor,
@@ -89,19 +91,23 @@ def _compact_graph_to_active_nodes(
     coactivation_edges: torch.Tensor,
     node_activation_counts: torch.Tensor,
     num_nodes: int,
-) -> tuple[torch.Tensor, list[int]]:
+) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
     active_node_ids = torch.nonzero(
         node_activation_counts.to(torch.int64).cpu() > 0,
         as_tuple=False,
     ).flatten()
     if active_node_ids.numel() == 0:
-        return coactivation_edges.new_zeros(0, dtype=torch.int64), []
+        empty = coactivation_edges.new_zeros(0, dtype=torch.int64)
+        return empty, empty, []
 
     active_node_ids = active_node_ids.to(torch.int64)
+    active_counts = node_activation_counts.to(torch.int64).cpu()[active_node_ids]
     num_active_nodes = int(active_node_ids.numel())
     if num_active_nodes < 2:
-        return coactivation_edges.new_zeros(0, dtype=torch.int64), (
-            active_node_ids.tolist()
+        return (
+            coactivation_edges.new_zeros(0, dtype=torch.int64),
+            active_counts,
+            active_node_ids.tolist(),
         )
 
     compact_rows, compact_cols = torch.triu_indices(
@@ -113,7 +119,7 @@ def _compact_graph_to_active_nodes(
     hi = torch.maximum(full_src, full_dst)
     full_edge_ids = lo * (2 * num_nodes - lo - 1) // 2 + (hi - lo - 1)
     compact_edges = coactivation_edges.to(torch.int64).cpu()[full_edge_ids]
-    return compact_edges, active_node_ids.tolist()
+    return compact_edges, active_counts, active_node_ids.tolist()
 
 
 def _partition_with_metis(
@@ -131,7 +137,7 @@ def _partition_with_metis(
     if num_nodes == 0:
         return None
 
-    compact_edges, active_node_ids = _compact_graph_to_active_nodes(
+    compact_edges, compact_counts, active_node_ids = _compact_graph_to_active_nodes(
         coactivation_edges=coactivation_edges,
         node_activation_counts=node_activation_counts,
         num_nodes=num_nodes,
@@ -144,10 +150,12 @@ def _partition_with_metis(
     if not adjncy:
         return None
 
+    vweights = [int(v) for v in torch.clamp(compact_counts, min=1).tolist()]
     _, compact_membership = pymetis.part_graph(
         num_gpus,
         xadj=xadj,
         adjncy=adjncy,
+        vweights=vweights,
         eweights=eweights,
     )
 
@@ -156,7 +164,7 @@ def _partition_with_metis(
         membership[full_node_id] = int(compact_membership[compact_node_id])
 
     logger.info(
-        "METIS node compaction: %d total nodes -> %d active nodes",
+        "METIS node compaction with vweights: %d total nodes -> %d active nodes",
         num_nodes,
         num_active_nodes,
     )
@@ -177,9 +185,6 @@ def _derive_current_gpu_by_node(
     if num_gpus <= 0 or num_physical_experts % num_gpus != 0:
         return None
 
-    # This callback path assumes one logical expert placement target per
-    # (layer, expert) node. If redundant experts are enabled, this becomes
-    # ambiguous; keep the first visible slot as a best-effort baseline.
     slots_per_gpu = num_physical_experts // num_gpus
     current_gpu_by_node = [-1] * (num_layers * num_experts)
     for layer_id in range(num_layers):
@@ -310,10 +315,7 @@ def _repair_partition_to_layer_configs(
             node_id = layer_pos * num_experts + expert_id
             preferred_gpu = membership[node_id]
 
-            if (
-                preferred_gpu >= 0
-                and gpu_counts[preferred_gpu] < slots_per_gpu
-            ):
+            if preferred_gpu >= 0 and gpu_counts[preferred_gpu] < slots_per_gpu:
                 chosen_gpu = preferred_gpu
             else:
                 candidates = [
