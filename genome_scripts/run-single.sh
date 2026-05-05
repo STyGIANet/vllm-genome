@@ -32,7 +32,7 @@ mkdir -p ${SCRIPT_DIR}/summary-eplb
 		--enable-eplb \
 		--eplb-config '{"use_async":false,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' > ${SCRIPT_DIR}/summary-eplb/vllm-log.txt 2> ${SCRIPT_DIR}/summary-eplb/vllm-log.txt )&
 
-sleep 60
+sleep 90
 
 cd ${SCRIPT_DIR}/online-inference/
 python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-eplb/ ${SCRIPT_DIR}/traffic-eplb/ ${SCRIPT_DIR}/summary-eplb/ \
@@ -64,7 +64,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-0-0-0
 		--placement-callback-path ${PLACEMENT_PATH} \
 		--placement-callback-func compute_placement  > ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt) &
 
-sleep 60
+sleep 90
 cd ${SCRIPT_DIR}/online-inference/
 python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-moor-0-0-0/ ${SCRIPT_DIR}/traffic-moor-0-0-0/ ${SCRIPT_DIR}/summary-moor-0-0-0/ \
 	> ${SCRIPT_DIR}/summary-moor-0-0-0/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-0-0-0/all-results.txt
@@ -102,7 +102,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-1-2-3
 		--prefix-learning-algorithm prefixtrie > ${SCRIPT_DIR}/summary-moor-1-2-3/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-1-2-3/vllm-log.txt )&
 
 
-sleep 60
+sleep 90
 
 cd ${SCRIPT_DIR}/online-inference/
 python3 send-prompts.py 1 2 3 64 ${SCRIPT_DIR}/traces-moor-1-2-3/ ${SCRIPT_DIR}/traffic-moor-1-2-3/ ${SCRIPT_DIR}/summary-moor-1-2-3/ \
@@ -140,7 +140,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-3-2-1
 		--prefix-learning-algorithm prefixtrie > ${SCRIPT_DIR}/summary-moor-3-2-1/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-3-2-1/vllm-log.txt )&
 
 
-sleep 60
+sleep 90
 
 cd ${SCRIPT_DIR}/online-inference/
 python3 send-prompts.py 3 2 1 64 ${SCRIPT_DIR}/traces-moor-3-2-1/ ${SCRIPT_DIR}/traffic-moor-3-2-1/ ${SCRIPT_DIR}/summary-moor-3-2-1/ \
@@ -178,7 +178,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-2-3-1
 		--prefix-learning-algorithm prefixtrie > ${SCRIPT_DIR}/summary-moor-2-3-1/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-2-3-1/vllm-log.txt ) &
 
 
-sleep 60
+sleep 90
 
 cd ${SCRIPT_DIR}/online-inference/
 python3 send-prompts.py 2 3 1 64 ${SCRIPT_DIR}/traces-moor-2-3-1/ ${SCRIPT_DIR}/traffic-moor-2-3-1/ ${SCRIPT_DIR}/summary-moor-2-3-1/ \
