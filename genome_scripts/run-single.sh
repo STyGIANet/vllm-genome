@@ -15,7 +15,6 @@ export TRAFFIC_DIR=${SCRIPT_DIR}/traffic/
 source ${SCRIPT_DIR}/../.venv/bin/activate
 
 ##############################################################
-if [[ $2 == "1" ]];then
 echo "Running Moor 0 0 0 experiment"
 mkdir -p ${SCRIPT_DIR}/summary-moor-0-0-0
 
@@ -43,11 +42,11 @@ python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-moor-0-0-0/ ${SCRIPT_DIR}/
 
 # cleanup
 for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv | awk '{print $1}' | awk -F ',' '{print $1}');do kill -9 $i;done
-fi
+for i in $(ps aux | grep VLLM | awk '{print $2}');do kill -9 $i;done
+for i in $(ps aux | grep python | awk '{print $2}');do kill -9 $i;done
 
 
 ##############################################################
-if [[ $2 == "2" ]];then
 echo "Running EPLB experiment"
 mkdir -p ${SCRIPT_DIR}/summary-eplb
 
@@ -74,10 +73,9 @@ python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-eplb/ ${SCRIPT_DIR}/traffi
 
 # cleanup
 for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv | awk '{print $1}' | awk -F ',' '{print $1}');do kill -9 $i;done
-fi
-
+for i in $(ps aux | grep VLLM | awk '{print $2}');do kill -9 $i;done
+for i in $(ps aux | grep python | awk '{print $2}');do kill -9 $i;done
 ##############################################################
-if [[ $2 == "3" ]];then
 echo "Running Moor 1 2 3 experiment"
 mkdir -p ${SCRIPT_DIR}/summary-moor-1-2-3
 
@@ -113,10 +111,9 @@ python3 send-prompts.py 1 2 3 64 ${SCRIPT_DIR}/traces-moor-1-2-3/ ${SCRIPT_DIR}/
 
 # cleanup
 for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv | awk '{print $1}' | awk -F ',' '{print $1}');do kill -9 $i;done
-fi
-
+for i in $(ps aux | grep VLLM | awk '{print $2}');do kill -9 $i;done
+for i in $(ps aux | grep python | awk '{print $2}');do kill -9 $i;done
 ##############################################################
-if [[ $2 == "4" ]];then
 echo "Running Moor 3 2 1 experiment"
 mkdir -p ${SCRIPT_DIR}/summary-moor-3-2-1
 
@@ -152,10 +149,9 @@ python3 send-prompts.py 3 2 1 64 ${SCRIPT_DIR}/traces-moor-3-2-1/ ${SCRIPT_DIR}/
 
 # cleanup
 for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv | awk '{print $1}' | awk -F ',' '{print $1}');do kill -9 $i;done
-fi
-
+for i in $(ps aux | grep VLLM | awk '{print $2}');do kill -9 $i;done
+for i in $(ps aux | grep python | awk '{print $2}');do kill -9 $i;done
 ##############################################################
-if [[ $2 == "5" ]];then
 echo "Running Moor 2 3 1 experiment"
 mkdir -p ${SCRIPT_DIR}/summary-moor-2-3-1
 
@@ -191,4 +187,5 @@ python3 send-prompts.py 2 3 1 64 ${SCRIPT_DIR}/traces-moor-2-3-1/ ${SCRIPT_DIR}/
 
 # cleanup
 for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv | awk '{print $1}' | awk -F ',' '{print $1}');do kill -9 $i;done
-fi
+for i in $(ps aux | grep VLLM | awk '{print $2}');do kill -9 $i;done
+for i in $(ps aux | grep python | awk '{print $2}');do kill -9 $i;done
