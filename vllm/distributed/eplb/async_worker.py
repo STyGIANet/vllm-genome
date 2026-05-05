@@ -14,7 +14,7 @@ from torch.distributed import ProcessGroup
 from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
 
-from .rebalance_execute import transfer_layer
+from .rebalance_execute import transfer_layer, warmup_eplb_p2p_channels
 
 if TYPE_CHECKING:
     from .eplb_state import EplbModelState, EplbState
@@ -35,6 +35,7 @@ def start_async_worker(
         assert device_index is not None
         torch.accelerator.set_device_index(device_index)
         cuda_stream = torch.cuda.Stream(device=device_index)
+        warmup_eplb_p2p_channels(torch.device("cuda", device_index))
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
