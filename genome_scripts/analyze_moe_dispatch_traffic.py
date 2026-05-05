@@ -672,7 +672,7 @@ for layer in range(1,len(data["per_pass_per_layer"][100])+1):
 
 dfeplb = pd.read_csv("summary-eplb/deepseek-moe-16b-chat_final_summary.csv")
 
-dfmetis = pd.read_csv("summary-metis/deepseek-moe-16b-chat_final_summary.csv")
+dfmetis = pd.read_csv("summary-moor-3-2-1/deepseek-moe-16b-chat_final_summary.csv")
 
 
 figttft, axttft = plt.subplots(1,1,figsize=(16,4))

@@ -85,8 +85,40 @@ def _build_metis_inputs(
     return xadj, adjncy, eweights
 
 
+def _compact_graph_to_active_nodes(
+    coactivation_edges: torch.Tensor,
+    node_activation_counts: torch.Tensor,
+    num_nodes: int,
+) -> tuple[torch.Tensor, list[int]]:
+    active_node_ids = torch.nonzero(
+        node_activation_counts.to(torch.int64).cpu() > 0,
+        as_tuple=False,
+    ).flatten()
+    if active_node_ids.numel() == 0:
+        return coactivation_edges.new_zeros(0, dtype=torch.int64), []
+
+    active_node_ids = active_node_ids.to(torch.int64)
+    num_active_nodes = int(active_node_ids.numel())
+    if num_active_nodes < 2:
+        return coactivation_edges.new_zeros(0, dtype=torch.int64), (
+            active_node_ids.tolist()
+        )
+
+    compact_rows, compact_cols = torch.triu_indices(
+        num_active_nodes, num_active_nodes, offset=1
+    )
+    full_src = active_node_ids[compact_rows]
+    full_dst = active_node_ids[compact_cols]
+    lo = torch.minimum(full_src, full_dst)
+    hi = torch.maximum(full_src, full_dst)
+    full_edge_ids = lo * (2 * num_nodes - lo - 1) // 2 + (hi - lo - 1)
+    compact_edges = coactivation_edges.to(torch.int64).cpu()[full_edge_ids]
+    return compact_edges, active_node_ids.tolist()
+
+
 def _partition_with_metis(
     coactivation_edges: torch.Tensor,
+    node_activation_counts: torch.Tensor,
     layer_ids: list[int],
     num_experts: int,
     num_gpus: int,
@@ -99,17 +131,36 @@ def _partition_with_metis(
     if num_nodes == 0:
         return None
 
-    xadj, adjncy, eweights = _build_metis_inputs(coactivation_edges, num_nodes)
+    compact_edges, active_node_ids = _compact_graph_to_active_nodes(
+        coactivation_edges=coactivation_edges,
+        node_activation_counts=node_activation_counts,
+        num_nodes=num_nodes,
+    )
+    num_active_nodes = len(active_node_ids)
+    if num_active_nodes < 2:
+        return None
+
+    xadj, adjncy, eweights = _build_metis_inputs(compact_edges, num_active_nodes)
     if not adjncy:
         return None
 
-    _, membership = pymetis.part_graph(
+    _, compact_membership = pymetis.part_graph(
         num_gpus,
         xadj=xadj,
         adjncy=adjncy,
         eweights=eweights,
     )
-    return [int(part_id) for part_id in membership]
+
+    membership = [-1] * num_nodes
+    for compact_node_id, full_node_id in enumerate(active_node_ids):
+        membership[full_node_id] = int(compact_membership[compact_node_id])
+
+    logger.info(
+        "METIS node compaction: %d total nodes -> %d active nodes",
+        num_nodes,
+        num_active_nodes,
+    )
+    return membership
 
 
 def _repair_partition_to_layer_configs(
@@ -132,7 +183,10 @@ def _repair_partition_to_layer_configs(
             node_id = layer_pos * num_experts + expert_id
             preferred_gpu = membership[node_id]
 
-            if gpu_counts[preferred_gpu] < slots_per_gpu:
+            if (
+                preferred_gpu >= 0
+                and gpu_counts[preferred_gpu] < slots_per_gpu
+            ):
                 chosen_gpu = preferred_gpu
             else:
                 candidates = [
@@ -182,6 +236,7 @@ def compute_placement(routing: dict) -> dict:
 
     membership = _partition_with_metis(
         coactivation_edges=coactivation_edges,
+        node_activation_counts=node_activation_counts,
         layer_ids=layer_ids,
         num_experts=num_experts,
         num_gpus=num_gpus,
