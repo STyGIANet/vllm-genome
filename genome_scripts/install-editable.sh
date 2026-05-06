@@ -34,6 +34,7 @@ uv pip uninstall nvidia-nvshmem-cu12 nvidia-nvshmem-cu13
 uv pip install nvidia-nvshmem-cu13==3.6.5
 uv pip install packaging
 uv pip install pymetis
+uv pip install datasets hf_transfer
 
 cd ./DeepEP-SM8x
 ./install-deepep.sh
