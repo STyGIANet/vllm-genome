@@ -7,8 +7,12 @@ DatasetSpec = tuple[str, str | None, DatasetFormatter, str]
 
 MIXED_HOTPOT_BOOLQ_NAME = "synthetic/mixed_hotpot_boolq"
 BBH_ALL_NAME = "synthetic/bbh_all"
+SPEED_BENCH_NAME = "nvidia/SPEED-Bench"
 MIXED_DATASET_SHUFFLE_SEED = 17
 MIXED_DATASET_STRIDE = 10
+SPEED_BENCH_MASKED_SENTINEL = (
+    "FULL BENCHMARK DATA SHOULD BE FETCHED FROM THE SOURCE USING SPECDEC_BENCH"
+)
 
 
 def format_hotpotqa(ex):
@@ -136,6 +140,31 @@ def format_gsm8k(ex):
 def format_bbh(ex):
     return {
         "question": ex["input"],
+    }
+
+
+def format_speed_bench(ex):
+    turns = ex.get("turns") or []
+    cleaned_turns = [
+        turn.strip()
+        for turn in turns
+        if isinstance(turn, str)
+        and turn.strip()
+        and SPEED_BENCH_MASKED_SENTINEL not in turn
+    ]
+    if not cleaned_turns:
+        return None
+
+    if len(cleaned_turns) == 1:
+        question = cleaned_turns[0]
+    else:
+        question = "\n\n".join(
+            f"Turn {idx + 1}:\n{turn}"
+            for idx, turn in enumerate(cleaned_turns)
+        )
+
+    return {
+        "question": question,
     }
 
 
@@ -285,6 +314,42 @@ ALL_DATASETS: dict[str, DatasetSpec] = {
         format_gsm8k,
         "test",
     ),
+    "speed_bench_qualitative": (
+        SPEED_BENCH_NAME,
+        "qualitative",
+        format_speed_bench,
+        "test",
+    ),
+    "speed_bench_throughput_1k": (
+        SPEED_BENCH_NAME,
+        "throughput_1k",
+        format_speed_bench,
+        "test",
+    ),
+    "speed_bench_throughput_2k": (
+        SPEED_BENCH_NAME,
+        "throughput_2k",
+        format_speed_bench,
+        "test",
+    ),
+    "speed_bench_throughput_8k": (
+        SPEED_BENCH_NAME,
+        "throughput_8k",
+        format_speed_bench,
+        "test",
+    ),
+    "speed_bench_throughput_16k": (
+        SPEED_BENCH_NAME,
+        "throughput_16k",
+        format_speed_bench,
+        "test",
+    ),
+    "speed_bench_throughput_32k": (
+        SPEED_BENCH_NAME,
+        "throughput_32k",
+        format_speed_bench,
+        "test",
+    ),
 }
 
 ALL_DATASETS.update(
@@ -301,6 +366,12 @@ ALL_DATASETS.update(
 
 
 SEND_PROMPTS_DATASETS: list[DatasetSpec] = [
+    ALL_DATASETS["speed_bench_qualitative"],
+    ALL_DATASETS["speed_bench_throughput_1k"],
+    ALL_DATASETS["speed_bench_throughput_2k"],
+    ALL_DATASETS["speed_bench_throughput_8k"],
+    ALL_DATASETS["speed_bench_throughput_16k"],
+    ALL_DATASETS["speed_bench_throughput_32k"],
     ALL_DATASETS["gsm8k_main"],
     ALL_DATASETS["bbh_all"],
     ALL_DATASETS["humaneval"],
