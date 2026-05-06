@@ -36,7 +36,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-0-0-0
 
 sleep 90
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-moor-0-0-0/ ${SCRIPT_DIR}/traffic-moor-0-0-0/ ${SCRIPT_DIR}/summary-moor-0-0-0/ \
+python3 send-prompts.py 0 0 0 128 ${SCRIPT_DIR}/traces-moor-0-0-0/ ${SCRIPT_DIR}/traffic-moor-0-0-0/ ${SCRIPT_DIR}/summary-moor-0-0-0/ \
 	> ${SCRIPT_DIR}/summary-moor-0-0-0/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-0-0-0/all-results.txt
 
 
@@ -65,7 +65,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moorvertex-0-0-0
 
 sleep 90
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-moorvertex-0-0-0/ ${SCRIPT_DIR}/traffic-moorvertex-0-0-0/ ${SCRIPT_DIR}/summary-moorvertex-0-0-0/ \
+python3 send-prompts.py 0 0 0 128 ${SCRIPT_DIR}/traces-moorvertex-0-0-0/ ${SCRIPT_DIR}/traffic-moorvertex-0-0-0/ ${SCRIPT_DIR}/summary-moorvertex-0-0-0/ \
 	> ${SCRIPT_DIR}/summary-moorvertex-0-0-0/all-results.txt 2> ${SCRIPT_DIR}/summary-moorvertex-0-0-0/all-results.txt
 
 
@@ -93,7 +93,7 @@ mkdir -p ${SCRIPT_DIR}/summary-eplb
 sleep 90
 
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-eplb/ ${SCRIPT_DIR}/traffic-eplb/ ${SCRIPT_DIR}/summary-eplb/ \
+python3 send-prompts.py 0 0 0 128 ${SCRIPT_DIR}/traces-eplb/ ${SCRIPT_DIR}/traffic-eplb/ ${SCRIPT_DIR}/summary-eplb/ \
 	> ${SCRIPT_DIR}/summary-eplb/all-results.txt 2> ${SCRIPT_DIR}/summary-eplb/all-results.txt
 
 
@@ -121,7 +121,7 @@ mkdir -p ${SCRIPT_DIR}/summary-vllm
 sleep 90
 
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-vllm/ ${SCRIPT_DIR}/traffic-vllm/ ${SCRIPT_DIR}/summary-vllm/ \
+python3 send-prompts.py 0 0 0 128 ${SCRIPT_DIR}/traces-vllm/ ${SCRIPT_DIR}/traffic-vllm/ ${SCRIPT_DIR}/summary-vllm/ \
 	> ${SCRIPT_DIR}/summary-vllm/all-results.txt 2> ${SCRIPT_DIR}/summary-vllm/all-results.txt
 
 
@@ -160,7 +160,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-1-2-3
 sleep 90
 
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 1 2 3 64 ${SCRIPT_DIR}/traces-moor-1-2-3/ ${SCRIPT_DIR}/traffic-moor-1-2-3/ ${SCRIPT_DIR}/summary-moor-1-2-3/ \
+python3 send-prompts.py 1 2 3 128 ${SCRIPT_DIR}/traces-moor-1-2-3/ ${SCRIPT_DIR}/traffic-moor-1-2-3/ ${SCRIPT_DIR}/summary-moor-1-2-3/ \
 	> ${SCRIPT_DIR}/summary-moor-1-2-3/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-1-2-3/all-results.txt
 
 
@@ -198,7 +198,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-3-2-1
 sleep 90
 
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 3 2 1 64 ${SCRIPT_DIR}/traces-moor-3-2-1/ ${SCRIPT_DIR}/traffic-moor-3-2-1/ ${SCRIPT_DIR}/summary-moor-3-2-1/ \
+python3 send-prompts.py 3 2 1 128 ${SCRIPT_DIR}/traces-moor-3-2-1/ ${SCRIPT_DIR}/traffic-moor-3-2-1/ ${SCRIPT_DIR}/summary-moor-3-2-1/ \
 	> ${SCRIPT_DIR}/summary-moor-3-2-1/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-3-2-1/all-results.txt
 
 
@@ -236,7 +236,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-2-3-1
 sleep 90
 
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 2 3 1 64 ${SCRIPT_DIR}/traces-moor-2-3-1/ ${SCRIPT_DIR}/traffic-moor-2-3-1/ ${SCRIPT_DIR}/summary-moor-2-3-1/ \
+python3 send-prompts.py 2 3 1 128 ${SCRIPT_DIR}/traces-moor-2-3-1/ ${SCRIPT_DIR}/traffic-moor-2-3-1/ ${SCRIPT_DIR}/summary-moor-2-3-1/ \
 	> ${SCRIPT_DIR}/summary-moor-2-3-1/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-2-3-1/all-results.txt
 
 
