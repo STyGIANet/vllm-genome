@@ -17,14 +17,14 @@ source ${SCRIPT_DIR}/../.venv/bin/activate
 ##############################################################
 echo "Running Moor 0 0 0 experiment"
 mkdir -p ${SCRIPT_DIR}/summary-moor-0-0-0
-
+DUMP_FILE=${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt
 (vllm serve $MODEL \
 		--tensor-parallel-size 8 \
 		--data-parallel-size 1 \
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 32768 \
+		--max_num_batched_tokens 65536 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -32,9 +32,9 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-0-0-0
 		--enable-eplb \
 		--eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0,"graph_ema_alpha":0.5}' \
 		--placement-callback-path ${PLACEMENT_PATH} \
-		--placement-callback-func compute_placement  > ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt) &
+		--placement-callback-func compute_placement  > $DUMP_FILE 2> $DUMP_FILE) &
 
-while [[ $(cat ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt | grep 'completions') == "" ]];do
+while [[ $(cat $DUMP_FILE | grep 'completions') == "" ]];do
 	echo "Waiting for vLLM to start..."
 	sleep 1
 done
@@ -50,14 +50,14 @@ for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format
 ##############################################################
 echo "Running MoorVertex 0 0 0 experiment"
 mkdir -p ${SCRIPT_DIR}/summary-moorvertex-0-0-0
-
+DUMP_FILE=${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt
 (vllm serve $MODEL \
 		--tensor-parallel-size 8 \
 		--data-parallel-size 1 \
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 32768 \
+		--max_num_batched_tokens 65536 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -65,9 +65,9 @@ mkdir -p ${SCRIPT_DIR}/summary-moorvertex-0-0-0
 		--enable-eplb \
 		--eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0,"graph_ema_alpha":0.5}' \
 		--placement-callback-path "${SCRIPT_DIR}/expert-placement/placement_fns_vweights.py" \
-		--placement-callback-func compute_placement  > ${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt) &
+		--placement-callback-func compute_placement  > $DUMP_FILE 2> $DUMP_FILE) &
 
-while [[ $(cat ${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt | grep 'completions') == "" ]];do
+while [[ $(cat $DUMP_FILE | grep 'completions') == "" ]];do
 	echo "Waiting for vLLM to start..."
 	sleep 1
 done
@@ -83,23 +83,23 @@ for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format
 ##############################################################
 echo "Running EPLB experiment"
 mkdir -p ${SCRIPT_DIR}/summary-eplb
-
+DUMP_FILE=${SCRIPT_DIR}/summary-eplb/vllm-log.txt
 (vllm serve $MODEL \
 		--tensor-parallel-size 8 \
 		--data-parallel-size 1 \
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 32768 \
+		--max_num_batched_tokens 65536 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
 		--load-score-routing-weight 0.5 \
 		--enable-eplb \
-		--eplb-config '{"use_async":false,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' > ${SCRIPT_DIR}/summary-eplb/vllm-log.txt 2> ${SCRIPT_DIR}/summary-eplb/vllm-log.txt )&
+		--eplb-config '{"use_async":false,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' > $DUMP_FILE 2> $DUMP_FILE )&
 		# Crashing with async
 
-while [[ $(cat ${SCRIPT_DIR}/summary-eplb/vllm-log.txt | grep 'completions') == "" ]];do
+while [[ $(cat $DUMP_FILE | grep 'completions') == "" ]];do
 	echo "Waiting for vLLM to start..."
 	sleep 1
 done
@@ -116,21 +116,21 @@ for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format
 ##############################################################
 echo "Running vLLM experiment"
 mkdir -p ${SCRIPT_DIR}/summary-vllm
-
+DUMP_FILE=${SCRIPT_DIR}/summary-vllm/vllm-log.txt
 (vllm serve $MODEL \
 		--tensor-parallel-size 8 \
 		--data-parallel-size 1 \
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 32768 \
+		--max_num_batched_tokens 65536 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
 		--load-score-routing-weight 0.5 \
-		 > ${SCRIPT_DIR}/summary-vllm/vllm-log.txt 2> ${SCRIPT_DIR}/summary-vllm/vllm-log.txt )&
+		 > $DUMP_FILE 2> $DUMP_FILE )&
 
-while [[ $(cat ${SCRIPT_DIR}/summary-vllm/vllm-log.txt | grep 'completions') == "" ]];do
+while [[ $(cat $DUMP_FILE | grep 'completions') == "" ]];do
 	echo "Waiting for vLLM to start..."
 	sleep 1
 done
