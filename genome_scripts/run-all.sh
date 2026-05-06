@@ -43,7 +43,34 @@ python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-moor-0-0-0/ ${SCRIPT_DIR}/
 # cleanup
 for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv | awk '{print $1}' | awk -F ',' '{print $1}');do kill -9 $i;done
 
+##############################################################
+echo "Running MoorVertex 0 0 0 experiment"
+mkdir -p ${SCRIPT_DIR}/summary-moorvertex-0-0-0
 
+(vllm serve $MODEL \
+		--tensor-parallel-size 1 \
+		--data-parallel-size 8 \
+		--enable-expert-parallel \
+		--all2all-backend deepep_high_throughput \
+		--trust_remote_code \
+		--max_num_batched_tokens 2048 \
+		--api-server-count=1 \
+		--expert-affinity-routing-weight 1 \
+		--kv-block-prefix-routing-weight 0.5 \
+		--load-score-routing-weight 0.5 \
+		--enable-eplb \
+		--eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0,"graph_ema_alpha":0.5}' \
+		--placement-callback-path "${SCRIPT_DIR}/expert-placement/placement_fns_vweights.py" \
+		--placement-callback-func compute_placement  > ${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt) &
+
+sleep 60
+cd ${SCRIPT_DIR}/online-inference/
+python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-moorvertex-0-0-0/ ${SCRIPT_DIR}/traffic-moorvertex-0-0-0/ ${SCRIPT_DIR}/summary-moorvertex-0-0-0/ \
+	> ${SCRIPT_DIR}/summary-moorvertex-0-0-0/all-results.txt 2> ${SCRIPT_DIR}/summary-moorvertex-0-0-0/all-results.txt
+
+
+# cleanup
+for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv | awk '{print $1}' | awk -F ',' '{print $1}');do kill -9 $i;done
 
 ##############################################################
 echo "Running EPLB experiment"
@@ -72,6 +99,35 @@ python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-eplb/ ${SCRIPT_DIR}/traffi
 
 # cleanup
 for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv | awk '{print $1}' | awk -F ',' '{print $1}');do kill -9 $i;done
+
+##############################################################
+echo "Running vLLM experiment"
+mkdir -p ${SCRIPT_DIR}/summary-vllm
+
+(vllm serve $MODEL \
+		--tensor-parallel-size 1 \
+		--data-parallel-size 8 \
+		--enable-expert-parallel \
+		--all2all-backend deepep_high_throughput \
+		--trust_remote_code \
+		--max_num_batched_tokens 2048 \
+		--api-server-count=1 \
+		--expert-affinity-routing-weight 1 \
+		--kv-block-prefix-routing-weight 0.5 \
+		--load-score-routing-weight 0.5 \
+		--enable-eplb \
+		--eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' > ${SCRIPT_DIR}/summary-vllm/vllm-log.txt 2> ${SCRIPT_DIR}/summary-vllm/vllm-log.txt )&
+
+sleep 60
+
+cd ${SCRIPT_DIR}/online-inference/
+python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-vllm/ ${SCRIPT_DIR}/traffic-vllm/ ${SCRIPT_DIR}/summary-vllm/ \
+	> ${SCRIPT_DIR}/summary-vllm/all-results.txt 2> ${SCRIPT_DIR}/summary-vllm/all-results.txt
+
+
+# cleanup
+for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv | awk '{print $1}' | awk -F ',' '{print $1}');do kill -9 $i;done
+
 
 
 ##############################################################
