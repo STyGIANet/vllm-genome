@@ -24,7 +24,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-0-0-0
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 8192 \
+		--max_num_batched_tokens 2048 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -53,7 +53,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moorvertex-0-0-0
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 8192 \
+		--max_num_batched_tokens 2048 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -82,7 +82,7 @@ mkdir -p ${SCRIPT_DIR}/summary-eplb
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 8192 \
+		--max_num_batched_tokens 2048 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -110,7 +110,7 @@ mkdir -p ${SCRIPT_DIR}/summary-vllm
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 8192 \
+		--max_num_batched_tokens 2048 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -140,7 +140,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-1-2-3
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 8192 \
+		--max_num_batched_tokens 2048 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -178,7 +178,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-3-2-1
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 8192 \
+		--max_num_batched_tokens 2048 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -216,7 +216,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-2-3-1
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 8192 \
+		--max_num_batched_tokens 2048 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -258,7 +258,7 @@ export TRAFFIC_DIR=${SCRIPT_DIR}/traffic-moor-tracing/
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 8192 \
+		--max_num_batched_tokens 2048 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
