@@ -24,7 +24,7 @@ DUMP_FILE=${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 65536 \
+		--max_num_batched_tokens 32768 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -57,7 +57,7 @@ DUMP_FILE=${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 65536 \
+		--max_num_batched_tokens 32768 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -90,7 +90,7 @@ DUMP_FILE=${SCRIPT_DIR}/summary-eplb/vllm-log.txt
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 65536 \
+		--max_num_batched_tokens 32768 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -123,7 +123,7 @@ DUMP_FILE=${SCRIPT_DIR}/summary-vllm/vllm-log.txt
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 65536 \
+		--max_num_batched_tokens 32768 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \

@@ -17,7 +17,7 @@ source ${SCRIPT_DIR}/../.venv/bin/activate
 ##############################################################
 echo "Running Moor 0 0 0 experiment"
 mkdir -p ${SCRIPT_DIR}/summary-moor-0-0-0
-
+DUMP_FILE=${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt
 (vllm serve $MODEL \
 		--tensor-parallel-size 1 \
 		--data-parallel-size 8 \
@@ -32,11 +32,15 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-0-0-0
 		--enable-eplb \
 		--eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0,"graph_ema_alpha":0.5}' \
 		--placement-callback-path ${PLACEMENT_PATH} \
-		--placement-callback-func compute_placement  > ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt) &
+		--placement-callback-func compute_placement  > $DUMP_FILE 2> $DUMP_FILE) &
 
-sleep 60
+while [[ $(cat $DUMP_FILE | grep 'completions') == "" ]];do
+	echo "Waiting for vLLM to start..."
+	sleep 1
+done
+
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-moor-0-0-0/ ${SCRIPT_DIR}/traffic-moor-0-0-0/ ${SCRIPT_DIR}/summary-moor-0-0-0/ \
+python3 send-prompts.py 0 0 0 128 ${SCRIPT_DIR}/traces-moor-0-0-0/ ${SCRIPT_DIR}/traffic-moor-0-0-0/ ${SCRIPT_DIR}/summary-moor-0-0-0/ \
 	> ${SCRIPT_DIR}/summary-moor-0-0-0/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-0-0-0/all-results.txt
 
 
@@ -46,7 +50,7 @@ for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format
 ##############################################################
 echo "Running MoorVertex 0 0 0 experiment"
 mkdir -p ${SCRIPT_DIR}/summary-moorvertex-0-0-0
-
+DUMP_FILE=${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt
 (vllm serve $MODEL \
 		--tensor-parallel-size 1 \
 		--data-parallel-size 8 \
@@ -61,11 +65,15 @@ mkdir -p ${SCRIPT_DIR}/summary-moorvertex-0-0-0
 		--enable-eplb \
 		--eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0,"graph_ema_alpha":0.5}' \
 		--placement-callback-path "${SCRIPT_DIR}/expert-placement/placement_fns_vweights.py" \
-		--placement-callback-func compute_placement  > ${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt) &
+		--placement-callback-func compute_placement  > $DUMP_FILE 2> $DUMP_FILE) &
 
-sleep 60
+while [[ $(cat $DUMP_FILE | grep 'completions') == "" ]];do
+	echo "Waiting for vLLM to start..."
+	sleep 1
+done
+
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-moorvertex-0-0-0/ ${SCRIPT_DIR}/traffic-moorvertex-0-0-0/ ${SCRIPT_DIR}/summary-moorvertex-0-0-0/ \
+python3 send-prompts.py 0 0 0 128 ${SCRIPT_DIR}/traces-moorvertex-0-0-0/ ${SCRIPT_DIR}/traffic-moorvertex-0-0-0/ ${SCRIPT_DIR}/summary-moorvertex-0-0-0/ \
 	> ${SCRIPT_DIR}/summary-moorvertex-0-0-0/all-results.txt 2> ${SCRIPT_DIR}/summary-moorvertex-0-0-0/all-results.txt
 
 
@@ -75,7 +83,7 @@ for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format
 ##############################################################
 echo "Running EPLB experiment"
 mkdir -p ${SCRIPT_DIR}/summary-eplb
-
+DUMP_FILE=${SCRIPT_DIR}/summary-eplb/vllm-log.txt
 (vllm serve $MODEL \
 		--tensor-parallel-size 1 \
 		--data-parallel-size 8 \
@@ -88,12 +96,17 @@ mkdir -p ${SCRIPT_DIR}/summary-eplb
 		--kv-block-prefix-routing-weight 0.5 \
 		--load-score-routing-weight 0.5 \
 		--enable-eplb \
-		--eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' > ${SCRIPT_DIR}/summary-eplb/vllm-log.txt 2> ${SCRIPT_DIR}/summary-eplb/vllm-log.txt )&
+		--eplb-config '{"use_async":false,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' > $DUMP_FILE 2> $DUMP_FILE )&
+		# Crashing with async
 
-sleep 60
+while [[ $(cat $DUMP_FILE | grep 'completions') == "" ]];do
+	echo "Waiting for vLLM to start..."
+	sleep 1
+done
+
 
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-eplb/ ${SCRIPT_DIR}/traffic-eplb/ ${SCRIPT_DIR}/summary-eplb/ \
+python3 send-prompts.py 0 0 0 128 ${SCRIPT_DIR}/traces-eplb/ ${SCRIPT_DIR}/traffic-eplb/ ${SCRIPT_DIR}/summary-eplb/ \
 	> ${SCRIPT_DIR}/summary-eplb/all-results.txt 2> ${SCRIPT_DIR}/summary-eplb/all-results.txt
 
 
@@ -103,7 +116,7 @@ for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format
 ##############################################################
 echo "Running vLLM experiment"
 mkdir -p ${SCRIPT_DIR}/summary-vllm
-
+DUMP_FILE=${SCRIPT_DIR}/summary-vllm/vllm-log.txt
 (vllm serve $MODEL \
 		--tensor-parallel-size 1 \
 		--data-parallel-size 8 \
@@ -115,20 +128,24 @@ mkdir -p ${SCRIPT_DIR}/summary-vllm
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
 		--load-score-routing-weight 0.5 \
-		--enable-eplb \
-		--eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' > ${SCRIPT_DIR}/summary-vllm/vllm-log.txt 2> ${SCRIPT_DIR}/summary-vllm/vllm-log.txt )&
+		 > $DUMP_FILE 2> $DUMP_FILE )&
 
-sleep 60
+while [[ $(cat $DUMP_FILE | grep 'completions') == "" ]];do
+	echo "Waiting for vLLM to start..."
+	sleep 1
+done
+
 
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 0 0 0 64 ${SCRIPT_DIR}/traces-vllm/ ${SCRIPT_DIR}/traffic-vllm/ ${SCRIPT_DIR}/summary-vllm/ \
+python3 send-prompts.py 0 0 0 128 ${SCRIPT_DIR}/traces-vllm/ ${SCRIPT_DIR}/traffic-vllm/ ${SCRIPT_DIR}/summary-vllm/ \
 	> ${SCRIPT_DIR}/summary-vllm/all-results.txt 2> ${SCRIPT_DIR}/summary-vllm/all-results.txt
 
 
 # cleanup
 for i in $(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv | awk '{print $1}' | awk -F ',' '{print $1}');do kill -9 $i;done
 
-
+##################### Exiting here ##########################
+exit
 
 ##############################################################
 echo "Running Moor 1 2 3 experiment"
@@ -157,10 +174,14 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-1-2-3
 		--prefix-learning-algorithm prefixtrie > ${SCRIPT_DIR}/summary-moor-1-2-3/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-1-2-3/vllm-log.txt )&
 
 
-sleep 60
+while [[ $(cat ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt | grep 'completions') == "" ]];do
+	echo "Waiting for vLLM to start..."
+	sleep 1
+done
+
 
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 1 2 3 64 ${SCRIPT_DIR}/traces-moor-1-2-3/ ${SCRIPT_DIR}/traffic-moor-1-2-3/ ${SCRIPT_DIR}/summary-moor-1-2-3/ \
+python3 send-prompts.py 1 2 3 128 ${SCRIPT_DIR}/traces-moor-1-2-3/ ${SCRIPT_DIR}/traffic-moor-1-2-3/ ${SCRIPT_DIR}/summary-moor-1-2-3/ \
 	> ${SCRIPT_DIR}/summary-moor-1-2-3/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-1-2-3/all-results.txt
 
 
@@ -195,10 +216,14 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-3-2-1
 		--prefix-learning-algorithm prefixtrie > ${SCRIPT_DIR}/summary-moor-3-2-1/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-3-2-1/vllm-log.txt )&
 
 
-sleep 60
+while [[ $(cat ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt | grep 'completions') == "" ]];do
+	echo "Waiting for vLLM to start..."
+	sleep 1
+done
+
 
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 3 2 1 64 ${SCRIPT_DIR}/traces-moor-3-2-1/ ${SCRIPT_DIR}/traffic-moor-3-2-1/ ${SCRIPT_DIR}/summary-moor-3-2-1/ \
+python3 send-prompts.py 3 2 1 128 ${SCRIPT_DIR}/traces-moor-3-2-1/ ${SCRIPT_DIR}/traffic-moor-3-2-1/ ${SCRIPT_DIR}/summary-moor-3-2-1/ \
 	> ${SCRIPT_DIR}/summary-moor-3-2-1/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-3-2-1/all-results.txt
 
 
@@ -233,10 +258,14 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-2-3-1
 		--prefix-learning-algorithm prefixtrie > ${SCRIPT_DIR}/summary-moor-2-3-1/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-2-3-1/vllm-log.txt ) &
 
 
-sleep 60
+while [[ $(cat ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt | grep 'completions') == "" ]];do
+	echo "Waiting for vLLM to start..."
+	sleep 1
+done
+
 
 cd ${SCRIPT_DIR}/online-inference/
-python3 send-prompts.py 2 3 1 64 ${SCRIPT_DIR}/traces-moor-2-3-1/ ${SCRIPT_DIR}/traffic-moor-2-3-1/ ${SCRIPT_DIR}/summary-moor-2-3-1/ \
+python3 send-prompts.py 2 3 1 128 ${SCRIPT_DIR}/traces-moor-2-3-1/ ${SCRIPT_DIR}/traffic-moor-2-3-1/ ${SCRIPT_DIR}/summary-moor-2-3-1/ \
 	> ${SCRIPT_DIR}/summary-moor-2-3-1/all-results.txt 2> ${SCRIPT_DIR}/summary-moor-2-3-1/all-results.txt
 
 
@@ -271,7 +300,11 @@ export TRAFFIC_DIR=${SCRIPT_DIR}/traffic-moor-tracing/
 		--placement-routing-dump-dir ${TRACE_DIR} > ${SCRIPT_DIR}/summary-moor-tracing/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moor-tracing/vllm-log.txt ) &
 
 
-sleep 60
+while [[ $(cat ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt | grep 'completions') == "" ]];do
+	echo "Waiting for vLLM to start..."
+	sleep 1
+done
+
 
 cd ${SCRIPT_DIR}/online-inference/
 python3 send-prompts.py 0 0 0 64 ${TRACE_DIR} ${TRAFFIC_DIR} ${SCRIPT_DIR}/summary-moor-tracing/ \
