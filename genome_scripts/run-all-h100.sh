@@ -24,7 +24,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moor-0-0-0
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 16384 \
+		--max_num_batched_tokens 32768 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -57,7 +57,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moorvertex-0-0-0
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 16384 \
+		--max_num_batched_tokens 32768 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -67,7 +67,7 @@ mkdir -p ${SCRIPT_DIR}/summary-moorvertex-0-0-0
 		--placement-callback-path "${SCRIPT_DIR}/expert-placement/placement_fns_vweights.py" \
 		--placement-callback-func compute_placement  > ${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt 2> ${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt) &
 
-while [[ $(cat ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt | grep 'completions') == "" ]];do
+while [[ $(cat ${SCRIPT_DIR}/summary-moorvertex-0-0-0/vllm-log.txt | grep 'completions') == "" ]];do
 	echo "Waiting for vLLM to start..."
 	sleep 1
 done
@@ -90,7 +90,7 @@ mkdir -p ${SCRIPT_DIR}/summary-eplb
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 16384 \
+		--max_num_batched_tokens 32768 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
@@ -99,7 +99,7 @@ mkdir -p ${SCRIPT_DIR}/summary-eplb
 		--eplb-config '{"use_async":false,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' > ${SCRIPT_DIR}/summary-eplb/vllm-log.txt 2> ${SCRIPT_DIR}/summary-eplb/vllm-log.txt )&
 		# Crashing with async
 
-while [[ $(cat ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt | grep 'completions') == "" ]];do
+while [[ $(cat ${SCRIPT_DIR}/summary-eplb/vllm-log.txt | grep 'completions') == "" ]];do
 	echo "Waiting for vLLM to start..."
 	sleep 1
 done
@@ -123,14 +123,14 @@ mkdir -p ${SCRIPT_DIR}/summary-vllm
 		--enable-expert-parallel \
 		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 16384 \
+		--max_num_batched_tokens 32768 \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
 		--load-score-routing-weight 0.5 \
 		 > ${SCRIPT_DIR}/summary-vllm/vllm-log.txt 2> ${SCRIPT_DIR}/summary-vllm/vllm-log.txt )&
 
-while [[ $(cat ${SCRIPT_DIR}/summary-moor-0-0-0/vllm-log.txt | grep 'completions') == "" ]];do
+while [[ $(cat ${SCRIPT_DIR}/summary-vllm/vllm-log.txt | grep 'completions') == "" ]];do
 	echo "Waiting for vLLM to start..."
 	sleep 1
 done
