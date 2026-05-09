@@ -52,6 +52,14 @@ from vllm.forward_context import (
     BatchDescriptor,
     set_forward_context,
 )
+# ###### STyGIANet #######
+from vllm.genome.gpu_model_runner_routing import (
+    GenomeRoutingPlacementRunnerMixin,
+)
+from vllm.genome.gpu_model_runner_prefix_learning import (
+    GenomePrefixLearningCaptureRunnerMixin,
+)
+# ###### /STyGIANet #######
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention, MLAAttention
@@ -396,9 +404,15 @@ class ExecuteModelState(NamedTuple):
     prefill_capture_req_ids: list[str]
 
 
+# ###### STyGIANet #######
 class GPUModelRunner(
-    LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
+    GenomeRoutingPlacementRunnerMixin,
+    GenomePrefixLearningCaptureRunnerMixin,
+    LoRAModelRunnerMixin,
+    KVConnectorModelRunnerMixin,
+    ECConnectorModelRunnerMixin,
 ):
+# ###### /STyGIANet #######
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -491,44 +505,9 @@ class GPUModelRunner(
         self.eplb_state: EplbState | None = None
         # NOTE(yongji): flag to temporarily disable EPLB during scaling up/down
         self.eep_eplb_suppressed = False
-        self._current_prefill_capture_ranges: list[tuple[int, int]] = []
-        self._current_prefill_capture_req_ids: list[str] = []
-        self._last_prefix_router_placement_epoch: int | None = None
-        self._last_prefix_router_physical_to_logical_map: torch.Tensor | None = None
-        self._prefix_learning_owner_cache_epoch: int | None = None
-        self._prefix_learning_owner_lookup: torch.Tensor | None = None
-        self._prefix_learning_owner_rank_lookup: torch.Tensor | None = None
-        self._prefix_learning_num_layers = 0
-        self._prefix_learning_num_experts = 0
-        self._prefix_learning_seen_pairs_buffer: torch.Tensor | None = None
-        self._prefix_learning_owner_counts_buffer: torch.Tensor | None = None
-        self._prefix_learning_req_slot_by_id: dict[str, int] = {}
-        self._prefix_learning_req_id_by_slot: list[str | None] = []
-        self._prefix_learning_free_slots: list[int] = []
-        self._prefix_learning_step_req_ids: list[str] = []
-        self._prefix_learning_step_req_lengths: list[int] = []
-        self._prefix_learning_step_total_prompt_tokens = 0
-        self._prefix_learning_step_topk_by_layer: dict[int, list[torch.Tensor]] = {}
-        self._prefix_learning_async_step_seq = 0
-        self._prefix_learning_last_step_seq_by_req: dict[str, int] = {}
-        self._prefix_learning_pending_async_req_steps: dict[str, int] = {}
-        self._prefix_learning_pending_copy_jobs: list[PrefixLearningPendingCopyJob] = []
-        self._prefix_learning_copy_stream: torch.cuda.Stream | None = None
-        self._prefix_learning_async_learner: AsyncPrefixLearningOwnerLearner | None = None
-        self._prefix_learning_trace_debug = bool(
-            getattr(self.model_config, "load_balancer_debug", False)
-        )
-        self._prefix_learning_dummy_owner_enabled = bool(
-            int(os.getenv("VLLM_PREFIX_LEARNING_DUMMY_OWNER", "0"))
-        )
-        self._skip_prefix_learning_capture_for_current_forward = False
-        self._placement_routing_dump_session_dir: str | None = None
-        if self.model_config.placement_routing_dump_dir:
-            self._placement_routing_dump_session_dir = (
-                self._make_placement_routing_dump_session_dir(
-                    self.model_config.placement_routing_dump_dir
-                )
-            )
+        # ###### STyGIANet #######
+        self._init_genome_prefix_learning_state()
+        # ###### /STyGIANet #######
         """
         State of the expert parallelism load balancer.
 
@@ -1114,7 +1093,9 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            # ###### STyGIANet #######
             self._free_prefix_learning_slot(req_id)
+            # ###### /STyGIANet #######
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -2127,48 +2108,6 @@ class GPUModelRunner(
             spec_decode_metadata,
         )
 
-    def _build_moe_dispatch_traffic_batch_signature(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> str:
-        num_reqs = self.input_batch.num_reqs
-        req_ids = self.input_batch.req_ids[:num_reqs]
-
-        hasher = hashlib.sha256()
-        hasher.update(b"scheduled-batch-v1")
-        hasher.update(len(req_ids).to_bytes(8, "little", signed=False))
-
-        for req_id in req_ids:
-            req_index = self.input_batch.req_id_to_index[req_id]
-            num_scheduled = int(scheduler_output.num_scheduled_tokens[req_id])
-            num_computed = int(self.input_batch.num_computed_tokens_cpu[req_index])
-
-            req_id_bytes = req_id.encode("utf-8")
-            hasher.update(len(req_id_bytes).to_bytes(8, "little", signed=False))
-            hasher.update(req_id_bytes)
-            hasher.update(num_scheduled.to_bytes(8, "little", signed=False))
-            hasher.update(num_computed.to_bytes(8, "little", signed=False))
-
-        return hasher.hexdigest()
-
-    def _build_profile_moe_dispatch_traffic_batch_signature(
-        self,
-        num_scheduled_tokens: np.ndarray,
-    ) -> str:
-        hasher = hashlib.sha256()
-        hasher.update(b"profile-batch-v1")
-        hasher.update(len(num_scheduled_tokens).to_bytes(8, "little", signed=False))
-        for num_scheduled in num_scheduled_tokens.tolist():
-            hasher.update(int(num_scheduled).to_bytes(8, "little", signed=False))
-        return hasher.hexdigest()
-
-    def _needs_prefill_capture_metadata(self) -> bool:
-        return bool(
-            self.model_config.enable_prefix_affinity_routing
-            or self.model_config.enable_return_routed_experts
-            or self._compute_placement_callback is not None
-        )
-
     def _build_attention_metadata(
         self,
         num_tokens: int,
@@ -2241,6 +2180,7 @@ class GPUModelRunner(
         block_table_gid_0 = _get_block_table(0)
         slot_mapping_gid_0 = slot_mappings[0]
 
+        # ###### STyGIANet #######
         if (
             self.model_config.enable_return_routed_experts
             and self.routed_experts_initialized
@@ -2248,6 +2188,7 @@ class GPUModelRunner(
             attn_gid = self.routed_experts_attn_gid
             slot_mapping_attn = slot_mappings[attn_gid]
             self.slot_mapping = slot_mapping_attn[:num_tokens].cpu().numpy()
+        # ###### /STyGIANet #######
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs_padded
         ]
@@ -2438,26 +2379,10 @@ class GPUModelRunner(
                 spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
             )
 
-        prefill_capture_ranges: list[tuple[int, int]] = []
-        prefill_capture_req_ids: list[str] = []
-        if (
-            self._needs_prefill_capture_metadata()
-            and cm_base.is_prefilling is not None
-        ):
-            query_start_loc_cpu = cm_base.query_start_loc_cpu
-            num_capture_reqs = min(
-                len(cm_base.is_prefilling),
-                query_start_loc_cpu.shape[0] - 1,
-                len(self.input_batch.req_ids),
-            )
-            for req_idx in range(num_capture_reqs):
-                if not bool(cm_base.is_prefilling[req_idx].item()):
-                    continue
-                start = int(query_start_loc_cpu[req_idx].item())
-                end = int(query_start_loc_cpu[req_idx + 1].item())
-                if end > start:
-                    prefill_capture_ranges.append((start, end))
-                    prefill_capture_req_ids.append(self.input_batch.req_ids[req_idx])
+        (
+            prefill_capture_ranges,
+            prefill_capture_req_ids,
+        ) = self._build_prefill_capture_metadata(cm_base)
 
         return (
             attn_metadata,
@@ -3197,404 +3122,6 @@ class GPUModelRunner(
             }
         )
 
-    # Optional user callback: compute_placement(routing_snapshot) -> dict
-    # Set this on the model runner to enable custom placement on EPLB
-    # rearrangement steps. The forward path does not compute placement; it only
-    # contributes prefill-only co-activation edge counts to the current EPLB
-    # window, and the callback runs later from StaticPlacementPolicy during the
-    # normal rearrange() cadence.
-    _compute_placement_callback: object = None
-
-    def _uses_graph_only_callback_placement(self) -> bool:
-        return bool(
-            self._compute_placement_callback
-            and self.parallel_config.enable_eplb
-            and self.parallel_config.eplb_config.policy == "custom"
-        )
-
-    def _make_placement_routing_dump_session_dir(
-        self,
-        dump_dir: str,
-        session_name: str | None = None,
-    ) -> str:
-        if session_name is None:
-            session_name = f"session_{time.time_ns()}"
-        return os.path.join(dump_dir, session_name)
-
-    def get_runtime_placement_routing_dump_state(self) -> dict[str, Any]:
-        dp_rank = getattr(self.parallel_config, "data_parallel_rank", None)
-        ep_rank = None
-        dump_state: dict[str, Any] = {}
-        try:
-            ep_rank = int(get_ep_group().rank_in_group)
-        except Exception:
-            ep_rank = None
-        try:
-            from vllm.distributed.eplb.policy.custom_policy import StaticPlacementPolicy
-            dump_state = cast(
-                dict[str, Any],
-                StaticPlacementPolicy.get_placement_routing_dump_state(),
-            )
-        except Exception:
-            dump_state = {}
-        return {
-            "dump_dir": self.model_config.placement_routing_dump_dir,
-            "enabled": bool(dump_state.get("enabled", False)),
-            "session_dir": dump_state.get(
-                "session_dir", self._placement_routing_dump_session_dir
-            ),
-            "trigger_index": dump_state.get("trigger_index"),
-            "step_in_trigger": None,
-            "global_rank": int(getattr(self.parallel_config, "rank", -1)),
-            "data_parallel_rank": (
-                None if dp_rank is None else int(dp_rank)
-            ),
-            "ep_rank": ep_rank,
-        }
-
-    def get_runtime_moe_dispatch_traffic_dump_state(self) -> dict[str, Any]:
-        dp_rank = getattr(self.parallel_config, "data_parallel_rank", None)
-        ep_rank = None
-        try:
-            ep_rank = int(get_ep_group().rank_in_group)
-        except Exception:
-            ep_rank = None
-        return {
-            "dump_dir": self.model_config.moe_dispatch_traffic_dump_dir,
-            "enabled": bool(self.model_config.moe_dispatch_traffic_dump_dir),
-            "global_rank": int(getattr(self.parallel_config, "rank", -1)),
-            "data_parallel_rank": (
-                None if dp_rank is None else int(dp_rank)
-            ),
-            "ep_rank": ep_rank,
-        }
-
-    def set_runtime_placement_routing_dump_dir(
-        self,
-        dump_dir: str | None,
-        session_name: str | None = None,
-    ) -> dict[str, Any]:
-        normalized = dump_dir.strip() if isinstance(dump_dir, str) else None
-        if normalized == "":
-            normalized = None
-        self.model_config.placement_routing_dump_dir = normalized
-        self._placement_routing_dump_session_dir = (
-            self._make_placement_routing_dump_session_dir(
-                normalized,
-                session_name=session_name,
-            )
-            if normalized
-            else None
-        )
-        try:
-            from vllm.distributed.eplb.policy.custom_policy import StaticPlacementPolicy
-            StaticPlacementPolicy.set_placement_routing_dump_session_dir(
-                self._placement_routing_dump_session_dir
-            )
-        except Exception:
-            pass
-        return self.get_runtime_placement_routing_dump_state()
-
-    def set_runtime_moe_dispatch_traffic_dump_dir(
-        self,
-        dump_dir: str | None,
-    ) -> dict[str, Any]:
-        normalized = dump_dir.strip() if isinstance(dump_dir, str) else None
-        if normalized == "":
-            normalized = None
-
-        old_dir = self.model_config.moe_dispatch_traffic_dump_dir
-        if old_dir != normalized:
-            from vllm.model_executor.layers.fused_moe.dispatch_traffic_trace import (
-                reset_moe_dispatch_traffic_writer,
-            )
-
-            reset_moe_dispatch_traffic_writer(
-                old_dir,
-                int(getattr(self.parallel_config, "rank", -1)),
-            )
-
-        self.model_config.moe_dispatch_traffic_dump_dir = normalized
-        return self.get_runtime_moe_dispatch_traffic_dump_state()
-
-    def _filter_routing_snapshot_to_prefill(self, routing_snapshot: dict) -> dict:
-        """Build a prefill-only routing snapshot from full-step captures."""
-        filtered_snapshot: dict[int, list[dict[str, Any]]] = {}
-        for layer_id, captures in routing_snapshot.items():
-            filtered_captures: list[dict[str, Any]] = []
-            for capture in captures:
-                topk_ids = capture["topk_ids"]
-                prefill_ranges = capture.get("prefill_ranges")
-                if not prefill_ranges:
-                    continue
-
-                topk_ids_parts = []
-                num_tokens = 0
-                for start, end in prefill_ranges:
-                    if end <= start:
-                        continue
-                    start = max(0, int(start))
-                    end = min(int(end), int(topk_ids.shape[0]))
-                    if end <= start:
-                        continue
-                    topk_ids_parts.append(topk_ids[start:end])
-                    num_tokens += end - start
-
-                if not topk_ids_parts:
-                    continue
-
-                filtered_captures.append(
-                    {
-                        "topk_ids": torch.cat(topk_ids_parts, dim=0),
-                        "num_tokens": num_tokens,
-                    }
-                )
-
-            if filtered_captures:
-                filtered_snapshot[layer_id] = filtered_captures
-        return filtered_snapshot
-
-    def _build_local_coactivation_edges(
-        self,
-        routing_snapshot: dict,
-        num_layers: int,
-        num_experts: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, list[int], int]:
-        """Build compact upper-triangular edge counts for local token co-activation.
-
-        Returns:
-            edge_weights: Tensor[num_nodes * (num_nodes - 1) // 2]
-            node_activation_counts: Tensor[num_nodes]
-            layer_ids:    Sorted layer ids present in routing_snapshot.
-            num_nodes:    num_layers * num_experts
-        """
-        num_nodes = num_layers * num_experts
-        num_edges = num_nodes * (num_nodes - 1) // 2
-        edge_weights = torch.zeros(num_edges, dtype=torch.int64, device=self.device)
-        node_activation_counts = torch.zeros(
-            num_nodes, dtype=torch.int64, device=self.device
-        )
-
-        if not routing_snapshot:
-            return edge_weights, node_activation_counts, list(range(num_layers)), num_nodes
-
-        layer_ids = sorted(routing_snapshot.keys())
-        per_layer_ids: list[torch.Tensor] = []
-        total_tokens = None
-        top_k = None
-
-        for layer_id in layer_ids:
-            captures = routing_snapshot[layer_id]
-            if not captures:
-                return edge_weights, node_activation_counts, layer_ids, num_nodes
-            layer_tensor = torch.cat(
-                [cap["topk_ids"] for cap in captures], dim=0
-            ).to(torch.int64)
-            if total_tokens is None:
-                total_tokens = layer_tensor.shape[0]
-                top_k = layer_tensor.shape[1]
-            elif (layer_tensor.shape[0] != total_tokens
-                  or layer_tensor.shape[1] != top_k):
-                logger.warning(
-                    "Skipping co-activation graph build due to inconsistent "
-                    "routing tensor shapes across layers."
-                )
-                return edge_weights, node_activation_counts, layer_ids, num_nodes
-            per_layer_ids.append(layer_tensor)
-
-        if total_tokens is None or total_tokens == 0:
-            return edge_weights, node_activation_counts, layer_ids, num_nodes
-
-        expert_ids = torch.stack(per_layer_ids, dim=1)  # [tokens, layers, top_k]
-        layer_offsets = (
-            torch.tensor(layer_ids, dtype=torch.int64, device=self.device)
-            .view(len(layer_ids), 1) * num_experts
-        )
-        flat_nodes = (expert_ids + layer_offsets).reshape(total_tokens, -1)
-        if flat_nodes.shape[1] < 2:
-            valid_nodes = flat_nodes.reshape(-1)
-            valid_nodes = valid_nodes[(valid_nodes >= 0) & (valid_nodes < num_nodes)]
-            if valid_nodes.numel() > 0:
-                node_activation_counts = torch.bincount(
-                    valid_nodes, minlength=num_nodes
-                )
-            return edge_weights, node_activation_counts, layer_ids, num_nodes
-
-        valid_nodes = flat_nodes.reshape(-1)
-        valid_nodes = valid_nodes[(valid_nodes >= 0) & (valid_nodes < num_nodes)]
-        if valid_nodes.numel() > 0:
-            node_activation_counts = torch.bincount(
-                valid_nodes, minlength=num_nodes
-            )
-
-        row_idx, col_idx = torch.triu_indices(
-            flat_nodes.shape[1], flat_nodes.shape[1], offset=1, device=self.device
-        )
-        pair_count = row_idx.numel()
-        if pair_count == 0:
-            return edge_weights, node_activation_counts, layer_ids, num_nodes
-
-        # Chunk pairwise edge construction to cap peak GPU memory usage.
-        # Each chunk materializes src/dst/lo/hi/edge_ids as int64 tensors of
-        # shape [total_tokens, chunk_pairs], so keep the chunk size small
-        # enough to fit comfortably alongside the model forward.
-        target_temp_bytes = 32 * 1024 * 1024
-        tensors_per_chunk = 5
-        bytes_per_pair = max(total_tokens, 1) * 8 * tensors_per_chunk
-        chunk_pairs = max(
-            1,
-            min(pair_count, target_temp_bytes // max(bytes_per_pair, 1)),
-        )
-
-        for start in range(0, pair_count, chunk_pairs):
-            end = min(start + chunk_pairs, pair_count)
-            src_nodes = flat_nodes[:, row_idx[start:end]]
-            dst_nodes = flat_nodes[:, col_idx[start:end]]
-            lo = torch.minimum(src_nodes, dst_nodes)
-            hi = torch.maximum(src_nodes, dst_nodes)
-            edge_ids = lo * (2 * num_nodes - lo - 1) // 2 + (hi - lo - 1)
-            edge_weights.add_(
-                torch.bincount(edge_ids.reshape(-1), minlength=num_edges)
-            )
-
-        return edge_weights, node_activation_counts, layer_ids, num_nodes
-
-    def _on_routing_step(self) -> None:
-        """Called after each model forward pass, immediately before eplb_step().
-
-        1. Reads the current step's routing data.
-        2. Optionally converts prefill-only top-k ids into compact graph edge
-           increments for the current EPLB window.
-        3. Optionally snapshots the full-step routing data for offline tracking.
-        4. Clears _ROUTING_DATA so the next forward pass starts fresh.
-        """
-        from vllm.model_executor.layers.fused_moe.layer import (
-            _is_any_routing_capture_enabled,
-            _is_placement_capture_enabled,
-            _is_tracking_enabled,
-            get_routing_data,
-            clear_routing_data,
-            push_step_snapshot,
-        )
-        self._accumulate_prefix_learning_step_capture()
-        if not (
-            _is_any_routing_capture_enabled()
-            or self._uses_graph_only_callback_placement()
-        ):
-            return
-
-        callback = self._compute_placement_callback
-        routing_snapshot = get_routing_data()
-        placement_routing_snapshot = routing_snapshot
-        if _is_placement_capture_enabled() or callback is not None:
-            placement_routing_snapshot = self._filter_routing_snapshot_to_prefill(
-                routing_snapshot
-            )
-
-        if self._uses_graph_only_callback_placement():
-            try:
-                if self.eplb_state is not None and self.eplb_state.model_states:
-                    first = next(iter(self.eplb_state.model_states.values()))
-                    num_layers = first.model.num_moe_layers
-                    num_experts = first.model.num_logical_experts
-                    (
-                        coactivation_edges,
-                        node_activation_counts,
-                        _,
-                        _,
-                    ) = self._build_local_coactivation_edges(
-                        placement_routing_snapshot, num_layers, num_experts
-                    )
-                    self.eplb_state.record_coactivation_graph(
-                        coactivation_edges,
-                        node_activation_counts,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "local co-activation recording raised an exception: %s",
-                    exc,
-                )
-
-        if _is_tracking_enabled():
-            push_step_snapshot()
-
-        clear_routing_data()
-
-    def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
-        """
-        Step for the EPLB (Expert Parallelism Load Balancing) state.
-        """
-        if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
-            return
-
-        assert self.eplb_state is not None
-        model = self.get_model()
-        assert is_mixture_of_experts(model)
-        self.eplb_state.step(
-            is_dummy,
-            is_profile,
-            log_stats=(
-                self.parallel_config.eplb_config.log_balancedness
-                and not self._uses_graph_only_callback_placement()
-            ),
-        )
-
-    def _take_prefix_router_placement_update(self) -> dict[str, object] | None:
-        if not self.model_config.enable_prefix_affinity_routing:
-            return None
-        if self.eplb_state is None or not self.eplb_state.model_states:
-            return None
-
-        from vllm.distributed.eplb.policy.custom_policy import StaticPlacementPolicy
-
-        epoch = StaticPlacementPolicy.get_prefix_router_epoch()
-        model_state = next(iter(self.eplb_state.model_states.values()))
-        physical_to_logical_map = model_state.physical_to_logical_map.detach().cpu()
-        physical_to_logical_map_list = physical_to_logical_map.tolist()
-        self._refresh_prefix_learning_owner_state(
-            physical_to_logical_map_list,
-            epoch,
-        )
-
-        if self._last_prefix_router_physical_to_logical_map is None:
-            self._last_prefix_router_physical_to_logical_map = (
-                physical_to_logical_map.clone()
-            )
-            self._last_prefix_router_placement_epoch = epoch
-        elif self._last_prefix_router_placement_epoch == epoch:
-            return None
-        elif torch.equal(
-            self._last_prefix_router_physical_to_logical_map, physical_to_logical_map
-        ):
-            return None
-        else:
-            self._last_prefix_router_physical_to_logical_map = (
-                physical_to_logical_map.clone()
-            )
-            self._last_prefix_router_placement_epoch = epoch
-
-        return {
-            "epoch": epoch,
-            "physical_to_logical_map": physical_to_logical_map_list,
-        }
-
-    def setup_eplb_from_mapping(
-        self,
-        expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int,
-    ) -> None:
-        model = self.get_model()
-        assert is_mixture_of_experts(model)
-
-        self.eplb_state = EplbState.from_mapping(
-            model=model,
-            model_config=self.model_config,
-            device=self.device,
-            parallel_config=self.parallel_config,
-            expanded_physical_to_logical=expanded_physical_to_logical,
-            num_valid_physical_experts=old_num_physical_experts,
-        )
-
     def _pool(
         self,
         hidden_states: torch.Tensor,
@@ -4281,17 +3808,7 @@ class GPUModelRunner(
             assert kv_connector_metadata is not None
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
-        # Clear routing data from the previous step so _ROUTING_DATA always
-        # reflects only the current step's captures (prefill or one decode step).
-        from vllm.model_executor.layers.fused_moe.layer import (
-            _is_any_routing_capture_enabled,
-            clear_routing_data,
-        )
-        if (
-            _is_any_routing_capture_enabled()
-            or self._uses_graph_only_callback_placement()
-        ):
-            clear_routing_data()
+        self._maybe_clear_current_step_routing_data()
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
@@ -4483,39 +4000,20 @@ class GPUModelRunner(
             ) = self._preprocess(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
-            (
-                prefix_learning_capture_ranges,
-                prefix_learning_capture_req_ids,
-            ) = self._get_primary_prefix_learning_capture_inputs(
-                prefill_capture_ranges, prefill_capture_req_ids
+            # ###### STyGIANet #######
+            self._begin_current_forward_prefix_learning_capture(
+                prefill_capture_ranges,
+                prefill_capture_req_ids,
             )
-            self._current_prefill_capture_ranges = list(
-                prefix_learning_capture_ranges)
-            self._current_prefill_capture_req_ids = list(
-                prefix_learning_capture_req_ids)
-            self._begin_prefix_learning_step_capture(
-                prefix_learning_capture_ranges,
-                prefix_learning_capture_req_ids,
-            )
+            # ###### /STyGIANet #######
 
-        additional_forward_context = {
-            "moe_dispatch_traffic_batch_signature": (
-                self._build_moe_dispatch_traffic_batch_signature(
-                    scheduler_output
-                )
-            ),
-        }
-        if self._needs_prefill_capture_metadata():
-            additional_forward_context.update({
-                "routing_capture_prefill_ranges": prefill_capture_ranges,
-                "routing_capture_prefill_req_ids": prefill_capture_req_ids,
-                "routing_capture_prefill_only_for_placement": bool(
-                    self._compute_placement_callback
-                ),
-                "routing_capture_skip_expert_load": (
-                    self._uses_graph_only_callback_placement()
-                ),
-            })
+        # ###### STyGIANet #######
+        additional_forward_context = self._build_additional_forward_context(
+            scheduler_output,
+            prefill_capture_ranges,
+            prefill_capture_req_ids,
+        )
+        # ###### /STyGIANet #######
 
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
@@ -4840,88 +4338,9 @@ class GPUModelRunner(
         self.kv_connector_output = None
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
-            routed_experts_step = None
-            routed_experts_step_indices = None
-            prefix_learning_pairs_by_req = None
-            prefix_learning_owner_by_req = None
-            async_prefix_learning_owner_by_req = None
-            (
-                prefix_learning_capture_ranges,
-                prefix_learning_capture_req_ids,
-            ) = self._get_primary_prefix_learning_capture_inputs(
-                prefill_capture_ranges, prefill_capture_req_ids
-            )
-            if (
-                self.model_config.enable_prefix_affinity_routing
-                and prefix_learning_capture_req_ids
-            ):
-                prefix_learning_owner_by_req = (
-                    self._get_prefix_learning_owners_for_requests(
-                        prefix_learning_capture_req_ids
-                    )
-                )
-            unresolved_prefix_learning_req_ids = prefix_learning_capture_req_ids
-            if prefix_learning_owner_by_req is not None:
-                unresolved_prefix_learning_req_ids = [
-                    req_id for req_id in prefix_learning_capture_req_ids
-                    if req_id not in prefix_learning_owner_by_req
-                ]
-            if (
-                unresolved_prefix_learning_req_ids
-                and self.model_config.enable_prefix_affinity_routing
-            ):
-                prefix_learning_pairs_by_req = (
-                    self._get_prefix_learning_pairs_for_requests(
-                        unresolved_prefix_learning_req_ids
-                    )
-                )
-            if (
-                prefix_learning_pairs_by_req is None
-                and self.model_config.enable_prefix_affinity_routing
-                and self.routed_experts_initialized
-            ):
-                capturer = RoutedExpertsCapturer.get_instance()
-                if (
-                    capturer is not None
-                    and prefix_learning_capture_ranges
-                    and prefix_learning_capture_req_ids
-                ):
-                    compact_pairs = capturer.get_unique_layer_expert_pairs_for_ranges(
-                        prefix_learning_capture_ranges
-                    )
-                    if compact_pairs is not None:
-                        prefix_learning_pairs_by_req = {
-                            req_id: pairs.tolist()
-                            for req_id, pairs in zip(
-                                prefix_learning_capture_req_ids, compact_pairs
-                            )
-                            if pairs is not None and len(pairs) > 0
-                        }
-            if (
-                self.model_config.enable_return_routed_experts
-                and self.routed_experts_initialized
-            ):
-                capturer = RoutedExpertsCapturer.get_instance()
-                if capturer is not None:
-                    routed_experts_step = capturer.get_captured_experts_for_ranges(
-                        prefill_capture_ranges
-                    )
-                    if self.slot_mapping is not None and prefill_capture_ranges:
-                        routed_experts_step_indices = np.concatenate(
-                            [
-                                self.slot_mapping[start:end]
-                                for start, end in prefill_capture_ranges
-                                if end > start
-                            ]
-                        ).copy()
-                else:
-                    logger.error("RoutedExpertsCapturer not initialized.")
-
-            prefix_router_placement_update = self._take_prefix_router_placement_update()
-            async_prefix_learning_owner_by_req = (
-                self._take_async_prefix_learning_owner_updates()
-                if self.model_config.enable_prefix_affinity_routing
-                else None
+            genome_output_fields = self._build_genome_model_runner_output_fields(
+                prefill_capture_ranges,
+                prefill_capture_req_ids,
             )
 
             output = ModelRunnerOutput(
@@ -4936,15 +4355,8 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
-                routed_experts_step=routed_experts_step,
-                routed_experts_step_indices=routed_experts_step_indices,
-                prefix_learning_pairs_by_req=prefix_learning_pairs_by_req,
-                prefix_learning_owner_by_req=prefix_learning_owner_by_req,
-                async_prefix_learning_owner_by_req=async_prefix_learning_owner_by_req,
-                prefix_router_placement_update=prefix_router_placement_update,
+                **genome_output_fields,
             )
-            self._current_prefill_capture_ranges = []
-            self._current_prefill_capture_req_ids = []
 
         if not self.use_async_scheduling:
             return output
@@ -5821,7 +5233,9 @@ class GPUModelRunner(
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         force_attention: bool = False,
         uniform_decode: bool = False,
+        # ###### STyGIANet #######
         single_prefill_request: bool = False,
+        # ###### /STyGIANet #######
         allow_microbatching: bool = True,
         skip_eplb: bool = False,
         is_profile: bool = False,
@@ -6105,25 +5519,14 @@ class GPUModelRunner(
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
-            profile_additional_forward_context = {
-                "moe_dispatch_traffic_batch_signature": (
-                    self._build_profile_moe_dispatch_traffic_batch_signature(
-                        num_scheduled_tokens
-                    )
-                ),
-                "skip_routed_experts_capture": True,
-            }
-            if self._needs_prefill_capture_metadata():
-                profile_additional_forward_context.update({
-                    "routing_capture_prefill_ranges": prefill_capture_ranges,
-                    "routing_capture_prefill_req_ids": [],
-                    "routing_capture_prefill_only_for_placement": bool(
-                        self._compute_placement_callback
-                    ),
-                    "routing_capture_skip_expert_load": (
-                        self._uses_graph_only_callback_placement()
-                    ),
-                })
+            # ###### STyGIANet #######
+            profile_additional_forward_context = (
+                self._build_profile_additional_forward_context(
+                    num_scheduled_tokens,
+                    prefill_capture_ranges,
+                )
+            )
+            # ###### /STyGIANet #######
 
             self._skip_prefix_learning_capture_for_current_forward = True
             try:
@@ -6953,20 +6356,11 @@ class GPUModelRunner(
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
 
-        if (
-            self.parallel_config.enable_expert_parallel
-            and self.parallel_config.all2all_backend == "nccl_alltoall"
-            and self.parallel_config.data_parallel_size > 1
-            and cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            logger.warning(
-                "CUDAGraphMode.%s is not supported with nccl_alltoall "
-                "expert-parallel backend; setting cudagraph_mode=NONE.",
-                cudagraph_mode.name,
-            )
-            cudagraph_mode = self.compilation_config.cudagraph_mode = (
-                CUDAGraphMode.NONE
-            )
+        # ###### STyGIANet #######
+        cudagraph_mode = self._resolve_genome_cudagraph_mode_overrides(
+            cudagraph_mode
+        )
+        # ###### /STyGIANet #######
 
         # check cudagraph for mixed batch is supported
         if (
@@ -7516,831 +6910,6 @@ class GPUModelRunner(
             if isinstance(group.kv_cache_spec, AttentionSpec):
                 return gid
         return 0
-
-    def init_routed_experts_capturer(self):
-        logger.info(
-            "Initializing routed experts capturer, enable_return_routed_experts=%s "
-            "enable_prefix_affinity_routing=%s",
-            self.model_config.enable_return_routed_experts,
-            self.model_config.enable_prefix_affinity_routing,
-        )
-        routed_experts_capturer = RoutedExpertsCapturer.create()
-        self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
-        min_block_size = min(
-            [
-                group.kv_cache_spec.block_size
-                for group in self.kv_cache_config.kv_cache_groups
-            ]
-        )
-        num_groups = len(self.kv_cache_config.kv_cache_groups)
-        self.max_num_kv_tokens = (
-            self.kv_cache_config.num_blocks // num_groups
-        ) * min_block_size
-        dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
-        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        if pcp_size * dcp_size > 1:
-            self.max_num_kv_tokens *= pcp_size * dcp_size
-
-        routed_experts_capturer.init_buffer(
-            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
-            max_num_kv_tokens=self.max_num_kv_tokens,
-            vllm_config=self.vllm_config,
-        )
-        self._bind_router_capture_hooks(routed_experts_capturer)
-        self.routed_experts_initialized = True
-
-    def init_prefix_learning_capture(self) -> None:
-        self._bind_router_capture_hooks(None)
-
-    def _uses_placement_snapshot_for_prefix_learning(self) -> bool:
-        return False
-
-    def _get_primary_prefix_learning_capture_inputs(
-        self,
-        prefill_capture_ranges: list[tuple[int, int]],
-        prefill_capture_req_ids: list[str],
-    ) -> tuple[list[tuple[int, int]], list[str]]:
-        self._update_prefix_learning_freeze_state()
-        return prefill_capture_ranges, prefill_capture_req_ids
-
-    def _get_or_alloc_prefix_learning_slot(self, req_id: str) -> int | None:
-        slot = self._prefix_learning_req_slot_by_id.get(req_id)
-        if slot is not None:
-            return slot
-        if (self._prefix_learning_owner_counts_buffer is None
-                or not self._prefix_learning_free_slots):
-            return None
-        slot = self._prefix_learning_free_slots.pop()
-        self._prefix_learning_req_slot_by_id[req_id] = slot
-        self._prefix_learning_req_id_by_slot[slot] = req_id
-        self._prefix_learning_owner_counts_buffer[slot].zero_()
-        return slot
-
-    def _free_prefix_learning_slot(self, req_id: str) -> None:
-        slot = self._prefix_learning_req_slot_by_id.pop(req_id, None)
-        if slot is None:
-            return
-        if self._prefix_learning_owner_counts_buffer is not None:
-            self._prefix_learning_owner_counts_buffer[slot].zero_()
-        if 0 <= slot < len(self._prefix_learning_req_id_by_slot):
-            self._prefix_learning_req_id_by_slot[slot] = None
-        self._prefix_learning_free_slots.append(slot)
-
-    def _clear_all_prefix_learning_state(self) -> None:
-        stale_req_ids = list(self._prefix_learning_req_slot_by_id.keys())
-        stale_req_ids.extend(self._prefix_learning_pending_async_req_steps.keys())
-        if self._prefix_learning_owner_counts_buffer is not None:
-            self._prefix_learning_owner_counts_buffer.zero_()
-        self._prefix_learning_req_slot_by_id.clear()
-        if self._prefix_learning_req_id_by_slot:
-            self._prefix_learning_req_id_by_slot = [None] * len(
-                self._prefix_learning_req_id_by_slot
-            )
-        self._prefix_learning_free_slots = list(
-            range(self.max_num_reqs - 1, -1, -1)
-        )
-        self._prefix_learning_step_req_ids = []
-        self._prefix_learning_step_req_lengths = []
-        self._prefix_learning_step_total_prompt_tokens = 0
-        self._prefix_learning_step_topk_by_layer = {}
-        self._prefix_learning_last_step_seq_by_req.clear()
-        self._prefix_learning_pending_async_req_steps.clear()
-        if self._prefix_learning_async_learner is not None and stale_req_ids:
-            self._prefix_learning_async_learner.drop_requests(stale_req_ids)
-
-    def _ensure_prefix_learning_async_learner(self) -> AsyncPrefixLearningOwnerLearner:
-        learner = self._prefix_learning_async_learner
-        if learner is None:
-            learner = AsyncPrefixLearningOwnerLearner(
-                num_ranks=self.parallel_config.data_parallel_size,
-                trace_enabled=self._prefix_learning_trace_debug,
-            )
-            self._prefix_learning_async_learner = learner
-        return learner
-
-    def _take_async_prefix_learning_owner_updates(
-        self,
-    ) -> dict[str, dict[str, int]] | None:
-        self._drain_prefix_learning_pending_copy_jobs()
-        learner = self._prefix_learning_async_learner
-        epoch = self._prefix_learning_owner_cache_epoch
-        if learner is None or epoch is None or not self._prefix_learning_pending_async_req_steps:
-            return None
-
-        results: dict[str, dict[str, int]] = {}
-        ready_req_ids: list[str] = []
-        for req_id, required_step_seq in list(
-            self._prefix_learning_pending_async_req_steps.items()
-        ):
-            owner, processed = learner.take_owner_if_ready(
-                req_id=req_id,
-                required_step_seq=required_step_seq,
-                epoch=epoch,
-            )
-            if owner is not None:
-                results[req_id] = owner
-                ready_req_ids.append(req_id)
-            elif processed:
-                ready_req_ids.append(req_id)
-
-        for req_id in ready_req_ids:
-            self._prefix_learning_pending_async_req_steps.pop(req_id, None)
-            self._prefix_learning_last_step_seq_by_req.pop(req_id, None)
-
-        return results or None
-
-    def _drain_prefix_learning_pending_copy_jobs(self) -> None:
-        if not self._prefix_learning_pending_copy_jobs:
-            return
-
-        learner = self._prefix_learning_async_learner
-        if learner is None:
-            return
-
-        current_epoch = self._prefix_learning_owner_cache_epoch
-        remaining_jobs: list[PrefixLearningPendingCopyJob] = []
-        for job in self._prefix_learning_pending_copy_jobs:
-            if job.ready_event is not None and not job.ready_event.query():
-                remaining_jobs.append(job)
-                continue
-            if current_epoch is None or job.epoch != current_epoch:
-                continue
-            learner.enqueue_step(
-                PrefixLearningAsyncStepJob(
-                    step_seq=job.step_seq,
-                    epoch=job.epoch,
-                    req_ids=job.req_ids,
-                    req_lengths=job.req_lengths,
-                    topk_by_layer={
-                        layer_id: tensor.numpy()
-                        for layer_id, tensor in job.topk_by_layer_cpu.items()
-                    },
-                )
-            )
-        self._prefix_learning_pending_copy_jobs = remaining_jobs
-
-    def _force_drain_prefix_learning_pending_copy_jobs(
-        self,
-        required_step_seq: int,
-    ) -> None:
-        if not self._prefix_learning_pending_copy_jobs:
-            return
-
-        learner = self._prefix_learning_async_learner
-        if learner is None:
-            return
-
-        current_epoch = self._prefix_learning_owner_cache_epoch
-        if current_epoch is None:
-            return
-
-        remaining_jobs: list[PrefixLearningPendingCopyJob] = []
-        max_enqueued_step_seq = 0
-        for job in self._prefix_learning_pending_copy_jobs:
-            if job.epoch != current_epoch or job.step_seq > required_step_seq:
-                remaining_jobs.append(job)
-                continue
-            if job.ready_event is not None:
-                job.ready_event.synchronize()
-            learner.enqueue_step(
-                PrefixLearningAsyncStepJob(
-                    step_seq=job.step_seq,
-                    epoch=job.epoch,
-                    req_ids=job.req_ids,
-                    req_lengths=job.req_lengths,
-                    topk_by_layer={
-                        layer_id: tensor.numpy()
-                        for layer_id, tensor in job.topk_by_layer_cpu.items()
-                    },
-                )
-            )
-            max_enqueued_step_seq = max(max_enqueued_step_seq, job.step_seq)
-        self._prefix_learning_pending_copy_jobs = remaining_jobs
-
-        if max_enqueued_step_seq <= 0:
-            return
-
-        deadline = time.perf_counter() + 0.5
-        while learner.get_processed_step_seq() < max_enqueued_step_seq:
-            if time.perf_counter() >= deadline:
-                break
-            time.sleep(0.0005)
-
-    def _update_prefix_learning_freeze_state(self) -> bool:
-        return False
-
-    def _get_prefix_learning_capture_cpu_dtype(self) -> torch.dtype:
-        num_experts = self._prefix_learning_num_experts
-        if num_experts > 0:
-            # Keep a signed dtype so sentinel values like -1 remain representable.
-            if num_experts <= 127:
-                return torch.int8
-            if num_experts <= 32767:
-                return torch.int16
-        return torch.int32
-
-    def _refresh_prefix_learning_owner_state(
-        self,
-        physical_to_logical_map: Sequence[Sequence[int]],
-        epoch: int,
-    ) -> None:
-        if (
-            not self.model_config.enable_prefix_affinity_routing
-            or self._prefix_learning_num_layers <= 0
-            or self._prefix_learning_num_experts <= 0
-        ):
-            return
-
-        num_ranks = self.parallel_config.data_parallel_size
-        old_owner_lookup = self._prefix_learning_owner_lookup
-        old_owner_rank_lookup = self._prefix_learning_owner_rank_lookup
-        old_owner_epoch = self._prefix_learning_owner_cache_epoch
-        owner_cache = build_owner_cache_from_physical_to_logical_map(
-            physical_to_logical_map,
-            num_ranks,
-        )
-        owner_lookup = torch.zeros(
-            (
-                self._prefix_learning_num_layers,
-                self._prefix_learning_num_experts,
-                num_ranks,
-            ),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        use_single_owner_fast_path = (
-            self.parallel_config.eplb_config.num_redundant_experts == 0
-        )
-        owner_rank_lookup = (
-            torch.full(
-                (
-                    self._prefix_learning_num_layers,
-                    self._prefix_learning_num_experts,
-                ),
-                -1,
-                dtype=torch.int64,
-                device=self.device,
-            )
-            if use_single_owner_fast_path
-            else None
-        )
-        for layer_idx, layer_owner_cache in enumerate(
-                owner_cache[:self._prefix_learning_num_layers]):
-            for expert_id, owner_ranks in enumerate(
-                    layer_owner_cache[:self._prefix_learning_num_experts]):
-                for owner_rank in owner_ranks:
-                    if 0 <= owner_rank < num_ranks:
-                        owner_lookup[layer_idx, expert_id, owner_rank] = 1
-                if owner_rank_lookup is not None:
-                    if len(owner_ranks) == 1 and 0 <= owner_ranks[0] < num_ranks:
-                        owner_rank_lookup[layer_idx, expert_id] = owner_ranks[0]
-                    elif len(owner_ranks) > 1:
-                        owner_rank_lookup = None
-
-        epoch_changed = (
-            old_owner_lookup is None
-            or old_owner_epoch != epoch
-            or not torch.equal(old_owner_lookup, owner_lookup)
-            or (
-                (old_owner_rank_lookup is None) != (owner_rank_lookup is None)
-                or (
-                    old_owner_rank_lookup is not None
-                    and owner_rank_lookup is not None
-                    and not torch.equal(old_owner_rank_lookup, owner_rank_lookup)
-                )
-            )
-        )
-        self._prefix_learning_owner_lookup = owner_lookup
-        self._prefix_learning_owner_rank_lookup = owner_rank_lookup
-        self._prefix_learning_owner_cache_epoch = epoch
-        owner_lookup_cpu = owner_lookup.to(device="cpu").numpy()
-        owner_rank_lookup_cpu = (
-            owner_rank_lookup.to(device="cpu").numpy()
-            if owner_rank_lookup is not None
-            else None
-        )
-        self._ensure_prefix_learning_async_learner().update_owner_state(
-            epoch=epoch,
-            owner_lookup=owner_lookup_cpu,
-            owner_rank_lookup=owner_rank_lookup_cpu,
-        )
-        if epoch_changed and (
-            self._prefix_learning_req_slot_by_id
-            or self._prefix_learning_pending_async_req_steps
-        ):
-            self._clear_all_prefix_learning_state()
-
-    def _begin_prefix_learning_step_capture(
-        self,
-        prefill_capture_ranges: list[tuple[int, int]],
-        prefill_capture_req_ids: list[str],
-    ) -> None:
-        trace_enabled = self._prefix_learning_trace_debug
-        start_ns = time.perf_counter_ns() if trace_enabled else 0
-        self._prefix_learning_step_req_ids = []
-        self._prefix_learning_step_req_lengths = []
-        self._prefix_learning_step_total_prompt_tokens = 0
-        self._prefix_learning_step_topk_by_layer = {}
-
-        if (
-            self._uses_placement_snapshot_for_prefix_learning()
-            or
-            not self.model_config.enable_prefix_affinity_routing
-            or self._prefix_learning_num_layers <= 0
-            or self._prefix_learning_num_experts <= 0
-            or self._prefix_learning_owner_counts_buffer is None
-        ):
-            return
-
-        active_req_ids: list[str] = []
-        req_lengths: list[int] = []
-        for req_id, (start, end) in zip(prefill_capture_req_ids, prefill_capture_ranges):
-            if end <= start:
-                continue
-            slot = self._get_or_alloc_prefix_learning_slot(req_id)
-            if slot is None:
-                continue
-            active_req_ids.append(req_id)
-            req_lengths.append(end - start)
-
-        total_prompt_tokens = sum(req_lengths)
-        if not active_req_ids or total_prompt_tokens <= 0:
-            return
-
-        self._prefix_learning_step_req_ids = active_req_ids
-        self._prefix_learning_step_req_lengths = req_lengths
-        self._prefix_learning_step_total_prompt_tokens = total_prompt_tokens
-
-        # if trace_enabled:
-        #     logger.warning(
-        #         "PrefixTrace worker step_capture_begin ts_ns=%d reqs=%d prompt_tokens=%d duration_ms=%.3f",
-        #         start_ns,
-        #         len(active_req_ids),
-        #         total_prompt_tokens,
-        #         (time.perf_counter_ns() - start_ns) / 1e6,
-        #     )
-
-    def _accumulate_prefix_learning_step_capture(self) -> None:
-        trace_enabled = self._prefix_learning_trace_debug
-        start_ns = time.perf_counter_ns() if trace_enabled else 0
-        self._drain_prefix_learning_pending_copy_jobs()
-
-        epoch = self._prefix_learning_owner_cache_epoch
-        step_topk_by_layer = self._prefix_learning_step_topk_by_layer
-        if (
-            not self.model_config.enable_prefix_affinity_routing
-            or epoch is None
-            or not step_topk_by_layer
-        ):
-            self._prefix_learning_step_req_ids = []
-            self._prefix_learning_step_req_lengths = []
-            self._prefix_learning_step_total_prompt_tokens = 0
-            self._prefix_learning_step_topk_by_layer = {}
-            return
-
-        total_captured_tokens = 0
-        total_layers = 0
-        total_copy_enqueue_ms = 0.0
-        req_count = len(self._prefix_learning_step_req_ids)
-        topk_by_layer_cpu: dict[int, torch.Tensor] = {}
-        gpu_refs: list[torch.Tensor] = []
-        capture_cpu_dtype = self._get_prefix_learning_capture_cpu_dtype()
-        copy_stream = None
-        current_stream = None
-        pin_memory = is_pin_memory_available()
-        if self.device.type == "cuda":
-            current_stream = torch.cuda.current_stream(device=self.device)
-            if self._prefix_learning_copy_stream is None:
-                self._prefix_learning_copy_stream = torch.cuda.Stream(
-                    device=self.device
-                )
-            copy_stream = self._prefix_learning_copy_stream
-        if copy_stream is not None:
-            with torch.cuda.stream(copy_stream):
-                copy_stream.wait_stream(current_stream)
-                for layer_id, captured_parts in list(step_topk_by_layer.items()):
-                    if not captured_parts:
-                        continue
-                    first_part = captured_parts[0]
-                    topk = int(first_part.shape[1]) if first_part.ndim >= 2 else 0
-                    if topk <= 0:
-                        continue
-                    layer_tokens = sum(int(part.shape[0]) for part in captured_parts)
-                    if self._prefix_learning_step_total_prompt_tokens != layer_tokens:
-                        continue
-                    if trace_enabled:
-                        enqueue_start_ns = time.perf_counter_ns()
-                    cpu_buffer = torch.empty(
-                        (layer_tokens, topk),
-                        dtype=capture_cpu_dtype,
-                        device="cpu",
-                        pin_memory=pin_memory,
-                    )
-                    offset = 0
-                    for part in captured_parts:
-                        part_len = int(part.shape[0])
-                        if part_len <= 0:
-                            continue
-                        src = part.to(dtype=capture_cpu_dtype)
-                        cpu_buffer[offset:offset + part_len].copy_(
-                            src,
-                            non_blocking=True,
-                        )
-                        gpu_refs.append(src)
-                        offset += part_len
-                    topk_by_layer_cpu[int(layer_id)] = cpu_buffer
-                    if trace_enabled:
-                        total_copy_enqueue_ms += (
-                            time.perf_counter_ns() - enqueue_start_ns
-                        ) / 1e6
-                    total_captured_tokens += layer_tokens
-                    total_layers += 1
-        else:
-            for layer_id, captured_parts in list(step_topk_by_layer.items()):
-                if not captured_parts:
-                    continue
-                first_part = captured_parts[0]
-                topk = int(first_part.shape[1]) if first_part.ndim >= 2 else 0
-                if topk <= 0:
-                    continue
-                layer_tokens = sum(int(part.shape[0]) for part in captured_parts)
-                if self._prefix_learning_step_total_prompt_tokens != layer_tokens:
-                    continue
-                if trace_enabled:
-                    enqueue_start_ns = time.perf_counter_ns()
-                cpu_buffer = torch.empty(
-                    (layer_tokens, topk),
-                    dtype=capture_cpu_dtype,
-                    device="cpu",
-                    pin_memory=pin_memory,
-                )
-                offset = 0
-                for part in captured_parts:
-                    part_len = int(part.shape[0])
-                    if part_len <= 0:
-                        continue
-                    src = part.to(dtype=capture_cpu_dtype)
-                    cpu_buffer[offset:offset + part_len].copy_(src)
-                    gpu_refs.append(src)
-                    offset += part_len
-                topk_by_layer_cpu[int(layer_id)] = cpu_buffer
-                if trace_enabled:
-                    total_copy_enqueue_ms += (
-                        time.perf_counter_ns() - enqueue_start_ns
-                    ) / 1e6
-                total_captured_tokens += layer_tokens
-                total_layers += 1
-
-        ready_event: torch.Event | None = None
-        if copy_stream is not None and topk_by_layer_cpu:
-            ready_event = torch.cuda.Event()
-            ready_event.record(copy_stream)
-
-        if topk_by_layer_cpu:
-            self._ensure_prefix_learning_async_learner()
-            self._prefix_learning_async_step_seq += 1
-            step_seq = self._prefix_learning_async_step_seq
-            self._prefix_learning_pending_copy_jobs.append(
-                PrefixLearningPendingCopyJob(
-                    step_seq=step_seq,
-                    epoch=epoch,
-                    req_ids=list(self._prefix_learning_step_req_ids),
-                    req_lengths=list(self._prefix_learning_step_req_lengths),
-                    topk_by_layer_cpu=topk_by_layer_cpu,
-                    gpu_refs=gpu_refs,
-                    ready_event=ready_event,
-                )
-            )
-            for req_id in self._prefix_learning_step_req_ids:
-                self._prefix_learning_last_step_seq_by_req[req_id] = step_seq
-
-        self._prefix_learning_step_req_ids = []
-        self._prefix_learning_step_req_lengths = []
-        self._prefix_learning_step_total_prompt_tokens = 0
-        self._prefix_learning_step_topk_by_layer = {}
-        # if trace_enabled:
-        #     logger.warning(
-        #         "PrefixTrace worker step_accumulate ts_ns=%d reqs=%d layers=%d captured_tokens=%d copy_enqueue_ms=%.3f duration_ms=%.3f",
-        #         start_ns,
-        #         req_count,
-        #         total_layers,
-        #         total_captured_tokens,
-        #         total_copy_enqueue_ms,
-        #         (time.perf_counter_ns() - start_ns) / 1e6,
-        #     )
-
-    def _accumulate_prefix_learning_from_routing_snapshot(
-        self,
-        routing_snapshot: dict[int, list[dict[str, Any]]],
-    ) -> None:
-        trace_enabled = self._prefix_learning_trace_debug
-        start_ns = time.perf_counter_ns() if trace_enabled else 0
-
-        if (
-            not self._uses_placement_snapshot_for_prefix_learning()
-            or not self.model_config.enable_prefix_affinity_routing
-            or self._prefix_learning_owner_counts_buffer is None
-            or self._prefix_learning_num_experts <= 0
-            or self._prefix_learning_num_layers <= 0
-        ):
-            return
-
-        updated_reqs = 0
-        updated_pairs = 0
-        for layer_id, captures in routing_snapshot.items():
-            if layer_id < 0 or layer_id >= self._prefix_learning_num_layers:
-                continue
-            for capture in captures:
-                prefill_ranges = capture.get("prefill_ranges")
-                prefill_req_ids = capture.get("prefill_req_ids")
-                if (not prefill_ranges or not prefill_req_ids
-                        or len(prefill_ranges) != len(prefill_req_ids)):
-                    continue
-                topk_ids = capture["topk_ids"]
-                for req_id, (start, end) in zip(prefill_req_ids, prefill_ranges):
-                    if end <= start:
-                        continue
-                    if start < 0 or end > topk_ids.shape[0]:
-                        continue
-                    slot = self._get_or_alloc_prefix_learning_slot(req_id)
-                    if slot is None:
-                        continue
-                    req_topk_ids = topk_ids[start:end]
-                    if req_topk_ids.numel() == 0:
-                        continue
-                    flat_experts = req_topk_ids.reshape(-1).to(torch.int64)
-                    valid_experts = flat_experts[
-                        (flat_experts >= 0)
-                        & (flat_experts < self._prefix_learning_num_experts)
-                    ]
-                    if (
-                        valid_experts.numel() == 0
-                        or self._prefix_learning_owner_lookup is None
-                    ):
-                        continue
-                    self._prefix_learning_owner_counts_buffer[slot] += (
-                        self._prefix_learning_owner_lookup[
-                            int(layer_id), valid_experts
-                        ].sum(dim=0)
-                    )
-                    updated_reqs += 1
-                    updated_pairs += int(valid_experts.numel())
-
-        # if trace_enabled:
-        #     logger.warning(
-        #         "PrefixTrace worker snapshot_accumulate ts_ns=%d layers=%d req_updates=%d new_pairs=%d duration_ms=%.3f",
-        #         start_ns,
-        #         len(routing_snapshot),
-        #         updated_reqs,
-        #         updated_pairs,
-        #         (time.perf_counter_ns() - start_ns) / 1e6,
-        #     )
-
-    def _extract_prefix_learning_pairs_for_slot(
-        self, slot: int
-    ) -> list[list[int]]:
-        return []
-
-    def _capture_prefix_learning_pairs(
-        self,
-        layer_id: int,
-        topk_ids: torch.Tensor,
-    ) -> None:
-        trace_enabled = self._prefix_learning_trace_debug
-        stage_ms: dict[str, float] = {}
-        if trace_enabled and self.device.type == "cuda":
-            torch.cuda.synchronize(device=self.device)
-        start_ns = time.perf_counter_ns() if trace_enabled else 0
-        last_ns = start_ns
-
-        def mark_stage(name: str) -> None:
-            nonlocal last_ns
-            if not trace_enabled:
-                return
-            if self.device.type == "cuda":
-                torch.cuda.synchronize(device=self.device)
-            now_ns = time.perf_counter_ns()
-            stage_ms[name] = (now_ns - last_ns) / 1e6
-            last_ns = now_ns
-
-        if (
-            self._skip_prefix_learning_capture_for_current_forward
-            or self._uses_placement_snapshot_for_prefix_learning()
-            or not self.model_config.enable_prefix_affinity_routing
-            or layer_id < 0
-            or layer_id >= self._prefix_learning_num_layers
-            or self._prefix_learning_num_experts <= 0
-        ):
-            return
-        if (not self._current_prefill_capture_ranges
-                or not self._current_prefill_capture_req_ids
-                or self._prefix_learning_step_total_prompt_tokens <= 0):
-            return
-        captured_parts = [
-            topk_ids[start:end]
-            for start, end in self._current_prefill_capture_ranges
-            if end > start
-        ]
-        mark_stage("slice")
-        if not captured_parts:
-            return
-
-        if len(captured_parts) == 1:
-            captured = captured_parts[0]
-        else:
-            captured = torch.cat(captured_parts, dim=0)
-        mark_stage("concat")
-
-        if self._prefix_learning_step_total_prompt_tokens != captured.shape[0]:
-            return
-
-        self._prefix_learning_step_topk_by_layer.setdefault(
-            int(layer_id), []).append(captured)
-        mark_stage("store")
-        # if trace_enabled:
-        #     logger.warning(
-        #         "PrefixTrace worker hook_capture ts_ns=%d layer_id=%d ranges=%d captured_tokens=%d active_reqs=%d topk=%d slice_ms=%.3f concat_ms=%.3f store_ms=%.3f duration_ms=%.3f",
-        #         start_ns,
-        #         int(layer_id),
-        #         len(self._current_prefill_capture_ranges),
-        #         int(captured.shape[0]),
-        #         len(self._prefix_learning_step_req_ids),
-        #         int(captured.shape[1]) if captured.ndim >= 2 else 0,
-        #         stage_ms.get("slice", 0.0),
-        #         stage_ms.get("concat", 0.0),
-        #         stage_ms.get("store", 0.0),
-        #         (time.perf_counter_ns() - start_ns) / 1e6,
-        #     )
-
-    def _get_prefix_learning_pairs_for_requests(
-        self, req_ids: list[str]
-    ) -> dict[str, list[list[int]]] | None:
-        trace_enabled = self._prefix_learning_trace_debug
-        start_ns = time.perf_counter_ns() if trace_enabled else 0
-        if not req_ids:
-            return None
-
-        results: dict[str, list[list[int]]] = {}
-        for req_id in req_ids:
-            slot = self._prefix_learning_req_slot_by_id.get(req_id)
-            if slot is None:
-                # if trace_enabled:
-                #     logger.warning(
-                #         "PrefixTrace worker pairs_take_missing ts_ns=%d request_id=%s",
-                #         time.perf_counter_ns(),
-                #         req_id,
-                #     )
-                continue
-            pairs = self._extract_prefix_learning_pairs_for_slot(slot)
-            if not pairs:
-                self._free_prefix_learning_slot(req_id)
-                # if trace_enabled:
-                #     logger.warning(
-                #         "PrefixTrace worker pairs_take_empty ts_ns=%d request_id=%s",
-                #         time.perf_counter_ns(),
-                #         req_id,
-                #     )
-                continue
-            results[req_id] = pairs
-            # if trace_enabled:
-                # logger.warning(
-                #     "PrefixTrace worker pairs_take ts_ns=%d request_id=%s pairs=%d",
-                #     time.perf_counter_ns(),
-                #     req_id,
-                #     len(results[req_id]),
-                # )
-            self._free_prefix_learning_slot(req_id)
-        # if trace_enabled:
-            # logger.warning(
-            #     "PrefixTrace worker pairs_take_done ts_ns=%d reqs=%d emitted=%d duration_ms=%.3f",
-            #     start_ns,
-            #     len(req_ids),
-            #     len(results),
-            #     (time.perf_counter_ns() - start_ns) / 1e6,
-            # )
-        return results or None
-
-    def _get_prefix_learning_owners_for_requests(
-        self, req_ids: list[str]
-    ) -> dict[str, dict[str, int]] | None:
-        self._drain_prefix_learning_pending_copy_jobs()
-        if (
-            not req_ids
-            or self._prefix_learning_owner_cache_epoch is None
-        ):
-            return None
-
-        num_ranks = self.parallel_config.data_parallel_size
-        if self._prefix_learning_dummy_owner_enabled:
-            epoch = self._prefix_learning_owner_cache_epoch
-            results: dict[str, dict[str, int]] = {}
-            for req_id in req_ids:
-                target_rank = sum(req_id.encode("utf-8")) % max(num_ranks, 1)
-                results[req_id] = {
-                    "target_rank": target_rank,
-                    "epoch": epoch,
-                }
-                self._free_prefix_learning_slot(req_id)
-            return results or None
-
-        learner = self._prefix_learning_async_learner
-        if learner is None:
-            return None
-
-        required_step_seq = max(
-            (
-                self._prefix_learning_last_step_seq_by_req.get(
-                    req_id, self._prefix_learning_async_step_seq
-                )
-                for req_id in req_ids
-            ),
-            default=0,
-        )
-        if learner.get_processed_step_seq() < required_step_seq:
-            self._force_drain_prefix_learning_pending_copy_jobs(required_step_seq)
-
-        epoch = self._prefix_learning_owner_cache_epoch
-        results: dict[str, dict[str, int]] = {}
-        for req_id in req_ids:
-            required_step_seq = self._prefix_learning_last_step_seq_by_req.get(
-                req_id, self._prefix_learning_async_step_seq
-            )
-            owner, processed = learner.take_owner_if_ready(
-                req_id=req_id,
-                required_step_seq=required_step_seq,
-                epoch=epoch,
-            )
-            self._free_prefix_learning_slot(req_id)
-            if owner is not None:
-                results[req_id] = owner
-                self._prefix_learning_pending_async_req_steps.pop(req_id, None)
-                self._prefix_learning_last_step_seq_by_req.pop(req_id, None)
-            elif not processed:
-                self._prefix_learning_pending_async_req_steps[req_id] = (
-                    required_step_seq
-                )
-            else:
-                self._prefix_learning_pending_async_req_steps.pop(req_id, None)
-                self._prefix_learning_last_step_seq_by_req.pop(req_id, None)
-        return results or None
-
-    def _bind_router_capture_hooks(
-        self, capturer: RoutedExpertsCapturer | None
-    ) -> None:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-        from vllm.model_executor.layers.fused_moe.router.base_router import (
-            BaseRouter,
-        )
-
-        use_snapshot_prefix_learning = (
-            self._uses_placement_snapshot_for_prefix_learning()
-        )
-        self._prefix_learning_num_layers = 0
-        self._prefix_learning_num_experts = 0
-        for module in self.compilation_config.static_forward_context.values():
-            if isinstance(module, FusedMoE) and isinstance(module.router, BaseRouter):
-                layer_id = module.layer_id
-                self._prefix_learning_num_layers = max(
-                    self._prefix_learning_num_layers,
-                    int(layer_id) + 1,
-                )
-                self._prefix_learning_num_experts = max(
-                    self._prefix_learning_num_experts,
-                    int(module.logical_num_experts),
-                )
-
-                if capturer is not None or not use_snapshot_prefix_learning:
-                    def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
-                        if _capturer is not None:
-                            _capturer.capture(_layer_id, topk_ids)
-                        if not use_snapshot_prefix_learning:
-                            self._capture_prefix_learning_pairs(_layer_id, topk_ids)
-
-                    module.router.set_capture_fn(_capture_fn)
-                else:
-                    module.router.set_capture_fn(None)
-
-        if (self._prefix_learning_num_layers > 0
-                and self._prefix_learning_num_experts > 0):
-            self._prefix_learning_seen_pairs_buffer = None
-            self._prefix_learning_owner_counts_buffer = torch.zeros(
-                (
-                    self.max_num_reqs,
-                    self.parallel_config.data_parallel_size,
-                ),
-                dtype=torch.float32,
-                device=self.device,
-            )
-            self._prefix_learning_req_slot_by_id = {}
-            self._prefix_learning_req_id_by_slot = [None] * self.max_num_reqs
-            self._prefix_learning_free_slots = list(
-                range(self.max_num_reqs - 1, -1, -1))
-        else:
-            self._prefix_learning_seen_pairs_buffer = None
-            self._prefix_learning_owner_counts_buffer = None
-            self._prefix_learning_req_slot_by_id = {}
-            self._prefix_learning_req_id_by_slot = []
-            self._prefix_learning_free_slots = []
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import sys
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import Sequence
 from typing import Any
 
@@ -26,7 +26,13 @@ from vllm.genome.engine.load_balancing_types import (
 )
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket
-from vllm.v1.engine import CoordinatorRouteRequest, CoordinatorRouteResponse, EngineCoreRequest
+from vllm.v1.engine import (
+    CoordinatorRouteRequest,
+    CoordinatorRouteResponse,
+    EngineCoreOutputs,
+    EngineCoreRequest,
+    EngineCoreRequestType,
+)
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.prefix_router import (
@@ -170,6 +176,247 @@ class GenomeDPLBRoutingMixin:
             except RuntimeError:
                 pass
 
+    async def _dispatch_request_to_engine(
+        self,
+        request: EngineCoreRequest,
+        chosen_engine: Any,
+        pending_engine_indices: Sequence[int] = (),
+    ) -> None:
+        request.current_wave = self.current_wave
+        request.client_index = self.client_index
+        self.reqs_in_flight[request.request_id] = InFlightRequestInfo(
+            request_id=request.request_id,
+            engine=chosen_engine,
+            prompt_token_ids=request.prompt_token_ids,
+            pending_engine_indices=tuple(pending_engine_indices),
+        )
+        if (
+            self.expert_affinity_learning_enabled
+            and request.prompt_token_ids is not None
+        ):
+            self.prefix_learning_context_by_request[request.request_id] = (
+                PrefixLearningContext(
+                    engine=chosen_engine,
+                    prompt_token_ids=list(request.prompt_token_ids),
+                )
+            )
+        to_await = self._send_input(
+            EngineCoreRequestType.ADD, request, chosen_engine
+        )
+
+        if not self.engines_running:
+            wake_exclude = self._engine_index_for_identity(chosen_engine)
+            req_msg = msgspec.msgpack.encode(("FIRST_REQ", wake_exclude))
+            await self.first_req_send_socket.send(req_msg)
+
+        try:
+            await to_await
+        except Exception:
+            self.reqs_in_flight.pop(request.request_id, None)
+            self.prefix_learning_context_by_request.pop(request.request_id, None)
+            raise
+
+    async def add_request_async(self, request: EngineCoreRequest) -> None:
+        self._ensure_stats_update_task()
+        if self.coordinator_routing_enabled:
+            self._ensure_route_reply_task()
+
+        if not self.frontend_dispatch_queue_enabled:
+            chosen_engine = await self._select_core_engine_for_request_async(request)
+            pending_engine_indices = self._pending_engine_indices_for_engine(
+                chosen_engine
+            )
+            await self._dispatch_request_to_engine(
+                request,
+                chosen_engine,
+                pending_engine_indices,
+            )
+            self._ensure_output_queue_task()
+            return
+
+        loop = asyncio.get_running_loop()
+        queued_request = QueuedDispatchRequest(
+            request=request,
+            dispatched=loop.create_future(),
+        )
+        async with self.dispatch_queue_lock:
+            self.queued_dispatch_requests.append(queued_request)
+            self.queued_dispatch_by_request_id[request.request_id] = queued_request
+        self._ensure_dispatch_queue_task()
+        await queued_request.dispatched
+        if queued_request.cancelled:
+            return
+
+        self._ensure_output_queue_task()
+
+    @staticmethod
+    async def process_engine_outputs(
+        self: Any, outputs: EngineCoreOutputs
+    ) -> None:
+        direct_prefix_owner_updates: list[PrefixRouterUpdate] = []
+
+        if outputs.kv_cache_event_batch is not None:
+            self._apply_kv_prefix_event_batch(
+                outputs.engine_index, outputs.kv_cache_event_batch
+            )
+            await self._send_kv_prefix_event_batch(
+                outputs.engine_index, outputs.kv_cache_event_batch
+            )
+
+        if outputs.prefix_router_placement_update is not None:
+            update = outputs.prefix_router_placement_update
+            epoch = update.get("epoch")
+            physical_to_logical_map = update.get("physical_to_logical_map")
+            if isinstance(epoch, int) and physical_to_logical_map is not None:
+                self._apply_prefix_router_placement_update(
+                    epoch,
+                    list(physical_to_logical_map),
+                )
+
+        if (
+            self.expert_affinity_learning_enabled
+            and outputs.prefix_learning_owner_updates
+        ):
+            for request_id, target_rank, epoch in outputs.prefix_learning_owner_updates:
+                request_info = self.reqs_in_flight.get(request_id)
+                context = self._take_prefix_learning_context(request_id, request_info)
+                if context is None or not context.prompt_token_ids:
+                    continue
+                if request_info is not None:
+                    request_info.expert_affinity_prefill_learned = True
+                direct_prefix_owner_updates.append(
+                    PrefixRouterUpdate(
+                        target_rank=int(target_rank),
+                        epoch=int(epoch),
+                        prompt_token_ids=list(context.prompt_token_ids),
+                    )
+                )
+
+        if outputs.outputs:
+            for output in outputs.outputs:
+                await self._release_pending_slots_for_request(output.request_id)
+
+        if self.expert_affinity_learning_enabled and outputs.outputs:
+            for output in outputs.outputs:
+                request_info = self.reqs_in_flight.get(output.request_id)
+                if request_info is None:
+                    continue
+                if self.prefix_affinity_only_prefill:
+                    if request_info.expert_affinity_prefill_learned:
+                        continue
+                    if (
+                        output.prefix_learning_owner is None
+                        and output.prefix_learning_pairs is None
+                    ):
+                        continue
+                    if self.load_balancer_debug and output.prefix_learning_pairs is not None:
+                        logger.warning(
+                            "Prefix learning pairs captured request_id=%s phase=prefill "
+                            "unique_pairs=%d",
+                            output.request_id,
+                            len(output.prefix_learning_pairs),
+                        )
+                    request_info.expert_affinity_prefill_learned = True
+                else:
+                    if output.finish_reason is None:
+                        continue
+                    if (
+                        output.prefix_learning_owner is None
+                        and output.prefix_learning_pairs is None
+                    ):
+                        continue
+                    if self.load_balancer_debug and output.prefix_learning_pairs is not None:
+                        logger.warning(
+                            "Prefix learning pairs captured request_id=%s phase=finish "
+                            "unique_pairs=%d",
+                            output.request_id,
+                            len(output.prefix_learning_pairs),
+                        )
+                context = self._take_prefix_learning_context(
+                    output.request_id,
+                    request_info,
+                )
+                if context is None or not context.prompt_token_ids:
+                    continue
+                if output.prefix_learning_owner is not None:
+                    direct_prefix_owner_updates.append(
+                        PrefixRouterUpdate(
+                            target_rank=int(output.prefix_learning_owner["target_rank"]),
+                            epoch=int(output.prefix_learning_owner["epoch"]),
+                            prompt_token_ids=list(context.prompt_token_ids),
+                        )
+                    )
+                    continue
+                await self._enqueue_prefix_learning_work_item(
+                    PrefixLearningWorkItem(
+                        request_id=output.request_id,
+                        engine=context.engine,
+                        prompt_token_ids=list(context.prompt_token_ids),
+                        layer_expert_pairs=output.prefix_learning_pairs,
+                        owner=None,
+                    )
+                )
+
+        if direct_prefix_owner_updates:
+            await self._apply_prefix_router_owner_update_batch(
+                direct_prefix_owner_updates
+            )
+
+        if outputs.finished_requests and self.reqs_in_flight:
+            filtered_finished_requests = set[str]()
+            for req_id in outputs.finished_requests:
+                await self._release_pending_slots_for_request(req_id)
+                filtered_finished_requests.add(req_id)
+                self.reqs_in_flight.pop(req_id, None)
+            outputs.finished_requests = filtered_finished_requests or None
+
+    async def abort_requests_async(self, request_ids: list[str]) -> None:
+        if not request_ids or self.resources.engine_dead:
+            return
+
+        remaining_request_ids = request_ids
+        if self.frontend_dispatch_queue_enabled:
+            cancelled_request_ids = set[str]()
+            async with self.dispatch_queue_lock:
+                for req_id in request_ids:
+                    queued_request = self.queued_dispatch_by_request_id.pop(req_id, None)
+                    if queued_request is None:
+                        continue
+                    queued_request.cancelled = True
+                    cancelled_request_ids.add(req_id)
+                    if not queued_request.dispatched.done():
+                        queued_request.dispatched.set_result(None)
+
+            if cancelled_request_ids:
+                self._ensure_dispatch_queue_task()
+                remaining_request_ids = [
+                    req_id
+                    for req_id in request_ids
+                    if req_id not in cancelled_request_ids
+                ]
+                if not remaining_request_ids:
+                    return
+
+        if len(remaining_request_ids) == 1:
+            request_id = remaining_request_ids[0]
+            if request_info := self.reqs_in_flight.get(request_id):
+                self.prefix_learning_context_by_request.pop(request_id, None)
+                await self._abort_requests([request_id], request_info.engine)
+            return
+
+        by_engine = defaultdict[Any, list[str]](list)
+        for req_id in remaining_request_ids:
+            if request_info := self.reqs_in_flight.get(req_id):
+                by_engine[request_info.engine].append(req_id)
+                self.prefix_learning_context_by_request.pop(req_id, None)
+        for engine, req_ids in by_engine.items():
+            await self._abort_requests(req_ids, engine)
+
+    async def _abort_requests(
+        self, request_ids: list[str], engine: Any
+    ) -> None:
+        await self._send_input(EngineCoreRequestType.ABORT, request_ids, engine)
+
     def _make_expert_affinity_index(self) -> ExpertAffinityIndex:
         return make_expert_affinity_index(self.prefix_learning_algorithm)
 
@@ -293,6 +540,232 @@ class GenomeDPLBRoutingMixin:
 
     def _pending_engine_indices_for_engine(self, engine: bytes) -> tuple[int, ...]:
         return (self._engine_index_for_identity(engine),)
+
+    def _can_reserve_pending_indices(self, engine_indices: Sequence[int]) -> bool:
+        if not self.frontend_dispatch_queue_enabled:
+            return True
+        return all(
+            self.engine_pending_request_counts[idx]
+            < self.max_pending_requests_per_engine
+            for idx in engine_indices
+        )
+
+    def _reserve_pending_indices(self, engine_indices: Sequence[int]) -> None:
+        if not self.frontend_dispatch_queue_enabled:
+            return
+        for idx in engine_indices:
+            self.engine_pending_request_counts[idx] += 1
+
+    def _release_pending_indices(self, engine_indices: Sequence[int]) -> None:
+        if not self.frontend_dispatch_queue_enabled:
+            return
+        for idx in engine_indices:
+            if self.engine_pending_request_counts[idx] > 0:
+                self.engine_pending_request_counts[idx] -= 1
+
+    def _ensure_dispatch_queue_task(self) -> None:
+        if not self.frontend_dispatch_queue_enabled:
+            return
+        task = self.dispatch_queue_task
+        if task is None or task.done():
+            self.dispatch_queue_task = asyncio.create_task(
+                self._drain_dispatch_queue(),
+                name="FrontendDispatchQueue",
+            )
+
+    async def _drain_dispatch_queue(self) -> None:
+        while True:
+            item: QueuedDispatchRequest | None = None
+            async with self.dispatch_queue_lock:
+                while self.queued_dispatch_requests:
+                    head = self.queued_dispatch_requests[0]
+                    if not head.cancelled:
+                        break
+                    self.queued_dispatch_requests.popleft()
+                    self.queued_dispatch_by_request_id.pop(
+                        head.request.request_id, None
+                    )
+                if not self.queued_dispatch_requests:
+                    self.dispatch_queue_task = None
+                    return
+
+                item = self.queued_dispatch_requests[0]
+
+            assert item is not None
+            if item.cancelled:
+                continue
+
+            chosen_engine = await self._select_core_engine_for_request_async(
+                item.request
+            )
+            pending_engine_indices = self._pending_engine_indices_for_engine(
+                chosen_engine
+            )
+
+            async with self.dispatch_queue_lock:
+                while self.queued_dispatch_requests:
+                    head = self.queued_dispatch_requests[0]
+                    if not head.cancelled:
+                        break
+                    self.queued_dispatch_requests.popleft()
+                    self.queued_dispatch_by_request_id.pop(
+                        head.request.request_id, None
+                    )
+
+                if (
+                    not self.queued_dispatch_requests
+                    or self.queued_dispatch_requests[0] is not item
+                    or item.cancelled
+                ):
+                    continue
+
+                if not self._can_reserve_pending_indices(pending_engine_indices):
+                    self.dispatch_queue_task = None
+                    return
+
+                self.queued_dispatch_requests.popleft()
+                self.queued_dispatch_by_request_id.pop(item.request.request_id, None)
+                self._reserve_pending_indices(pending_engine_indices)
+
+            try:
+                await self._dispatch_request_to_engine(
+                    item.request,
+                    chosen_engine,
+                    pending_engine_indices,
+                )
+            except Exception as exc:
+                async with self.dispatch_queue_lock:
+                    self._release_pending_indices(pending_engine_indices)
+                if not item.dispatched.done():
+                    item.dispatched.set_exception(exc)
+            else:
+                if not item.dispatched.done():
+                    item.dispatched.set_result(None)
+
+    def _ensure_prefix_learning_queue_task(self) -> None:
+        if not self.expert_affinity_learning_enabled:
+            return
+        resources = self.resources
+        task = resources.prefix_learning_queue_task
+        if task is None or task.done():
+            resources.prefix_learning_queue_task = asyncio.create_task(
+                self._drain_prefix_learning_queue(),
+                name="PrefixAffinityLearningQueue",
+            )
+
+    def _take_prefix_learning_context(
+        self,
+        request_id: str,
+        request_info: InFlightRequestInfo | None = None,
+    ) -> PrefixLearningContext | None:
+        context = self.prefix_learning_context_by_request.pop(request_id, None)
+        if context is not None:
+            return context
+        if request_info is None or request_info.prompt_token_ids is None:
+            return None
+        return PrefixLearningContext(
+            engine=request_info.engine,
+            prompt_token_ids=list(request_info.prompt_token_ids),
+        )
+
+    async def _enqueue_prefix_learning_work_item(
+        self,
+        item: PrefixLearningWorkItem,
+    ) -> None:
+        if not self.expert_affinity_learning_enabled:
+            return
+
+        dropped_item: PrefixLearningWorkItem | None = None
+        queue_size = 0
+        async with self.prefix_learning_queue_lock:
+            if (
+                len(self.prefix_learning_queue)
+                >= self.prefix_affinity_learning_queue_size
+            ):
+                dropped_item = self.prefix_learning_queue.pop()
+            self.prefix_learning_queue.appendleft(item)
+            queue_size = len(self.prefix_learning_queue)
+
+        if self.load_balancer_debug:
+            logger.warning(
+                "Prefix affinity learning queue enqueue request_id=%s size=%d/%d",
+                item.request_id,
+                queue_size,
+                self.prefix_affinity_learning_queue_size,
+            )
+            if dropped_item is not None:
+                logger.warning(
+                    "Prefix affinity learning queue dropped_oldest request_id=%s max_size=%d",
+                    dropped_item.request_id,
+                    self.prefix_affinity_learning_queue_size,
+                )
+
+        self._ensure_prefix_learning_queue_task()
+
+    async def _drain_prefix_learning_queue(self) -> None:
+        resources = self.resources
+        while True:
+            items: list[PrefixLearningWorkItem] = []
+            async with self.prefix_learning_queue_lock:
+                if not self.prefix_learning_queue:
+                    resources.prefix_learning_queue_task = None
+                    return
+
+                batch_size = min(len(self.prefix_learning_queue), 32)
+                for _ in range(batch_size):
+                    items.append(self.prefix_learning_queue.popleft())
+
+            pending_updates: list[PrefixRouterUpdate] = []
+            for item in items:
+                try:
+                    update = await self._learn_prefix_router_update(
+                        request_id=item.request_id,
+                        engine=item.engine,
+                        prompt_token_ids=item.prompt_token_ids,
+                        layer_expert_pairs=item.layer_expert_pairs,
+                        owner=item.owner,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Prefix affinity learning failed request_id=%s error=%s",
+                        item.request_id,
+                        exc,
+                    )
+                    continue
+
+                if update is not None:
+                    pending_updates.append(update)
+
+            if not pending_updates:
+                continue
+
+            try:
+                await self._apply_prefix_router_owner_update_batch(pending_updates)
+            except asyncio.TimeoutError:
+                request_ids = ",".join(item.request_id for item in items[:4])
+                logger.warning(
+                    "Prefix affinity learning timed out step=send_update_batch "
+                    "size=%d sample_request_ids=%s",
+                    len(pending_updates),
+                    request_ids,
+                )
+
+    async def _release_pending_slots_for_request(self, request_id: str) -> None:
+        if not self.frontend_dispatch_queue_enabled:
+            return
+
+        request_info = self.reqs_in_flight.get(request_id)
+        if request_info is None:
+            return
+
+        async with self.dispatch_queue_lock:
+            current = self.reqs_in_flight.get(request_id)
+            if current is None or current.pending_slot_released:
+                return
+            self._release_pending_indices(current.pending_engine_indices)
+            current.pending_slot_released = True
+
+        self._ensure_dispatch_queue_task()
 
     async def _select_core_engine_for_request_async(
         self,

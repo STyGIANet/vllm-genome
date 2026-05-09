@@ -20,6 +20,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
+# ###### STyGIANet #######
 from vllm.genome.engine.dplb_routing import GenomeDPLBRoutingMixin
 from vllm.genome.engine.load_balancing_types import (
     InFlightRequestInfo,
@@ -28,6 +29,7 @@ from vllm.genome.engine.load_balancing_types import (
     PrefixRouterUpdate,
     QueuedDispatchRequest,
 )
+# ###### /STyGIANet #######
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -130,7 +132,7 @@ class EngineCoreClient(ABC):
         if parallel_config.data_parallel_size > 1:
             if parallel_config.data_parallel_external_lb:
                 # External load balancer - client per DP rank.
-                # ///////////// Expert-based load balancing
+                # ###### STyGIANet #######
                 if (
                     vllm_config.model_config.enable_prefix_affinity_routing
                     or vllm_config.model_config.enable_kv_block_prefix_routing
@@ -140,10 +142,12 @@ class EngineCoreClient(ABC):
                         "Internal routing preference scoring is enabled but external DP "
                         "load balancing is active; leaving existing routing unchanged."
                     )
-                # ///////////// Expert-based load balancing
+                # ###### /STyGIANet #######
                 return DPAsyncMPClient(*client_args)
+            # ###### STyGIANet #######
             # Internal load balancer - client balances to all DP ranks.
             return DPLBAsyncMPClient(*client_args)
+            # ###### /STyGIANet #######
         return AsyncMPClient(*client_args)
 
     @abstractmethod
@@ -528,7 +532,7 @@ class MPClient(EngineCoreClient):
             enable_input_socket_handover = parallel_config.enable_elastic_ep
 
             self.stats_update_address: str | None = None
-            # ///////////// Expert-based load balancing
+            # ###### STyGIANet #######
             self.route_query_address: str | None = None
             tensor_queue: Queue | None = None
             if client_addresses:
@@ -537,7 +541,6 @@ class MPClient(EngineCoreClient):
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
                 self.route_query_address = client_addresses.get("route_query_address")
-                # ///////////// Expert-based load balancing
                 # Tensor queues passed via client_addresses for multi-API-server case
                 tensor_queue = client_addresses.get("tensor_queue")  # type: ignore[assignment]
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
@@ -577,7 +580,7 @@ class MPClient(EngineCoreClient):
                     assert self.stats_update_address == (
                         coordinator.get_stats_publish_address()
                     )
-                # ///////////// Expert-based load balancing
+            # ###### /STyGIANet #######
 
             # Serialization setup with tensor queues for multimodal tensor IPC.
             tensor_ipc_sender: TensorIpcSender | None = None
@@ -1394,11 +1397,11 @@ class DPAsyncMPClient(AsyncMPClient):
         return self.core_engine
 
 
+# ###### STyGIANet #######
 class DPLBAsyncMPClient(GenomeDPLBRoutingMixin, DPAsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
     EngineCore. Load-balances between multiple engine processes."""
 
-    # ///////////// Expert-based load balancing
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1422,79 +1425,7 @@ class DPLBAsyncMPClient(GenomeDPLBRoutingMixin, DPAsyncMPClient):
             client_index,
         )
         self._init_genome_routing_state(client_count=client_count)
-
-    async def _dispatch_request_to_engine(
-        self,
-        request: EngineCoreRequest,
-        chosen_engine: EngineIdentity,
-        pending_engine_indices: Sequence[int] = (),
-    ) -> None:
-        request.current_wave = self.current_wave
-        request.client_index = self.client_index
-        self.reqs_in_flight[request.request_id] = InFlightRequestInfo(
-            request_id=request.request_id,
-            engine=chosen_engine,
-            prompt_token_ids=request.prompt_token_ids,
-            pending_engine_indices=tuple(pending_engine_indices),
-        )
-        if (
-            self.expert_affinity_learning_enabled
-            and request.prompt_token_ids is not None
-        ):
-            self.prefix_learning_context_by_request[request.request_id] = (
-                PrefixLearningContext(
-                    engine=chosen_engine,
-                    prompt_token_ids=list(request.prompt_token_ids),
-                )
-            )
-        to_await = self._send_input(
-            EngineCoreRequestType.ADD, request, chosen_engine
-        )
-
-        if not self.engines_running:
-            wake_exclude = self._engine_index_for_identity(chosen_engine)
-            req_msg = msgspec.msgpack.encode(("FIRST_REQ", wake_exclude))
-            await self.first_req_send_socket.send(req_msg)
-
-        try:
-            await to_await
-        except Exception:
-            self.reqs_in_flight.pop(request.request_id, None)
-            self.prefix_learning_context_by_request.pop(request.request_id, None)
-            raise
-
-    async def add_request_async(self, request: EngineCoreRequest) -> None:
-        self._ensure_stats_update_task()
-        if self.coordinator_routing_enabled:
-            self._ensure_route_reply_task()
-
-        if not self.frontend_dispatch_queue_enabled:
-            chosen_engine = await self._select_core_engine_for_request_async(request)
-            pending_engine_indices = self._pending_engine_indices_for_engine(
-                chosen_engine
-            )
-            await self._dispatch_request_to_engine(
-                request,
-                chosen_engine,
-                pending_engine_indices,
-            )
-            self._ensure_output_queue_task()
-            return
-
-        loop = asyncio.get_running_loop()
-        queued_request = QueuedDispatchRequest(
-            request=request,
-            dispatched=loop.create_future(),
-        )
-        async with self.dispatch_queue_lock:
-            self.queued_dispatch_requests.append(queued_request)
-            self.queued_dispatch_by_request_id[request.request_id] = queued_request
-        self._ensure_dispatch_queue_task()
-        await queued_request.dispatched
-        if queued_request.cancelled:
-            return
-
-        self._ensure_output_queue_task()
+# ###### /STyGIANet #######
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
@@ -1507,127 +1438,6 @@ class DPLBAsyncMPClient(GenomeDPLBRoutingMixin, DPAsyncMPClient):
             )
         )[0]
 
-    @staticmethod
-    async def process_engine_outputs(
-        self: "DPLBAsyncMPClient", outputs: EngineCoreOutputs
-    ):
-        direct_prefix_owner_updates: list[PrefixRouterUpdate] = []
-
-        if outputs.kv_cache_event_batch is not None:
-            self._apply_kv_prefix_event_batch(
-                outputs.engine_index, outputs.kv_cache_event_batch
-            )
-            await self._send_kv_prefix_event_batch(
-                outputs.engine_index, outputs.kv_cache_event_batch
-            )
-
-        if outputs.prefix_router_placement_update is not None:
-            update = outputs.prefix_router_placement_update
-            epoch = update.get("epoch")
-            physical_to_logical_map = update.get("physical_to_logical_map")
-            if isinstance(epoch, int) and physical_to_logical_map is not None:
-                self._apply_prefix_router_placement_update(
-                    epoch,
-                    list(physical_to_logical_map),
-                )
-
-        if (
-            self.expert_affinity_learning_enabled
-            and outputs.prefix_learning_owner_updates
-        ):
-            for request_id, target_rank, epoch in outputs.prefix_learning_owner_updates:
-                request_info = self.reqs_in_flight.get(request_id)
-                context = self._take_prefix_learning_context(request_id, request_info)
-                if context is None or not context.prompt_token_ids:
-                    continue
-                if request_info is not None:
-                    request_info.expert_affinity_prefill_learned = True
-                direct_prefix_owner_updates.append(
-                    PrefixRouterUpdate(
-                        target_rank=int(target_rank),
-                        epoch=int(epoch),
-                        prompt_token_ids=list(context.prompt_token_ids),
-                    )
-                )
-
-        if outputs.outputs:
-            for output in outputs.outputs:
-                await self._release_pending_slots_for_request(output.request_id)
-
-        if self.expert_affinity_learning_enabled and outputs.outputs:
-            for output in outputs.outputs:
-                request_info = self.reqs_in_flight.get(output.request_id)
-                if request_info is None:
-                    continue
-                if self.prefix_affinity_only_prefill:
-                    if request_info.expert_affinity_prefill_learned:
-                        continue
-                    if (
-                        output.prefix_learning_owner is None
-                        and output.prefix_learning_pairs is None
-                    ):
-                        continue
-                    if self.load_balancer_debug and output.prefix_learning_pairs is not None:
-                        logger.warning(
-                            "Prefix learning pairs captured request_id=%s phase=prefill "
-                            "unique_pairs=%d",
-                            output.request_id,
-                            len(output.prefix_learning_pairs),
-                        )
-                    request_info.expert_affinity_prefill_learned = True
-                else:
-                    if output.finish_reason is None:
-                        continue
-                    if (
-                        output.prefix_learning_owner is None
-                        and output.prefix_learning_pairs is None
-                    ):
-                        continue
-                    if self.load_balancer_debug and output.prefix_learning_pairs is not None:
-                        logger.warning(
-                            "Prefix learning pairs captured request_id=%s phase=finish "
-                            "unique_pairs=%d",
-                            output.request_id,
-                            len(output.prefix_learning_pairs),
-                        )
-                context = self._take_prefix_learning_context(
-                    output.request_id,
-                    request_info,
-                )
-                if context is None or not context.prompt_token_ids:
-                    continue
-                if output.prefix_learning_owner is not None:
-                    direct_prefix_owner_updates.append(
-                        PrefixRouterUpdate(
-                            target_rank=int(output.prefix_learning_owner["target_rank"]),
-                            epoch=int(output.prefix_learning_owner["epoch"]),
-                            prompt_token_ids=list(context.prompt_token_ids),
-                        )
-                    )
-                    continue
-                await self._enqueue_prefix_learning_work_item(
-                    PrefixLearningWorkItem(
-                        request_id=output.request_id,
-                        engine=context.engine,
-                        prompt_token_ids=list(context.prompt_token_ids),
-                        layer_expert_pairs=output.prefix_learning_pairs,
-                        owner=None,
-                    )
-                )
-
-        if direct_prefix_owner_updates:
-            await self._apply_prefix_router_owner_update_batch(
-                direct_prefix_owner_updates
-            )
-    # ///////////// Expert-based load balancing
-
-        if outputs.finished_requests and self.reqs_in_flight:
-            filtered_finished_requests = set[str]()
-            for req_id in outputs.finished_requests:
-                await self._release_pending_slots_for_request(req_id)
-                filtered_finished_requests.add(req_id)
-                self.reqs_in_flight.pop(req_id, None)
-            outputs.finished_requests = filtered_finished_requests or None
 
     @staticmethod
     async def eep_process_engine_core_notification(
@@ -1689,54 +1499,6 @@ class DPLBAsyncMPClient(GenomeDPLBRoutingMixin, DPAsyncMPClient):
                 EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY,
             ]:
                 self.eep_scaling_cache = None
-
-    async def abort_requests_async(self, request_ids: list[str]) -> None:
-        if not request_ids or self.resources.engine_dead:
-            return
-
-        remaining_request_ids = request_ids
-        if self.frontend_dispatch_queue_enabled:
-            cancelled_request_ids = set[str]()
-            async with self.dispatch_queue_lock:
-                for req_id in request_ids:
-                    queued_request = self.queued_dispatch_by_request_id.pop(req_id, None)
-                    if queued_request is None:
-                        continue
-                    queued_request.cancelled = True
-                    cancelled_request_ids.add(req_id)
-                    if not queued_request.dispatched.done():
-                        queued_request.dispatched.set_result(None)
-
-            if cancelled_request_ids:
-                self._ensure_dispatch_queue_task()
-                remaining_request_ids = [
-                    req_id
-                    for req_id in request_ids
-                    if req_id not in cancelled_request_ids
-                ]
-                if not remaining_request_ids:
-                    return
-
-        if len(remaining_request_ids) == 1:
-            # Fast-path common case.
-            request_id = remaining_request_ids[0]
-            if request_info := self.reqs_in_flight.get(request_id):
-                self.prefix_learning_context_by_request.pop(request_id, None)
-                await self._abort_requests([request_id], request_info.engine)
-            return
-
-        by_engine = defaultdict[EngineIdentity, list[str]](list)
-        for req_id in remaining_request_ids:
-            if request_info := self.reqs_in_flight.get(req_id):
-                by_engine[request_info.engine].append(req_id)
-                self.prefix_learning_context_by_request.pop(req_id, None)
-        for engine, req_ids in by_engine.items():
-            await self._abort_requests(req_ids, engine)
-
-    async def _abort_requests(
-        self, request_ids: list[str], engine: EngineIdentity
-    ) -> None:
-        await self._send_input(EngineCoreRequestType.ABORT, request_ids, engine)
 
     async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Scale elastic EP data parallel size"""

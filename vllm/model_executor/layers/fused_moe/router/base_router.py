@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 import torch
 
+# ###### STyGIANet #######
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.genome.fused_moe.router_capture import (
     maybe_capture_routing,
@@ -12,6 +13,7 @@ from vllm.genome.fused_moe.router_capture import (
     record_expert_load_ranges,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
+# ###### /STyGIANet #######
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -107,11 +109,15 @@ class BaseRouter(FusedMoERouter):
         self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
         self._layer_id = layer_id
+        # ###### STyGIANet #######
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
+        # ###### /STyGIANet #######
 
+    # ###### STyGIANet #######
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
         self.capture_fn = capture_fn
+    # ###### /STyGIANet #######
 
     def _validate_eplb_state(self) -> None:
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
@@ -151,6 +157,7 @@ class BaseRouter(FusedMoERouter):
             )
 
             if record_load:
+                # ###### STyGIANet #######
                 prefill_record_ranges: list[tuple[int, int]] | None = None
                 if is_forward_context_available():
                     forward_context = get_forward_context()
@@ -166,11 +173,12 @@ class BaseRouter(FusedMoERouter):
                         )
                     )
                     if capture_prefill_only:
-                        prefill_record_ranges = list(
-                            forward_context.additional_kwargs.get(
-                                "routing_capture_prefill_ranges", []
+                            prefill_record_ranges = list(
+                                forward_context.additional_kwargs.get(
+                                    "routing_capture_prefill_ranges", []
+                                )
                             )
-                        )
+                # ###### /STyGIANet #######
 
                 if prefill_record_ranges is None:
                     record_expert_load(
@@ -195,12 +203,14 @@ class BaseRouter(FusedMoERouter):
         assert topk_ids.dtype == indices_type or indices_type is None
         return topk_ids
 
+    # ###### STyGIANet #######
     def _maybe_capture_routing(
         self,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor | None = None,
     ) -> None:
         maybe_capture_routing(self._layer_id, topk_ids, topk_weights)
+    # ###### /STyGIANet #######
 
     @abstractmethod
     def _compute_routing(
@@ -261,12 +271,14 @@ class BaseRouter(FusedMoERouter):
             hidden_states, router_logits, indices_type
         )
 
+        # ###### STyGIANet #######
         # Capture logical ids before EPLB mapping.
         self._maybe_capture_routing(topk_ids, topk_weights)
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
+        # ###### /STyGIANet #######
 
         # Step 4: Apply EPLB mapping
         topk_ids = self._apply_eplb_mapping(topk_ids)
@@ -276,6 +288,7 @@ class BaseRouter(FusedMoERouter):
 
         return topk_weights, topk_ids
 
+    # ###### STyGIANet #######
     def peek_experts(
         self,
         hidden_states: torch.Tensor,
@@ -290,3 +303,4 @@ class BaseRouter(FusedMoERouter):
         topk_ids = self._apply_eplb_mapping(topk_ids, record_load=False)
         topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
         return topk_weights, topk_ids
+    # ###### /STyGIANet #######

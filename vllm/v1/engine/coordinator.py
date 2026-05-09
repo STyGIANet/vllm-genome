@@ -10,9 +10,11 @@ import msgspec.msgpack
 import zmq
 
 from vllm.config import ParallelConfig
+# ###### STyGIANet #######
 from vllm.genome.engine.coordinator_routing import (
     GenomeDPCoordinatorRoutingMixin,
 )
+# ###### /STyGIANet #######
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_tcp_uri, make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
@@ -86,7 +88,7 @@ class DPCoordinator:
         self,
         parallel_config: ParallelConfig,
         enable_wave_coordination: bool = True,
-        # ///////////// Expert-based load balancing
+        # ###### STyGIANet #######
         enable_prefix_affinity_routing: bool = False,
         enable_kv_block_prefix_routing: bool = False,
         enable_load_score_routing: bool = False,
@@ -96,7 +98,7 @@ class DPCoordinator:
         prefix_learning_algorithm: str = "prefixtrie",
         load_balancer_debug: bool = False,
         kv_block_prefix_block_size: int = 0,
-        # ///////////// Expert-based load balancing
+        # ###### /STyGIANet #######
     ):
         dp_size = parallel_config.data_parallel_size
         assert dp_size > 1, "Coordinator only used for data parallel"
@@ -119,8 +121,9 @@ class DPCoordinator:
             )
 
         front_publish_address = bind_address(local_only)
-        # ///////////// Expert-based load balancing
+        # ###### STyGIANet #######
         front_route_address = bind_address(local_only)
+        # ###### /STyGIANet #######
         back_publish_address = bind_address(local_only_eng)
         back_output_address = bind_address(local_only_eng)
 
@@ -137,7 +140,7 @@ class DPCoordinator:
                 "back_publish_address": back_publish_address,
                 "zmq_addr_pipe": child_zmq_addr_pipe,
                 "enable_wave_coordination": enable_wave_coordination,
-                # ///////////// Expert-based load balancing
+                # ###### STyGIANet #######
                 "enable_prefix_affinity_routing": enable_prefix_affinity_routing,
                 "enable_kv_block_prefix_routing": enable_kv_block_prefix_routing,
                 "enable_load_score_routing": enable_load_score_routing,
@@ -147,7 +150,7 @@ class DPCoordinator:
                 "prefix_learning_algorithm": prefix_learning_algorithm,
                 "load_balancer_debug": load_balancer_debug,
                 "kv_block_prefix_block_size": kv_block_prefix_block_size,
-                # ///////////// Expert-based load balancing
+                # ###### /STyGIANet #######
             },
             daemon=True,
         )
@@ -161,8 +164,9 @@ class DPCoordinator:
         ) = self._wait_for_zmq_addrs(parent_zmq_addr_pipe)
 
         self.stats_publish_address = front_publish_address
-        # ///////////// Expert-based load balancing
+        # ###### STyGIANet #######
         self.route_query_address = front_route_address
+        # ###### /STyGIANet #######
         self.coord_in_address = back_publish_address
         self.coord_out_address = back_output_address
         self._finalizer = weakref.finalize(self, shutdown, [self.proc])
@@ -174,10 +178,10 @@ class DPCoordinator:
         """Returns tuple of ZMQ input address, output address."""
         return self.coord_in_address, self.coord_out_address
 
-    # ///////////// Expert-based load balancing
+    # ###### STyGIANet #######
     def get_route_query_address(self) -> str:
         return self.route_query_address
-    # ///////////// Expert-based load balancing
+    # ###### /STyGIANet #######
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown coordinator process with configurable timeout."""
@@ -190,8 +194,8 @@ class EngineState:
         self.request_counts = [0, 0]  # [waiting, running]
 
 
+# ###### STyGIANet #######
 class DPCoordinatorProc(GenomeDPCoordinatorRoutingMixin):
-    # ///////////// Expert-based load balancing
     def __init__(
         self,
         engine_count: int,
@@ -226,12 +230,13 @@ class DPCoordinatorProc(GenomeDPCoordinatorRoutingMixin):
             load_balancer_debug=load_balancer_debug,
             kv_block_prefix_block_size=kv_block_prefix_block_size,
         )
+# ###### /STyGIANet #######
 
     @staticmethod
     def run_coordinator(
         engine_count: int,
         front_publish_address: str,
-        # ///////////// Expert-based load balancing
+        # ###### STyGIANet #######
         front_route_address: str,
         back_output_address: str,
         back_publish_address: str,
@@ -247,7 +252,7 @@ class DPCoordinatorProc(GenomeDPCoordinatorRoutingMixin):
         prefix_learning_algorithm: str = "prefixtrie",
         load_balancer_debug: bool = False,
         kv_block_prefix_block_size: int = 0,
-        # ///////////// Expert-based load balancing
+        # ###### /STyGIANet #######
     ):
         coordinator = DPCoordinatorProc(
             engine_count=engine_count,
@@ -414,123 +419,13 @@ class DPCoordinatorProc(GenomeDPCoordinatorRoutingMixin):
                         continue
 
                     decoded = msgspec.msgpack.decode(buffer)
-                    if (
-                        isinstance(decoded, (list, tuple))
-                        and len(decoded) == 2
-                        and decoded[0] == "SCALE_ELASTIC_EP"
+                    # ###### STyGIANet #######
+                    if self._handle_frontend_control_message(
+                        decoded,
+                        publish_front,
                     ):
-                        # Handle scale up notification
-                        new_engine_count = decoded[1]
-                        current_count = len(self.engines)
-                        if new_engine_count > current_count:
-                            for _ in range(new_engine_count - current_count):
-                                self.engines.append(EngineState())
-                            for rank in range(current_count, new_engine_count):
-                                self.expert_affinity_indices[rank] = (
-                                    self._make_expert_affinity_index()
-                                )
-                                self.kv_block_prefix_indices[rank] = (
-                                    ExactBlockPrefixIndex()
-                                )
-                            # NOTE(yongji): handle the case
-                            # where newly started engines have current_wave = 0
-                            # if existing engines just finished a wave
-                            # and engine_running isn't updated yet at
-                            # CoordinatorProc requests routed to newly started
-                            # engines may not wake up existing engines, as long
-                            # as 0 < request.wave < existing engines'
-                            # current_wave
-                            # we note that 0 is the wave number for the new
-                            # engine
-                            logger.info(
-                                "DPCoordinator scaled up from %s to %s engines",
-                                current_count,
-                                new_engine_count,
-                            )
-                        else:
-                            self.engines = self.engines[:new_engine_count]
-                            self.expert_affinity_indices = {
-                                rank: index
-                                for rank, index in self.expert_affinity_indices.items()
-                                if rank < new_engine_count
-                            }
-                            self.kv_block_prefix_indices = {
-                                rank: index
-                                for rank, index in self.kv_block_prefix_indices.items()
-                                if rank < new_engine_count
-                            }
-                            logger.info(
-                                "DPCoordinator scaled down from %s to %s engines",
-                                current_count,
-                                new_engine_count,
-                            )
-                        continue  # Skip normal engine notification processing
-
-                    if (
-                        isinstance(decoded, (list, tuple))
-                        and len(decoded) == 5
-                        and decoded[0] == "PREFIX_ROUTER_UPDATE"
-                    ):
-                        _, _, target_rank, epoch, prompt_token_ids = decoded
-                        self._apply_prefix_router_update(
-                            int(target_rank),
-                            int(epoch),
-                            list(prompt_token_ids),
-                        )
                         continue
-
-                    if (
-                        isinstance(decoded, (list, tuple))
-                        and len(decoded) == 3
-                        and decoded[0] == "PREFIX_ROUTER_UPDATE_BATCH"
-                    ):
-                        _, _, updates = decoded
-                        for update in updates:
-                            if len(update) != 3:
-                                continue
-                            target_rank, epoch, prompt_token_ids = update
-                            self._apply_prefix_router_update(
-                                int(target_rank),
-                                int(epoch),
-                                list(prompt_token_ids),
-                            )
-                        continue
-
-                    if (
-                        isinstance(decoded, (list, tuple))
-                        and len(decoded) == 3
-                        and decoded[0] == "KV_PREFIX_EVENT_BATCH"
-                    ):
-                        _, target_rank, payload = decoded
-                        batch = self.kv_block_prefix_decoder.decode(payload)
-                        self._apply_kv_prefix_event_batch(int(target_rank), batch)
-                        continue
-
-                    if (
-                        isinstance(decoded, (list, tuple))
-                        and len(decoded) == 5
-                        and decoded[0] == "LB_WEIGHT_UPDATE"
-                    ):
-                        _, source_client_index, expert_weight, kv_weight, load_weight = (
-                            decoded
-                        )
-                        self._apply_runtime_routing_weights(
-                            float(expert_weight),
-                            float(kv_weight),
-                            float(load_weight),
-                        )
-                        publish_front.send(
-                            msgspec.msgpack.encode(
-                                (
-                                    "LB_WEIGHT_UPDATE",
-                                    int(source_client_index),
-                                    self.expert_affinity_weight,
-                                    self.kv_block_prefix_weight,
-                                    self.load_score_weight,
-                                )
-                            )
-                        )
-                        continue
+                    # ###### /STyGIANet #######
 
                     # Wave coordination: handle new-request messages from front-end.
                     # Only process these when wave coordination is enabled
@@ -552,15 +447,10 @@ class DPCoordinatorProc(GenomeDPCoordinatorRoutingMixin):
                                 publish_back, current_wave, engine_to_exclude
                             )
 
+                # ###### STyGIANet #######
                 if route_front in events:
-                    frames = route_front.recv_multipart()
-                    if len(frames) >= 2:
-                        identity = frames[0]
-                        route_request = route_decoder.decode(frames[-1])
-                        route_response = self._route_request(route_request)
-                        route_front.send_multipart(
-                            (identity, msgspec.msgpack.encode(route_response))
-                        )
+                    self._handle_route_query_event(route_front, route_decoder)
+                # ###### /STyGIANet #######
 
                 if output_back in events:
                     # We received a message from one of the engines.
@@ -571,26 +461,12 @@ class DPCoordinatorProc(GenomeDPCoordinatorRoutingMixin):
                     assert not outputs.outputs
                     assert outputs.utility_output is None
 
-                    eng_index = outputs.engine_index
-                    if outputs.prefix_router_placement_update is not None:
-                        update = outputs.prefix_router_placement_update
-                        epoch = int(update["epoch"])
-                        if self._apply_prefix_router_placement_update(epoch):
-                            publish_front.send(
-                                msgspec.msgpack.encode(
-                                    (
-                                        "PREFIX_ROUTER_PLACEMENT_UPDATE",
-                                        epoch,
-                                        update["physical_to_logical_map"],
-                                    )
-                                )
-                            )
-                    if outputs.kv_cache_event_batch is not None:
-                        self._apply_kv_prefix_event_batch(
-                            eng_index,
-                            outputs.kv_cache_event_batch,
-                        )
-                    # ///////////// Expert-based load balancing
+                    # ###### STyGIANet #######
+                    eng_index = self._handle_engine_output_custom(
+                        outputs,
+                        publish_front,
+                    )
+                    # ###### /STyGIANet #######
 
                     scheduler_stats = outputs.scheduler_stats
                     if scheduler_stats:

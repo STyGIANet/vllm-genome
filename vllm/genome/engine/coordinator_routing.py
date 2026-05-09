@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import msgspec.msgpack
+import zmq
+
 from vllm.distributed.kv_events import (
     AllBlocksCleared,
     BlockRemoved,
@@ -7,7 +10,11 @@ from vllm.distributed.kv_events import (
     KVEventBatch,
 )
 from vllm.logger import init_logger
-from vllm.v1.engine import CoordinatorRouteRequest, CoordinatorRouteResponse
+from vllm.v1.engine import (
+    CoordinatorRouteRequest,
+    CoordinatorRouteResponse,
+    EngineCoreOutputs,
+)
 from vllm.v1.prefix_router import (
     ExactBlockPrefixIndex,
     ExpertAffinityIndex,
@@ -384,3 +391,157 @@ class GenomeDPCoordinatorRoutingMixin:
             call_id=query.call_id,
             engine_index=chosen_index,
         )
+
+    def _handle_scale_elastic_ep_message(self, decoded: object) -> bool:
+        if not (
+            isinstance(decoded, (list, tuple))
+            and len(decoded) == 2
+            and decoded[0] == "SCALE_ELASTIC_EP"
+        ):
+            return False
+
+        new_engine_count = decoded[1]
+        current_count = len(self.engines)
+        if new_engine_count > current_count:
+            for _ in range(new_engine_count - current_count):
+                self.engines.append(type(self.engines[0])())
+            for rank in range(current_count, new_engine_count):
+                self.expert_affinity_indices[rank] = self._make_expert_affinity_index()
+                self.kv_block_prefix_indices[rank] = ExactBlockPrefixIndex()
+            logger.info(
+                "DPCoordinator scaled up from %s to %s engines",
+                current_count,
+                new_engine_count,
+            )
+        else:
+            self.engines = self.engines[:new_engine_count]
+            self.expert_affinity_indices = {
+                rank: index
+                for rank, index in self.expert_affinity_indices.items()
+                if rank < new_engine_count
+            }
+            self.kv_block_prefix_indices = {
+                rank: index
+                for rank, index in self.kv_block_prefix_indices.items()
+                if rank < new_engine_count
+            }
+            logger.info(
+                "DPCoordinator scaled down from %s to %s engines",
+                current_count,
+                new_engine_count,
+            )
+        return True
+
+    def _handle_frontend_control_message(
+        self,
+        decoded: object,
+        publish_front: zmq.Socket,
+    ) -> bool:
+        if self._handle_scale_elastic_ep_message(decoded):
+            return True
+
+        if (
+            isinstance(decoded, (list, tuple))
+            and len(decoded) == 5
+            and decoded[0] == "PREFIX_ROUTER_UPDATE"
+        ):
+            _, _, target_rank, epoch, prompt_token_ids = decoded
+            self._apply_prefix_router_update(
+                int(target_rank),
+                int(epoch),
+                list(prompt_token_ids),
+            )
+            return True
+
+        if (
+            isinstance(decoded, (list, tuple))
+            and len(decoded) == 3
+            and decoded[0] == "PREFIX_ROUTER_UPDATE_BATCH"
+        ):
+            _, _, updates = decoded
+            for update in updates:
+                if len(update) != 3:
+                    continue
+                target_rank, epoch, prompt_token_ids = update
+                self._apply_prefix_router_update(
+                    int(target_rank),
+                    int(epoch),
+                    list(prompt_token_ids),
+                )
+            return True
+
+        if (
+            isinstance(decoded, (list, tuple))
+            and len(decoded) == 3
+            and decoded[0] == "KV_PREFIX_EVENT_BATCH"
+        ):
+            _, target_rank, payload = decoded
+            batch = self.kv_block_prefix_decoder.decode(payload)
+            self._apply_kv_prefix_event_batch(int(target_rank), batch)
+            return True
+
+        if (
+            isinstance(decoded, (list, tuple))
+            and len(decoded) == 5
+            and decoded[0] == "LB_WEIGHT_UPDATE"
+        ):
+            _, source_client_index, expert_weight, kv_weight, load_weight = decoded
+            self._apply_runtime_routing_weights(
+                float(expert_weight),
+                float(kv_weight),
+                float(load_weight),
+            )
+            publish_front.send(
+                msgspec.msgpack.encode(
+                    (
+                        "LB_WEIGHT_UPDATE",
+                        int(source_client_index),
+                        self.expert_affinity_weight,
+                        self.kv_block_prefix_weight,
+                        self.load_score_weight,
+                    )
+                )
+            )
+            return True
+
+        return False
+
+    def _handle_route_query_event(
+        self,
+        route_front: zmq.Socket,
+        route_decoder: MsgpackDecoder,
+    ) -> None:
+        frames = route_front.recv_multipart()
+        if len(frames) >= 2:
+            identity = frames[0]
+            route_request = route_decoder.decode(frames[-1])
+            route_response = self._route_request(route_request)
+            route_front.send_multipart(
+                (identity, msgspec.msgpack.encode(route_response))
+            )
+
+    def _handle_engine_output_custom(
+        self,
+        outputs: EngineCoreOutputs,
+        publish_front: zmq.Socket,
+    ) -> int:
+        eng_index = outputs.engine_index
+        if outputs.prefix_router_placement_update is not None:
+            update = outputs.prefix_router_placement_update
+            epoch = int(update["epoch"])
+            if self._apply_prefix_router_placement_update(epoch):
+                publish_front.send(
+                    msgspec.msgpack.encode(
+                        (
+                            "PREFIX_ROUTER_PLACEMENT_UPDATE",
+                            epoch,
+                            update["physical_to_logical_map"],
+                        )
+                    )
+                )
+        if outputs.kv_cache_event_batch is not None:
+            self._apply_kv_prefix_event_batch(
+                eng_index,
+                outputs.kv_cache_event_batch,
+            )
+        return eng_index
