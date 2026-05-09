@@ -19,6 +19,7 @@ else
 	EXTRA_ARGS="--headless"
 fi
 
+export VLLM_LOGGING_LEVEL=DEBUG
 
 # vllm serve deepseek-ai/deepseek-moe-16b-chat --tensor-parallel-size 1 --data-parallel-size 8 --enable-expert-parallel --all2all-backend deepep_high_throughput --trust_remote_code 
 
@@ -31,25 +32,28 @@ vllm serve $MODEL \
 	  --data-parallel-size-local 1 \
 	  --data-parallel-start-rank ${RANK} \
 	  --enable-expert-parallel \
-	  --all2all-backend deepep_high_throughput \
 	  --trust_remote_code \
 	  --data-parallel-address ${HEAD_IP} \
 	  --data-parallel-rpc-port 18000 \
 	  --max_num_batched_tokens 2048 \
 	  ${EXTRA_ARGS} \
 	  ${VLLM_EXTRA_ARGS} \
-      --expert-affinity-routing-weight 1 \
-      --kv-block-prefix-routing-weight 0.5 \
-      --load-score-routing-weight 0.5 \
+	  --all2all-backend nixl_ep \
       --enable-eplb \
-      --max-pending-requests-per-engine 256 \
-      --enable-load-score-routing \
-      --enable-kv-block-prefix-routing \
-      --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000}' \
-	  --placement-callback-path ${PLACEMENT_PATH} \
-	  --placement-callback-func compute_placement \
-      --enable-prefix-affinity-routing \
-      --prefix-affinity-only-prefill \
+	  --enable-elastic-ep \
+	  --distributed-executor-backend mp \
+	  # --all2all-backend deepep_high_throughput \
+      # --expert-affinity-routing-weight 1 \
+      # --kv-block-prefix-routing-weight 0.5 \
+      # --load-score-routing-weight 0.5 \
+      # --max-pending-requests-per-engine 256 \
+      # --enable-load-score-routing \
+      # --enable-kv-block-prefix-routing \
+      # --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000}' \
+	  # --placement-callback-path ${PLACEMENT_PATH} \
+	  # --placement-callback-func compute_placement \
+      # --enable-prefix-affinity-routing \
+      # --prefix-affinity-only-prefill \
 	  # --load-balancer-debug \
 
 

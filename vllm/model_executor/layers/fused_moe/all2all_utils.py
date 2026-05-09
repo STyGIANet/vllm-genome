@@ -28,6 +28,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one
 from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
     FlashInferNVLinkTwoSidedPrepareAndFinalize,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.nccl_alltoall import (
+    NcclAllToAllPrepareAndFinalize,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_nixl_ep
 
@@ -234,6 +237,22 @@ def maybe_make_prepare_finalize(
             use_monolithic=use_monolithic,
             is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             num_dispatchers=all2all_manager.world_size,
+        )
+
+    elif moe.use_nccl_alltoall_kernels:
+        if use_monolithic:
+            raise NotImplementedError(
+                "nccl_alltoall does not support monolithic router-logits "
+                "dispatch. Please use a modular MoE kernel path."
+            )
+
+        global_to_physical = None
+        if routing_tables is not None:
+            global_to_physical = routing_tables[0]
+
+        prepare_finalize = NcclAllToAllPrepareAndFinalize(
+            num_dispatchers=all2all_manager.world_size,
+            global_to_physical=global_to_physical,
         )
 
     elif moe.use_nixl_ep_kernels:

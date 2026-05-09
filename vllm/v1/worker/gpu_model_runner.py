@@ -2373,6 +2373,13 @@ class GPUModelRunner(
             hasher.update(int(num_scheduled).to_bytes(8, "little", signed=False))
         return hasher.hexdigest()
 
+    def _needs_prefill_capture_metadata(self) -> bool:
+        return bool(
+            self.model_config.enable_prefix_affinity_routing
+            or self.model_config.enable_return_routed_experts
+            or self._compute_placement_callback is not None
+        )
+
     def _build_attention_metadata(
         self,
         num_tokens: int,
@@ -2644,11 +2651,15 @@ class GPUModelRunner(
 
         prefill_capture_ranges: list[tuple[int, int]] = []
         prefill_capture_req_ids: list[str] = []
-        if cm_base.is_prefilling is not None:
+        if (
+            self._needs_prefill_capture_metadata()
+            and cm_base.is_prefilling is not None
+        ):
             query_start_loc_cpu = cm_base.query_start_loc_cpu
             num_capture_reqs = min(
                 len(cm_base.is_prefilling),
                 query_start_loc_cpu.shape[0] - 1,
+                len(self.input_batch.req_ids),
             )
             for req_idx in range(num_capture_reqs):
                 if not bool(cm_base.is_prefilling[req_idx].item()):
@@ -4698,6 +4709,25 @@ class GPUModelRunner(
                 prefix_learning_capture_req_ids,
             )
 
+        additional_forward_context = {
+            "moe_dispatch_traffic_batch_signature": (
+                self._build_moe_dispatch_traffic_batch_signature(
+                    scheduler_output
+                )
+            ),
+        }
+        if self._needs_prefill_capture_metadata():
+            additional_forward_context.update({
+                "routing_capture_prefill_ranges": prefill_capture_ranges,
+                "routing_capture_prefill_req_ids": prefill_capture_req_ids,
+                "routing_capture_prefill_only_for_placement": bool(
+                    self._compute_placement_callback
+                ),
+                "routing_capture_skip_expert_load": (
+                    self._uses_graph_only_callback_placement()
+                ),
+            })
+
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
@@ -4728,21 +4758,7 @@ class GPUModelRunner(
                 batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
-                additional_forward_context={
-                    "moe_dispatch_traffic_batch_signature": (
-                        self._build_moe_dispatch_traffic_batch_signature(
-                            scheduler_output
-                        )
-                    ),
-                    "routing_capture_prefill_ranges": prefill_capture_ranges,
-                    "routing_capture_prefill_req_ids": prefill_capture_req_ids,
-                    "routing_capture_prefill_only_for_placement": bool(
-                        self._compute_placement_callback
-                    ),
-                    "routing_capture_skip_expert_load": (
-                        self._uses_graph_only_callback_placement()
-                    ),
-                },
+                additional_forward_context=additional_forward_context,
                 skip_compiled=has_encoder_input,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
@@ -6016,6 +6032,7 @@ class GPUModelRunner(
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         force_attention: bool = False,
         uniform_decode: bool = False,
+        single_prefill_request: bool = False,
         allow_microbatching: bool = True,
         skip_eplb: bool = False,
         is_profile: bool = False,
@@ -6041,6 +6058,9 @@ class GPUModelRunner(
             force_attention: If True, always create attention metadata. Used to
                 warm up attention backend when mode is NONE.
             uniform_decode: If True, the batch is a uniform decode batch.
+            single_prefill_request: If True, create one prefill request with
+                `num_tokens` prompt tokens instead of spreading tokens across
+                multiple synthetic requests.
             skip_eplb: If True, skip EPLB state update.
             is_profile: If True, this is a profile run.
             create_mixed_batch: If True, create a mixed batch with both decode
@@ -6091,6 +6111,7 @@ class GPUModelRunner(
         assert num_tokens <= self.max_num_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
         if create_mixed_batch:
+            assert not single_prefill_request
             assert not uniform_decode
             # Create mixed batch:
             # first half decode tokens, second half one prefill
@@ -6102,6 +6123,11 @@ class GPUModelRunner(
             num_scheduled_tokens_list = [1] * num_decode_tokens + [num_prefill_tokens]
             # Note: Overriding max_query_len to be the prefill tokens
             max_query_len = num_prefill_tokens
+        elif single_prefill_request:
+            assert not uniform_decode
+            num_reqs = 1
+            num_scheduled_tokens_list = [num_tokens]
+            max_query_len = num_tokens
         elif uniform_decode:
             assert not create_mixed_batch
             num_reqs = min(max_num_reqs, cdiv(num_tokens, max_query_len))
@@ -6290,6 +6316,26 @@ class GPUModelRunner(
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
+            profile_additional_forward_context = {
+                "moe_dispatch_traffic_batch_signature": (
+                    self._build_profile_moe_dispatch_traffic_batch_signature(
+                        num_scheduled_tokens
+                    )
+                ),
+                "skip_routed_experts_capture": True,
+            }
+            if self._needs_prefill_capture_metadata():
+                profile_additional_forward_context.update({
+                    "routing_capture_prefill_ranges": prefill_capture_ranges,
+                    "routing_capture_prefill_req_ids": [],
+                    "routing_capture_prefill_only_for_placement": bool(
+                        self._compute_placement_callback
+                    ),
+                    "routing_capture_skip_expert_load": (
+                        self._uses_graph_only_callback_placement()
+                    ),
+                })
+
             self._skip_prefix_learning_capture_for_current_forward = True
             try:
                 with (
@@ -6303,22 +6349,9 @@ class GPUModelRunner(
                         batch_descriptor=batch_desc,
                         ubatch_slices=ubatch_slices_padded,
                         slot_mapping=slot_mappings,
-                        additional_forward_context={
-                            "moe_dispatch_traffic_batch_signature": (
-                                self._build_profile_moe_dispatch_traffic_batch_signature(
-                                    num_scheduled_tokens
-                                )
-                            ),
-                            "routing_capture_prefill_ranges": prefill_capture_ranges,
-                            "routing_capture_prefill_req_ids": [],
-                            "routing_capture_prefill_only_for_placement": bool(
-                                self._compute_placement_callback
-                            ),
-                            "routing_capture_skip_expert_load": (
-                                self._uses_graph_only_callback_placement()
-                            ),
-                            "skip_routed_experts_capture": True,
-                        },
+                        additional_forward_context=(
+                            profile_additional_forward_context
+                        ),
                     ),
                 ):
                     outputs = self.model(
@@ -6634,7 +6667,7 @@ class GPUModelRunner(
                             self.encoder_cache[f"tmp_{i}"] = output
 
         # Add `is_profile` here to pre-allocate communication buffers
-        profile_tokens = min(self.max_num_tokens, 64)
+        profile_tokens = self.max_num_tokens
         hidden_states, last_hidden_states = self._dummy_run(
             profile_tokens, is_profile=True
         )
@@ -7130,6 +7163,22 @@ class GPUModelRunner(
         # Flexible resolve the cudagraph mode
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
+
+        if (
+            self.parallel_config.enable_expert_parallel
+            and self.parallel_config.all2all_backend == "nccl_alltoall"
+            and self.parallel_config.data_parallel_size > 1
+            and cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            logger.warning(
+                "CUDAGraphMode.%s is not supported with nccl_alltoall "
+                "expert-parallel backend; setting cudagraph_mode=NONE.",
+                cudagraph_mode.name,
+            )
+            cudagraph_mode = self.compilation_config.cudagraph_mode = (
+                CUDAGraphMode.NONE
+            )
+
         # check cudagraph for mixed batch is supported
         if (
             cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL

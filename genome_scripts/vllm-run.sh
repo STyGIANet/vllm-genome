@@ -30,4 +30,8 @@ mpirun -np 8 -H \
 	-x CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING}" \
 	--map-by ppr:1:node \
 	-x PLACEMENT_PATH="${SCRIPT_DIR}/expert-placement/placement_fns.py" \
-	nswrap --python ${SCRIPT_DIR}/.venv ${SCRIPT_DIR}/vllm-ns-worker.sh $MODEL
+	nswrap --python ${SCRIPT_DIR}/../.venv ${SCRIPT_DIR}/vllm-ns-worker.sh $MODEL
+
+
+
+# vllm serve deepseek-ai/deepseek-moe-16b-chat --trust-remote-code --max-model-len 4096 --max-num-seqs 64 --data-parallel-size 2 --enable-expert-parallel --enable-elastic-ep --enable-dbo --dbo-decode-token-threshold 16 --dbo-prefill-token-threshold 256 --all2all-backend nixl_ep --enable-eplb

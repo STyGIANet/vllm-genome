@@ -779,9 +779,10 @@ class FusedMoE(CustomOp):
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         # Currently routing_tables only needed for round-robin expert placement
-        # with DeepEP-ll or NIXL EP all2all backends.
+        # with DeepEP-ll, NIXL EP, or NCCL all2all backends.
         if self.expert_placement_strategy != "round_robin" or (
             not self.moe_parallel_config.use_deepep_ll_kernels
+            and not self.moe_parallel_config.use_nccl_alltoall_kernels
             and not self.moe_parallel_config.use_nixl_ep_kernels
         ):
             return None

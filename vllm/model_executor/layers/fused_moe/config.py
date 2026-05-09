@@ -982,6 +982,10 @@ class FusedMoEParallelConfig:
         )
 
     @property
+    def use_nccl_alltoall_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "nccl_alltoall"
+
+    @property
     def use_mori_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "mori"
 
@@ -1271,6 +1275,10 @@ class FusedMoEConfig:
     @property
     def use_ag_rs_all2all_kernels(self):
         return self.moe_parallel_config.use_ag_rs_all2all_kernels
+
+    @property
+    def use_nccl_alltoall_kernels(self):
+        return self.moe_parallel_config.use_nccl_alltoall_kernels
 
     @property
     def use_nixl_ep_kernels(self):

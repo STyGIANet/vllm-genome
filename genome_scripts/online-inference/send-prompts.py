@@ -23,15 +23,28 @@ from prompt_datasets import (
 )
 # Change which prompt datasets to test in prompt_datasets.py at the end of the file
 
-HOST = "http://0.0.0.0:8000"
-MODEL = "deepseek-ai/deepseek-moe-16b-chat"
+HOST = os.getenv("VLLM_HOST", "http://127.0.0.1:8000")
+MODEL = os.getenv("VLLM_MODEL", "deepseek-ai/deepseek-moe-16b-chat")
 
-POISSON_RATE_MODE = "tok_per_sec"
-POISSON_REQUESTS_PER_SEC = 1.0
-# POISSON_INPUT_TOKENS_PER_SEC = None
-POISSON_INPUT_TOKENS_PER_SEC = 16000
+POISSON_RATE_MODE = os.getenv("POISSON_RATE_MODE", "tok_per_sec")
+POISSON_REQUESTS_PER_SEC = float(os.getenv("POISSON_REQUESTS_PER_SEC", "1.0"))
+_poisson_input_tokens_per_sec = os.getenv("POISSON_INPUT_TOKENS_PER_SEC", "120000")
+POISSON_INPUT_TOKENS_PER_SEC = (
+    None
+    if _poisson_input_tokens_per_sec.lower() == "none"
+    else float(_poisson_input_tokens_per_sec)
+)
+CLIENT_CONN_LIMIT = int(os.getenv("CLIENT_CONN_LIMIT", "256"))
+CLIENT_CONCURRENCY = int(os.getenv("CLIENT_CONCURRENCY", "128"))
+REQUEST_MAX_TOKENS = int(os.getenv("REQUEST_MAX_TOKENS", "1"))
+WARMUP_EPOCHS = int(os.getenv("WARMUP_EPOCHS", "0"))
+MEASURED_EPOCHS = int(os.getenv("MEASURED_EPOCHS", "1"))
+PRE_RUN_WARMUP_PROMPTS = int(os.getenv("PRE_RUN_WARMUP_PROMPTS", "8"))
+PRE_RUN_WARMUP_INPUT_TOKENS_PER_SEC = float(
+    os.getenv("PRE_RUN_WARMUP_INPUT_TOKENS_PER_SEC", "2000")
+)
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL)
+tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
 
 rng = random.Random(10)
 
@@ -184,13 +197,22 @@ def load_dataset_compat(name, subset):
 
 def count_message_tokens(messages):
     try:
-        return len(
-            tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-            )
+        tokenized = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
         )
+        input_ids = tokenized.get("input_ids") if hasattr(tokenized, "get") else tokenized
+        if hasattr(input_ids, "shape"):
+            shape = tuple(int(dim) for dim in input_ids.shape)
+            if not shape:
+                return int(input_ids.item())
+            return int(shape[-1])
+        if isinstance(input_ids, list):
+            if input_ids and isinstance(input_ids[0], list):
+                return len(input_ids[0])
+            return len(input_ids)
+        return len(input_ids)
     except Exception:
         return sum(len(tokenizer.encode(msg["content"])) for msg in messages)
 
@@ -253,13 +275,27 @@ def prepare_example(ex):
     }
 
 
+def load_prepared_examples(name, subset, formatter, split):
+    ds = load_dataset_compat(name, subset)
+    base_ds = ds[split]
+
+    formatted_examples = []
+    for ex in base_ds:
+        formatted = formatter(ex)
+        if formatted is None:
+            continue
+        formatted_examples.append(formatted)
+
+    return [prepare_example(ex) for ex in formatted_examples], len(base_ds)
+
+
 async def ask(session, sem, idx, ex, scheduled_arrival_ns):
     async with sem:
         choices = ex.get("choices")
         payload = {
             "model": MODEL,
             "messages": ex["messages"],
-            "max_tokens": 1,
+            "max_tokens": REQUEST_MAX_TOKENS,
             "temperature": 0.0,
         }
 
@@ -271,12 +307,20 @@ async def ask(session, sem, idx, ex, scheduled_arrival_ns):
             try:
                 data = await resp.json()
                 raw_pred = data["choices"][0]["message"]["content"]
-                if choices and answer is not None:
+                usage = data.get("usage", {})
+                if choices:
                     pred = extract_choice(raw_pred, len(choices))
                 else:
                     pred = raw_pred.strip()
+                output_tokens = int(
+                    usage.get(
+                        "completion_tokens",
+                        len(tokenizer.encode(raw_pred)) if raw_pred else 0,
+                    )
+                )
             except Exception:
                 pred = "ERROR"
+                output_tokens = 0
 
         completion_ns = now_ns()
         # Queueing here just the async io's queueing, not on the inference side
@@ -287,8 +331,6 @@ async def ask(session, sem, idx, ex, scheduled_arrival_ns):
         service_latency = (completion_ns - dispatch_ns) / 1e9
 
         input_tokens = ex["input_tokens"]
-        output_tokens = 1
-
         print(
             f"[{idx}] QD={queue_delay:.4f}s TTFT={ttft:.4f}s "
             f"LAT={total_latency:.4f}s SVC_TTFT={service_ttft:.4f}s "
@@ -312,8 +354,8 @@ async def ask(session, sem, idx, ex, scheduled_arrival_ns):
 
 
 async def poisson_driver(examples, rate, rate_mode, warmup_count):
-    connector = aiohttp.TCPConnector(limit=100)
-    sem = asyncio.Semaphore(40)
+    connector = aiohttp.TCPConnector(limit=CLIENT_CONN_LIMIT)
+    sem = asyncio.Semaphore(CLIENT_CONCURRENCY)
 
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = []
@@ -341,21 +383,13 @@ async def poisson_driver(examples, rate, rate_mode, warmup_count):
 async def run_dataset(name, subset, formatter, split):
     print(f"\n### Running: {name} / {subset} ###")
 
-    ds = load_dataset_compat(name, subset)
-
-    # split = "test" if "test" in ds else "validation"
-    base_ds = ds[split]
-    # Setting 200 for now just for quick experiments. TODO: Remove it.
-    # base_ds = base_ds.select(range(400))
-    print("Dataset split size:", len(base_ds))
-
-    base_ds = base_ds.map(formatter)
-    examples = [prepare_example(ex) for ex in base_ds if ex is not None]
+    examples, split_size = load_prepared_examples(name, subset, formatter, split)
+    print("Dataset split size:", split_size)
 
     print("Prompts:", len(examples))
 
-    warmup_epochs = 0
-    measured_epochs = 1
+    warmup_epochs = WARMUP_EPOCHS
+    measured_epochs = MEASURED_EPOCHS
 
     num_repeats = warmup_epochs + measured_epochs
     examples_full = examples * num_repeats
@@ -411,6 +445,39 @@ async def run_dataset(name, subset, formatter, split):
     )
 
     return stats
+
+
+async def run_pre_run_warmup():
+    if PRE_RUN_WARMUP_PROMPTS <= 0:
+        return
+
+    name, subset, formatter, split = ALL_DATASETS["humaneval"]
+    examples, split_size = load_prepared_examples(name, subset, formatter, split)
+    if not examples:
+        print("Skipping pre-run warmup: no Humaneval prompts available.")
+        return
+
+    warmup_examples = examples[:min(PRE_RUN_WARMUP_PROMPTS, len(examples))]
+    mean_input_tokens = (
+        sum(ex["input_tokens"] for ex in warmup_examples) / len(warmup_examples)
+    )
+
+    print(
+        "\n### Pre-run warmup: humaneval ###\n"
+        f"Dataset split size: {split_size}\n"
+        f"Warmup prompts: {len(warmup_examples)}\n"
+        "Poisson arrivals: mode=tok_per_sec "
+        f"rate={PRE_RUN_WARMUP_INPUT_TOKENS_PER_SEC:.2f} tok/s "
+        f"(mean_input_tokens={mean_input_tokens:.2f})"
+    )
+
+    await poisson_driver(
+        warmup_examples,
+        PRE_RUN_WARMUP_INPUT_TOKENS_PER_SEC,
+        "tok_per_sec",
+        0,
+    )
+    print("Completed pre-run warmup.")
 
 def set_vllm_config(expert, kv, load, step_interval, expert_dump_dir, traffic_dump_dir):
     if expert > 0 or kv > 0 or load > 0:
@@ -539,20 +606,21 @@ async def main():
 
     print(f"Setting LB weights: expert={expert_weight} kv={kv_weight} load={load_weight}")
     results = []
+    await run_pre_run_warmup()
 
     for name, subset, formatter, split in DATASETS:
         expert_trace = build_dump_dir(expert_dump_dir, name, subset, split)
         os.makedirs(expert_trace, exist_ok=True)
         traffic_trace = build_dump_dir(traffic_dump_dir, name, subset, split)
         os.makedirs(traffic_trace, exist_ok=True)
-        set_vllm_config(
-            expert_weight,
-            kv_weight,
-            load_weight,
-            step_interval,
-            expert_trace,
-            traffic_trace
-        )
+        #set_vllm_config(
+        #    expert_weight,
+        #    kv_weight,
+        #    load_weight,
+        #    step_interval,
+        #    expert_trace,
+        #    traffic_trace
+        #)
         stats = await run_dataset(name, subset, formatter, split)
         results.append(stats)
         print(

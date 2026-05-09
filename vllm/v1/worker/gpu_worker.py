@@ -589,7 +589,6 @@ class Worker(WorkerBase):
                 cg_capture_sizes = [] if cg_sizes is None else cg_sizes
                 warmup_sizes = [x for x in warmup_sizes if x not in cg_capture_sizes]
 
-            warmup_sizes = [size for size in warmup_sizes if size <= 64]
             compile_ranges = self.vllm_config.compilation_config.get_compile_ranges()
             # For each compile_range, if none of the batch sizes
             # in warmup_sizes or cudagraph_capture_sizes are in the range,
@@ -600,7 +599,6 @@ class Worker(WorkerBase):
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
 
-        warmup_sizes = [size for size in warmup_sizes if size <= 64]
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
@@ -610,6 +608,26 @@ class Worker(WorkerBase):
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
         kernel_warmup(self)
+
+        if self.model_config.is_moe and self.parallel_config.data_parallel_size > 1:
+            # The generic warmup/profile paths spread tokens across many short
+            # synthetic requests. The first live MoE DP prompt often looks
+            # different: one real prefill request on a single rank while peer
+            # ranks immediately enter the dummy-wave path. Warm that single-
+            # request prefill shape explicitly so the first live prompt does
+            # not pay its one-time setup cost on the request-owning rank.
+            logger.info(
+                "Warming up single-request MoE DP prefill path for %d tokens",
+                self.model_runner.max_num_tokens,
+            )
+            self.model_runner._dummy_run(
+                self.model_runner.max_num_tokens,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                force_attention=True,
+                single_prefill_request=True,
+                skip_eplb=True,
+                remove_lora=False,
+            )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:

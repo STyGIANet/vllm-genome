@@ -37,4 +37,5 @@ uv pip install pymetis
 uv pip install datasets hf_transfer
 
 cd ./DeepEP-SM8x
+rm deep_ep_cpp.cpython-312-x86_64-linux-gnu.so
 ./install-deepep.sh

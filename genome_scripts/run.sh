@@ -1,13 +1,16 @@
 #!/bin/bash
 
 MODEL=${1:-deepseek-ai/deepseek-moe-16b-chat}
+MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-8192}
 
 export SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PLACEMENT_PATH="${SCRIPT_DIR}/expert-placement/placement_fns.py"
 
+# intra-node only for now
+export NCCL_IB_DISABLE=1
 # for eplb step interval runtime update
 export VLLM_SERVER_DEV_MODE=1
-
+export VLLM_SKIP_DEEPEP_WARMUP=1
 # export NVSHMEM_DIR=/usr/local/nvshmem
 # export LD_LIBRARY_PATH=/usr/local/nvshmem/lib:${LD_LIBRARY_PATH}
 # export DEEP_EP_CPU_TIMEOUT_SECS=${DEEP_EP_CPU_TIMEOUT_SECS:-600}
@@ -25,10 +28,12 @@ export TRAFFIC_DIR=${SCRIPT_DIR}/traffic/
 vllm serve $MODEL \
 		--tensor-parallel-size 1 \
 		--data-parallel-size 8 \
+		--data-parallel-size-local 8 \
+		--nnodes 1 \
 		--enable-expert-parallel \
-		--all2all-backend deepep_high_throughput \
 		--trust_remote_code \
-		--max_num_batched_tokens 2048 \
+		--all2all-backend nccl_alltoall \
+		--max_num_batched_tokens ${MAX_NUM_BATCHED_TOKENS} \
 		--api-server-count=1 \
 		--expert-affinity-routing-weight 1 \
 		--kv-block-prefix-routing-weight 0.5 \
