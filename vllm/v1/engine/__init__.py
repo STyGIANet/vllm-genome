@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
@@ -11,9 +13,6 @@ import msgspec
 import numpy as np
 import torch
 
-# ///////////// Expert-based load balancing
-from vllm.distributed.kv_events import KVEventBatch
-# ///////////// Expert-based load balancing
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -311,3 +310,11 @@ class ReconfigureRankType(enum.IntEnum):
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2
+
+
+# ///////////// Expert-based load balancing
+# Import after EngineCore* definitions so the kv_events -> kv_cache_utils ->
+# request import path can resolve symbols from this partially initialized
+# module without creating a startup cycle.
+from vllm.distributed.kv_events import KVEventBatch
+# ///////////// Expert-based load balancing

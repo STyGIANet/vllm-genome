@@ -50,7 +50,7 @@ def _quantize_and_setup_dispatch(
         quant_dtype=quant_config.quant_dtype,
         per_act_token_quant=quant_config.per_act_token_quant,
         block_shape=quant_config.block_shape,
-        is_fp4_scale_swizzled=False,
+        is_scale_swizzled=False,
     )
     return a1q, a1q_scale
 
@@ -62,7 +62,7 @@ def _prepare_scales_for_moe(
     if a1q_scale is None:
         return None
 
-    if quant_config.quant_dtype == "nvfp4" and quant_config.is_nvfp4_scale_swizzled:
+    if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
         if a1q_scale.element_size() == 1:
             a1q_scale = a1q_scale.view(torch.uint8)
         a1q_scale = nvfp4_block_scale_interleave(a1q_scale)

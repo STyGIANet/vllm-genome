@@ -11,8 +11,8 @@ fi
 
 source .venv/bin/activate
 uv pip install pip # later DeepEP will require pip
-uv pip install -r requirements/build.txt
-echo "build.txt done"
+#uv pip install -r requirements/build.txt
+#echo "build.txt done"
 uv pip install -r requirements/common.txt
 echo "common.txt done"
 
@@ -35,7 +35,8 @@ uv pip install nvidia-nvshmem-cu13==3.6.5
 uv pip install packaging
 uv pip install pymetis
 uv pip install datasets hf_transfer
+uv pip install --upgrade transformers
 
-cd ./DeepEP-SM8x
-rm deep_ep_cpp.cpython-312-x86_64-linux-gnu.so
-./install-deepep.sh
+#cd ./DeepEP-SM8x
+#rm deep_ep_cpp.cpython-312-x86_64-linux-gnu.so
+#./install-deepep.sh
