@@ -1,44 +1,46 @@
-# Load-Balancer Architecture
+# Load-Balancer and Placement Architecture
 
 ## Quick Start
 
-The fastest way to bring up the online-inference stack in this repo is the
-single-host launcher:
+The current single-host launcher for the online-inference stack is:
 
 ```bash
-../run.sh deepseek-ai/deepseek-moe-16b-chat
+../genome_scripts/run.sh deepseek-ai/deepseek-moe-16b-chat
 ```
 
 In a separate shell, send requests with:
 
 ```bash
-python3 send-prompts.py
-# Change the following to match the server address and model used in the run.sh launch:
-#HOST = "http://0.0.0.0:8000"
-#MODEL = "deepseek-ai/deepseek-moe-16b-chat"
+cd genome_scripts/online-inference
+VLLM_HOST=http://127.0.0.1:8000 \
+VLLM_MODEL=deepseek-ai/deepseek-moe-16b-chat \
+.venv/bin/python send-prompts.py
 ```
 
-To evaluate placement and LB across different LB weights:
+To evaluate placement and load-balancing across different LB weights:
+
 ```bash
-python3 weights-experiment.py # poisson arrival of prompts, modify poisson rate and lb weights range in the script
+cd genome_scripts/online-inference
+.venv/bin/python weights-experiment.py
 ```
 
-`../run.sh` is the current canonical launch script for this LB/EPLB setup. It
-starts `vllm serve` with:
+`genome_scripts/run.sh` is the current canonical launch script for this
+LB/EPLB setup. It starts `vllm serve` with:
 
 - DP=8 and expert parallel enabled
 - expert-affinity, KV-prefix, and load-score routing enabled
 - custom EPLB placement via `placement_fns.py`
 - prefix learning enabled with `--prefix-learning-algorithm prefixtrie`
-- debug LB logging enabled
+- debug LB logging enabled when requested
 
-For the full flag-by-flag explanation, see
-[cmd_args_expert_lb.md](cmd_args_expert_lb.md).
+For the full flag-by-flag explanation, see:
+
+- `genome_scripts/online-inference/cmd_args_expert_lb.md`
 
 For the multinode launcher path, see:
 
-- [../vllm-run.sh](../vllm-run.sh)
-- [../vllm-ns-worker.sh](../vllm-ns-worker.sh)
+- `genome_scripts/vllm-run.sh`
+- `genome_scripts/vllm-ns-worker.sh`
 
 ```text
                                   +------------------------------+
@@ -58,6 +60,7 @@ For the multinode launcher path, see:
                     +------------------------------------------------------+
                     | DPLBAsyncMPClient frontend                          |
                     | vllm/v1/engine/core_client.py                       |
+                    | vllm/genome/engine/dplb_routing.py                  |
                     | - builds route queries                              |
                     | - keeps local LB mirrors                            |
                     | - dispatches requests to engine cores               |
@@ -71,6 +74,8 @@ For the multinode launcher path, see:
                     | DP Coordinator Process   |   | EngineCore processes         |
                     | vllm/v1/engine/          |   | vllm/v1/engine/core.py       |
                     | coordinator.py           |   | + scheduler + worker         |
+                    | vllm/genome/engine/      |   |                              |
+                    | coordinator_routing.py   |   |                              |
                     | - combines 3 LB signals  |   |                              |
                     | - tracks global mirrors  |   |                              |
                     +--------------+-----------+   +--------------+---------------+
@@ -80,6 +85,10 @@ For the multinode launcher path, see:
                                    |                 +------------------------------+
                                    |                 | GPUModelRunner / Worker      |
                                    |                 | vllm/v1/worker/*             |
+                                   |                 | vllm/genome/gpu_model_       |
+                                   |                 | runner_prefix_learning.py     |
+                                   |                 | vllm/genome/gpu_model_       |
+                                   |                 | runner_routing.py            |
                                    |                 | - executes MoE forward       |
                                    |                 | - captures routing           |
                                    |                 | - learns prefix owners       |
@@ -91,6 +100,8 @@ For the multinode launcher path, see:
                                    |                 | Fused MoE Router / Layer     |
                                    |                 | vllm/model_executor/layers/  |
                                    |                 | fused_moe/*                  |
+                                   |                 | vllm/genome/fused_moe/       |
+                                   |                 | router_capture.py            |
                                    |                 | - top-k experts per token    |
                                    |                 | - placement capture          |
                                    |                 +--------------+---------------+
@@ -110,40 +121,32 @@ For the multinode launcher path, see:
 
 ## 1. Scope
 
-This document describes the **online-serving** load-balancing architecture in
-this tree. The architecture has four closely related pieces:
+This document describes the online-serving load-balancing architecture in this
+tree. The architecture has four closely related pieces:
 
-1. **Request routing across DP engines**
-2. **Prefix-affinity learning and routing**
-3. **KV block-prefix routing**
-4. **Expert placement / EPLB / custom placement callback**
+1. Request routing across DP engines
+2. Prefix-affinity learning and routing
+3. KV block-prefix routing
+4. Expert placement / EPLB / custom placement callback
 
-Companion flag and launcher reference:
+The relevant code lives in two layers:
 
-- [cmd_args_expert_lb.md](cmd_args_expert_lb.md)
+- standard vLLM entry, engine, scheduler, worker, and EPLB paths
+- custom logic factored under `vllm/genome/*`
 
-The relevant code lives primarily in:
-
-- `vllm/entrypoints/*` for HTTP entry and dev APIs
-- `vllm/v1/engine/*` for frontend routing, coordinator, and handovers
-- `vllm/v1/core/sched/*` for scheduler-side storage of LB-related outputs
-- `vllm/v1/worker/*` for worker-side MoE routing capture and prefix learning
-- `vllm/model_executor/layers/fused_moe/*` for actual MoE top-k routing
-- `vllm/distributed/eplb/*` for placement and background expert transfers
-
-This document is specifically about the **internal DP LB** path, i.e. the
-topology where one frontend can route across multiple DP engine cores.
+This document is specifically about the internal DP LB path, i.e. the topology
+where one frontend can route across multiple DP engine cores.
 
 ## 2. High-Level Pieces
 
 ### 2.1 HTTP / API entry
 
-The online server is built in:
+Main files:
 
 - `vllm/entrypoints/openai/api_server.py`
 - `vllm/entrypoints/serve/__init__.py`
 
-Main responsibilities:
+Responsibilities:
 
 - build the FastAPI app
 - register standard API routers
@@ -191,45 +194,56 @@ placement/EPLB.
 
 ### 2.3 Frontend client
 
-Main file:
+Main files:
 
 - `vllm/v1/engine/core_client.py`
+- `vllm/genome/engine/dplb_routing.py`
+- `vllm/genome/engine/load_balancing_types.py`
 
 The internal-DP-LB frontend implementation is:
 
 - `DPLBAsyncMPClient`
 
-This class is the central online LB frontend. It:
+`core_client.py` still owns engine bootstrap, sockets, and the public client
+surface. The custom request routing, learning, and dispatch helpers now live in
+`vllm/genome/engine/dplb_routing.py`.
 
-- receives engine/coordinator addresses during launch
-- sends route queries to the coordinator
-- optionally falls back to local scoring if coordinator routing fails
-- dispatches requests to engine cores
-- tracks in-flight requests
-- maintains local mirrors for expert-affinity and KV-prefix routing
-- consumes worker/scheduler prefix-learning outputs
-- sends prefix updates to the coordinator
+Responsibilities:
+
+- receive engine/coordinator addresses during launch
+- send route queries to the coordinator
+- optionally fall back to local scoring if coordinator routing fails
+- dispatch requests to engine cores
+- track in-flight requests
+- maintain local mirrors for expert-affinity and KV-prefix routing
+- consume worker/scheduler prefix-learning outputs
+- send prefix updates to the coordinator
 
 ### 2.4 DP coordinator
 
-Main file:
+Main files:
 
 - `vllm/v1/engine/coordinator.py`
+- `vllm/genome/engine/coordinator_routing.py`
 
 Main classes:
 
 - `DPCoordinator`
 - `DPCoordinatorProc`
 
-This process is the global control-plane component for internal DP LB. It:
+`coordinator.py` still owns process startup, sockets, and the poll loop.
+Genome-specific route scoring, prefix/KV mirrors, and control-message helpers
+now live in `vllm/genome/engine/coordinator_routing.py`.
 
-- tracks per-engine load stats
-- receives route queries from frontends
-- computes weighted route scores
-- maintains global prefix-affinity mirrors
-- maintains global exact KV block-prefix mirrors
-- rebroadcasts placement updates
-- coordinates DP wave wakeups
+Responsibilities:
+
+- track per-engine load stats
+- receive route queries from frontends
+- compute weighted route scores
+- maintain global prefix-affinity mirrors
+- maintain global exact KV block-prefix mirrors
+- rebroadcast placement updates
+- coordinate DP wave wakeups
 
 ### 2.5 Engine core / scheduler / worker
 
@@ -241,6 +255,9 @@ Main files:
 - `vllm/v1/worker/gpu_model_runner.py`
 - `vllm/v1/outputs.py`
 - `vllm/v1/engine/__init__.py`
+- `vllm/genome/gpu_model_runner_prefix_learning.py`
+- `vllm/genome/gpu_model_runner_routing.py`
+- `vllm/genome/prefix_learning.py`
 
 This is the execution side. The scheduler and worker are where:
 
@@ -249,12 +266,17 @@ This is the execution side. The scheduler and worker are where:
 - KV cache events are emitted
 - placement map changes are detected and exported
 
+The upstream runner still owns the forward path. The custom prefix-learning and
+routing helpers have been split into genome modules to reduce inline churn.
+
 ### 2.6 MoE router / placement capture
 
 Main files:
 
 - `vllm/model_executor/layers/fused_moe/layer.py`
 - `vllm/model_executor/layers/fused_moe/router/fused_topk_router.py`
+- `vllm/model_executor/layers/fused_moe/router/base_router.py`
+- `vllm/genome/fused_moe/router_capture.py`
 
 This is where per-token MoE top-k experts are chosen and, when enabled,
 captured into the per-step routing buffer used by:
@@ -322,14 +344,12 @@ Coordinator query path:
 
 - `_build_coordinator_route_request()`
 - `_select_core_engine_for_request_async()`
+- route helpers in `vllm/genome/engine/dplb_routing.py`
 
 Fallback local path:
 
 - `_select_core_engine_for_request()`
-
-Relevant file:
-
-- `vllm/v1/engine/core_client.py`
+- score helpers in `vllm/genome/engine/dplb_routing.py`
 
 ### 3.4 Request is dispatched
 
@@ -338,9 +358,9 @@ After engine choice:
 - `_dispatch_request_to_engine(...)` sends the request to the chosen engine
 - in some EP+DP cases, shadow requests are also sent to non-chosen engines
 
-Relevant file:
+The dispatch logic now lives in:
 
-- `vllm/v1/engine/core_client.py`
+- `vllm/genome/engine/dplb_routing.py`
 
 ### 3.5 Scheduler and worker execute the batch
 
@@ -359,6 +379,8 @@ The worker path is:
 Relevant files:
 
 - `vllm/v1/worker/gpu_model_runner.py`
+- `vllm/genome/gpu_model_runner_prefix_learning.py`
+- `vllm/genome/gpu_model_runner_routing.py`
 - `vllm/v1/core/sched/scheduler.py`
 - `vllm/v1/outputs.py`
 - `vllm/v1/engine/__init__.py`
@@ -367,9 +389,9 @@ Relevant files:
 
 The current online LB combines three independent score families:
 
-1. **Expert-affinity score**
-2. **KV block-prefix score**
-3. **Load score**
+1. Expert-affinity score
+2. KV block-prefix score
+3. Load score
 
 The weighted sum is then tie-broken by current load.
 
@@ -414,7 +436,9 @@ Flow:
 Worker-side files:
 
 - `vllm/v1/worker/gpu_model_runner.py`
-- `vllm/v1/worker/gpu_worker.py`
+- `vllm/genome/gpu_model_runner_prefix_learning.py`
+- `vllm/genome/gpu_model_runner_routing.py`
+- `vllm/genome/prefix_learning.py`
 - `vllm/model_executor/layers/fused_moe/router/fused_topk_router.py`
 - `vllm/model_executor/layers/fused_moe/layer.py`
 
@@ -427,12 +451,14 @@ Scheduler/output files:
 Frontend/coordinator files:
 
 - `vllm/v1/engine/core_client.py`
+- `vllm/genome/engine/dplb_routing.py`
 - `vllm/v1/engine/coordinator.py`
+- `vllm/genome/engine/coordinator_routing.py`
 - `vllm/v1/prefix_router.py`
 
 #### What is actually learned
 
-Current path still learns a **target rank** per prompt, not a logical-expert
+Current path still learns a target rank per prompt, not a logical-expert
 histogram. The owner computation uses:
 
 - `build_owner_cache_from_physical_to_logical_map(...)`
@@ -460,9 +486,10 @@ When prefix learning produces a rank owner:
 3. `_apply_prefix_router_owner_update_batch(...)` updates the local mirror
 4. `_send_prefix_router_update_batch(...)` sends batched updates to coordinator
 
-Relevant file:
+Relevant files:
 
 - `vllm/v1/engine/core_client.py`
+- `vllm/genome/engine/dplb_routing.py`
 
 #### Coordinator mirror
 
@@ -473,9 +500,10 @@ Coordinator receives:
 
 and updates its own expert-affinity mirrors.
 
-Relevant file:
+Relevant files:
 
 - `vllm/v1/engine/coordinator.py`
+- `vllm/genome/engine/coordinator_routing.py`
 
 #### Routing-time score lookup
 
@@ -516,7 +544,9 @@ Files:
 - `vllm/v1/engine/__init__.py`
 - `vllm/v1/core/sched/scheduler.py`
 - `vllm/v1/engine/core_client.py`
+- `vllm/genome/engine/dplb_routing.py`
 - `vllm/v1/engine/coordinator.py`
+- `vllm/genome/engine/coordinator_routing.py`
 - `vllm/v1/prefix_router.py`
 
 #### Routing-time score
@@ -527,11 +557,11 @@ The score is:
 
 Frontend fallback:
 
-- `_get_kv_block_prefix_scores(...)` in `core_client.py`
+- `_get_kv_block_prefix_scores(...)` in `dplb_routing.py`
 
 Coordinator:
 
-- `_get_kv_block_prefix_scores(...)` in `coordinator.py`
+- `_get_kv_block_prefix_scores(...)` in `coordinator_routing.py`
 
 ### 4.3 Load score routing
 
@@ -554,7 +584,9 @@ Files:
 - `vllm/v1/core/sched/scheduler.py`
 - `vllm/v1/engine/__init__.py`
 - `vllm/v1/engine/coordinator.py`
+- `vllm/genome/engine/coordinator_routing.py`
 - `vllm/v1/engine/core_client.py`
+- `vllm/genome/engine/dplb_routing.py`
 
 #### Score
 
@@ -566,18 +598,10 @@ Normalized load score:
 
 - inverse-minmax normalization to `[0, 1]`
 
-Implementations:
-
-- `DPLBAsyncMPClient._get_load_scores(...)`
-- `DPCoordinatorProc._get_load_scores(...)`
-
 #### Tie-break
 
 After weighted expert/KV/load scores are combined, the system still resolves
-ties by current load:
-
-- frontend fallback: `_choose_engine_by_load(...)` in `core_client.py`
-- coordinator: `_choose_engine_by_load(...)` in `coordinator.py`
+ties by current load.
 
 ## 5. How Final Routing Decision Is Computed
 
@@ -592,18 +616,16 @@ The route decision is:
 Coordinator implementation:
 
 - `DPCoordinatorProc._route_request(...)`
+- helper methods in `vllm/genome/engine/coordinator_routing.py`
 
 Frontend fallback implementation:
 
 - `DPLBAsyncMPClient._select_core_engine_for_request(...)`
+- helper methods in `vllm/genome/engine/dplb_routing.py`
 
 Relevant request type:
 
 - `CoordinatorRouteRequest` in `vllm/v1/engine/__init__.py`
-
-Route query builder:
-
-- `DPLBAsyncMPClient._build_coordinator_route_request(...)`
 
 ## 6. Coordinator / Frontend / Engine Handovers
 
@@ -693,6 +715,7 @@ Each MoE layer can append records like:
 Capture path:
 
 - `FusedTopKRouter._compute_routing(...)`
+- `vllm/genome/fused_moe/router_capture.py`
 
 ### 7.4 Worker-side routing step
 
@@ -711,7 +734,7 @@ Current responsibilities:
 
 Implementation:
 
-- `vllm/v1/worker/gpu_model_runner.py`
+- `vllm/genome/gpu_model_runner_routing.py`
 
 ### 7.5 Prefix-learning async learner
 
@@ -719,13 +742,14 @@ Current worker-side prefix learning is partially decoupled from the hot path.
 
 Structures:
 
-- `_PrefixLearningAsyncStepJob`
-- `_PrefixLearningPendingCopyJob`
-- `_AsyncPrefixLearningOwnerLearner`
+- `PrefixLearningAsyncStepJob`
+- `PrefixLearningPendingCopyJob`
+- `AsyncPrefixLearningOwnerLearner`
 
 Implementation:
 
-- `vllm/v1/worker/gpu_model_runner.py`
+- `vllm/genome/prefix_learning.py`
+- `vllm/genome/gpu_model_runner_prefix_learning.py`
 
 Current shape:
 
@@ -733,8 +757,6 @@ Current shape:
 2. worker enqueues CPU-copy jobs for the prompt-only traces
 3. background learner aggregates owner counts by request
 4. frontend later receives owner updates through normal engine outputs
-
-This is a real decoupled path, but it still depends on worker-side capture.
 
 ## 8. Placement / EPLB / Custom Callback
 
@@ -841,19 +863,19 @@ Frontend and coordinator both consume it and refresh their owner caches.
 
 Files:
 
-- `vllm/v1/worker/gpu_model_runner.py`
+- `vllm/genome/gpu_model_runner_routing.py`
 - `vllm/v1/outputs.py`
 - `vllm/v1/core/sched/scheduler.py`
 - `vllm/v1/engine/__init__.py`
-- `vllm/v1/engine/core_client.py`
-- `vllm/v1/engine/coordinator.py`
+- `vllm/genome/engine/dplb_routing.py`
+- `vllm/genome/engine/coordinator_routing.py`
 
 ## 9. Prefix Learning vs Placement: Current Boundary
 
 Current boundary is:
 
-- prefix-learning **mirrors** are token-side (`prefixtrie`)
-- owner computation is **placement-aware** because it uses the live
+- prefix-learning mirrors are token-side (`prefixtrie`)
+- owner computation is placement-aware because it uses the live
   `physical_to_logical_map`
 - placement epoch changes clear prefix-affinity state and refresh owner caches
 
@@ -926,12 +948,15 @@ Worker control-plane support:
 
 - `vllm/v1/engine/async_llm.py`
 - `vllm/v1/engine/core_client.py`
+- `vllm/genome/engine/dplb_routing.py`
+- `vllm/genome/engine/load_balancing_types.py`
 - `vllm/v1/engine/utils.py`
 - `vllm/v1/engine/__init__.py`
 
 ### Coordinator
 
 - `vllm/v1/engine/coordinator.py`
+- `vllm/genome/engine/coordinator_routing.py`
 
 ### Scheduler / outputs
 
@@ -943,12 +968,17 @@ Worker control-plane support:
 
 - `vllm/v1/worker/gpu_worker.py`
 - `vllm/v1/worker/gpu_model_runner.py`
+- `vllm/genome/gpu_model_runner_prefix_learning.py`
+- `vllm/genome/gpu_model_runner_routing.py`
+- `vllm/genome/prefix_learning.py`
 - `vllm/v1/worker/worker_base.py`
 
 ### MoE routing / capture
 
 - `vllm/model_executor/layers/fused_moe/router/fused_topk_router.py`
+- `vllm/model_executor/layers/fused_moe/router/base_router.py`
 - `vllm/model_executor/layers/fused_moe/layer.py`
+- `vllm/genome/fused_moe/router_capture.py`
 - `vllm/v1/prefix_router.py`
 
 ### Placement / EPLB
@@ -964,21 +994,27 @@ If you want to understand the system quickly, read in this order:
 1. `vllm/entrypoints/openai/api_server.py`
 2. `vllm/v1/engine/async_llm.py`
 3. `vllm/v1/engine/core_client.py`
-4. `vllm/v1/engine/coordinator.py`
-5. `vllm/v1/engine/__init__.py`
-6. `vllm/v1/outputs.py`
-7. `vllm/v1/core/sched/scheduler.py`
-8. `vllm/v1/worker/gpu_model_runner.py`
-9. `vllm/model_executor/layers/fused_moe/router/fused_topk_router.py`
-10. `vllm/v1/prefix_router.py`
-11. `vllm/distributed/eplb/eplb_state.py`
-12. `vllm/distributed/eplb/policy/custom_policy.py`
+4. `vllm/genome/engine/dplb_routing.py`
+5. `vllm/v1/engine/coordinator.py`
+6. `vllm/genome/engine/coordinator_routing.py`
+7. `vllm/v1/engine/__init__.py`
+8. `vllm/v1/outputs.py`
+9. `vllm/v1/core/sched/scheduler.py`
+10. `vllm/v1/worker/gpu_model_runner.py`
+11. `vllm/genome/gpu_model_runner_prefix_learning.py`
+12. `vllm/genome/gpu_model_runner_routing.py`
+13. `vllm/model_executor/layers/fused_moe/router/fused_topk_router.py`
+14. `vllm/model_executor/layers/fused_moe/router/base_router.py`
+15. `vllm/genome/fused_moe/router_capture.py`
+16. `vllm/v1/prefix_router.py`
+17. `vllm/distributed/eplb/eplb_state.py`
+18. `vllm/distributed/eplb/policy/custom_policy.py`
 
 ## 13. Current Design Reality
 
 Today, the routing system is:
 
-- **request routing** across DP engines
+- request routing across DP engines
 - using three score families
 - where expert-affinity is learned online from actual MoE routing
 - but retrieved via a token-side predictor (`prefixtrie`)
@@ -986,8 +1022,8 @@ Today, the routing system is:
 
 That means the architecture is already split into:
 
-- **prediction side**: prompt-token mirrors
-- **ground-truth side**: actual routed experts and live placement
+- prediction side: prompt-token mirrors
+- ground-truth side: actual routed experts and live placement
 
 Any future redesign of expert-affinity should respect this split:
 
