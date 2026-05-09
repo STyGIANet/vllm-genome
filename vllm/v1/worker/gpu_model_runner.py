@@ -3974,6 +3974,8 @@ class GPUModelRunner(
             num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+            prefill_capture_ranges: list[tuple[int, int]] = []
+            prefill_capture_req_ids: list[str] = []
 
             logits_indices, spec_decode_metadata = self._prepare_inputs(
                 scheduler_output,
@@ -4465,8 +4467,8 @@ class GPUModelRunner(
                     max_model_len=self.max_model_len,
                 )
             genome_output_fields = self._build_genome_model_runner_output_fields(
-                prefill_capture_ranges,
-                prefill_capture_req_ids,
+                self._current_prefill_capture_ranges,
+                self._current_prefill_capture_req_ids,
             )
 
             output = ModelRunnerOutput(
@@ -5517,6 +5519,7 @@ class GPUModelRunner(
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
         num_tokens_unpadded = int(num_scheduled_tokens.sum())
+        prefill_capture_ranges: list[tuple[int, int]] = []
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
