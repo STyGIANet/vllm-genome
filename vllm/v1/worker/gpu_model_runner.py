@@ -6,7 +6,6 @@ import gc
 import hashlib
 import itertools
 import os
-import queue
 import threading
 import time
 from collections import defaultdict
@@ -115,6 +114,11 @@ from vllm.utils.torch_utils import (
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
 )
+from vllm.genome.prefix_learning import (
+    AsyncPrefixLearningOwnerLearner,
+    PrefixLearningAsyncStepJob,
+    PrefixLearningPendingCopyJob,
+)
 from vllm.v1.prefix_router import build_owner_cache_from_physical_to_logical_map
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -220,221 +224,6 @@ logger = init_logger(__name__)
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
-
-
-@dataclass
-class _PrefixLearningAsyncStepJob:
-    step_seq: int
-    epoch: int
-    req_ids: list[str]
-    req_lengths: list[int]
-    topk_by_layer: dict[int, np.ndarray]
-
-
-@dataclass
-class _PrefixLearningPendingCopyJob:
-    step_seq: int
-    epoch: int
-    req_ids: list[str]
-    req_lengths: list[int]
-    topk_by_layer_cpu: dict[int, torch.Tensor]
-    gpu_refs: list[torch.Tensor]
-    ready_event: torch.cuda.Event | None
-
-
-class _AsyncPrefixLearningOwnerLearner:
-    def __init__(
-        self,
-        num_ranks: int,
-        trace_enabled: bool,
-    ) -> None:
-        self._num_ranks = num_ranks
-        self._trace_enabled = trace_enabled
-        self._work_queue: queue.Queue[tuple[str, object]] = queue.Queue()
-        self._lock = threading.Lock()
-        self._owner_counts_by_req: dict[str, np.ndarray] = {}
-        self._processed_step_seq = 0
-        self._epoch: int | None = None
-        self._owner_lookup: np.ndarray | None = None
-        self._owner_rank_lookup: np.ndarray | None = None
-        self._thread = threading.Thread(
-            target=self._run,
-            name="PrefixLearningAsyncOwnerLearner",
-            daemon=True,
-        )
-        self._thread.start()
-
-    def update_owner_state(
-        self,
-        epoch: int,
-        owner_lookup: np.ndarray,
-        owner_rank_lookup: np.ndarray | None,
-    ) -> None:
-        self._work_queue.put(
-            ("owner_state", (epoch, owner_lookup, owner_rank_lookup))
-        )
-
-    def enqueue_step(self, job: _PrefixLearningAsyncStepJob) -> None:
-        self._work_queue.put(("step", job))
-
-    def drop_requests(self, req_ids: Iterable[str]) -> None:
-        req_id_list = list(req_ids)
-        if req_id_list:
-            self._work_queue.put(("drop", req_id_list))
-
-    def get_processed_step_seq(self) -> int:
-        with self._lock:
-            return self._processed_step_seq
-
-    def take_owner_if_ready(
-        self,
-        req_id: str,
-        required_step_seq: int,
-        epoch: int,
-    ) -> tuple[dict[str, int] | None, bool]:
-        with self._lock:
-            processed = self._processed_step_seq >= required_step_seq
-            if not processed or self._epoch != epoch:
-                return None, processed
-            scores = self._owner_counts_by_req.pop(req_id, None)
-
-        if scores is None or scores.size == 0:
-            return None, True
-        best_score = float(scores.max(initial=0.0))
-        if best_score <= 0:
-            return None, True
-        target_rank = int(np.argmax(scores))
-        return {
-            "target_rank": target_rank,
-            "epoch": epoch,
-        }, True
-
-    def _run(self) -> None:
-        while True:
-            kind, payload = self._work_queue.get()
-            if kind == "owner_state":
-                epoch, owner_lookup, owner_rank_lookup = cast(
-                    tuple[int, np.ndarray, np.ndarray | None], payload
-                )
-                with self._lock:
-                    self._epoch = epoch
-                    self._owner_lookup = owner_lookup
-                    self._owner_rank_lookup = owner_rank_lookup
-                    self._owner_counts_by_req.clear()
-                continue
-
-            if kind == "drop":
-                req_ids = cast(list[str], payload)
-                with self._lock:
-                    for req_id in req_ids:
-                        self._owner_counts_by_req.pop(req_id, None)
-                continue
-
-            if kind != "step":
-                continue
-
-            job = cast(_PrefixLearningAsyncStepJob, payload)
-            with self._lock:
-                owner_lookup = self._owner_lookup
-                owner_rank_lookup = self._owner_rank_lookup
-                epoch = self._epoch
-
-            if (
-                epoch is None
-                or job.epoch != epoch
-                or owner_lookup is None
-            ):
-                with self._lock:
-                    self._processed_step_seq = max(
-                        self._processed_step_seq, job.step_seq
-                    )
-                continue
-
-            num_reqs = len(job.req_ids)
-            if num_reqs <= 0:
-                with self._lock:
-                    self._processed_step_seq = max(
-                        self._processed_step_seq, job.step_seq
-                    )
-                continue
-
-            req_lengths = np.asarray(job.req_lengths, dtype=np.int64)
-            token_req_indices = np.repeat(
-                np.arange(num_reqs, dtype=np.int64),
-                req_lengths,
-            )
-            batch_counts = np.zeros(
-                (num_reqs, self._num_ranks),
-                dtype=np.float32,
-            )
-            flat_req_indices: np.ndarray | None = None
-            flat_req_topk = -1
-            for layer_id, captured in job.topk_by_layer.items():
-                if captured.size == 0:
-                    continue
-                if captured.ndim != 2 or captured.shape[0] != token_req_indices.size:
-                    continue
-                topk = int(captured.shape[1])
-                if topk <= 0:
-                    continue
-                if flat_req_indices is None or flat_req_topk != topk:
-                    flat_req_indices = np.repeat(token_req_indices, topk)
-                    flat_req_topk = topk
-                experts = captured.reshape(-1)
-                if owner_rank_lookup is not None:
-                    rank_lookup_layer = owner_rank_lookup[int(layer_id)]
-                    valid_mask = (
-                        (experts >= 0)
-                        & (experts < rank_lookup_layer.shape[0])
-                    )
-                    if not np.any(valid_mask):
-                        continue
-                    owner_ranks = rank_lookup_layer[experts[valid_mask]]
-                    owner_mask = owner_ranks >= 0
-                    if not np.any(owner_mask):
-                        continue
-                    linear_indices = (
-                        flat_req_indices[valid_mask][owner_mask] * self._num_ranks
-                        + owner_ranks[owner_mask].astype(np.int64, copy=False)
-                    )
-                    batch_counts += np.bincount(
-                        linear_indices,
-                        minlength=num_reqs * self._num_ranks,
-                    ).reshape(num_reqs, self._num_ranks).astype(
-                        np.float32,
-                        copy=False,
-                    )
-                else:
-                    owner_lookup_layer = owner_lookup[int(layer_id)]
-                    valid_mask = (
-                        (experts >= 0)
-                        & (experts < owner_lookup_layer.shape[0])
-                    )
-                    if not np.any(valid_mask):
-                        continue
-                    valid_req_indices = flat_req_indices[valid_mask]
-                    owner_rows = owner_lookup_layer[experts[valid_mask]]
-                    for rank_idx in range(self._num_ranks):
-                        batch_counts[:, rank_idx] += np.bincount(
-                            valid_req_indices,
-                            weights=owner_rows[:, rank_idx],
-                            minlength=num_reqs,
-                        ).astype(np.float32, copy=False)
-
-            with self._lock:
-                if self._epoch == job.epoch:
-                    nonzero_req_indices = np.flatnonzero(
-                        np.any(batch_counts > 0, axis=1)
-                    )
-                    for req_idx in nonzero_req_indices:
-                        req_id = job.req_ids[int(req_idx)]
-                        counts = batch_counts[int(req_idx)]
-                        existing = self._owner_counts_by_req.get(req_id)
-                        if existing is None:
-                            self._owner_counts_by_req[req_id] = counts.copy()
-                        else:
-                            existing += counts
-                self._processed_step_seq = max(self._processed_step_seq, job.step_seq)
 
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
@@ -723,9 +512,9 @@ class GPUModelRunner(
         self._prefix_learning_async_step_seq = 0
         self._prefix_learning_last_step_seq_by_req: dict[str, int] = {}
         self._prefix_learning_pending_async_req_steps: dict[str, int] = {}
-        self._prefix_learning_pending_copy_jobs: list[_PrefixLearningPendingCopyJob] = []
+        self._prefix_learning_pending_copy_jobs: list[PrefixLearningPendingCopyJob] = []
         self._prefix_learning_copy_stream: torch.cuda.Stream | None = None
-        self._prefix_learning_async_learner: _AsyncPrefixLearningOwnerLearner | None = None
+        self._prefix_learning_async_learner: AsyncPrefixLearningOwnerLearner | None = None
         self._prefix_learning_trace_debug = bool(
             getattr(self.model_config, "load_balancer_debug", False)
         )
@@ -7819,10 +7608,10 @@ class GPUModelRunner(
         if self._prefix_learning_async_learner is not None and stale_req_ids:
             self._prefix_learning_async_learner.drop_requests(stale_req_ids)
 
-    def _ensure_prefix_learning_async_learner(self) -> _AsyncPrefixLearningOwnerLearner:
+    def _ensure_prefix_learning_async_learner(self) -> AsyncPrefixLearningOwnerLearner:
         learner = self._prefix_learning_async_learner
         if learner is None:
-            learner = _AsyncPrefixLearningOwnerLearner(
+            learner = AsyncPrefixLearningOwnerLearner(
                 num_ranks=self.parallel_config.data_parallel_size,
                 trace_enabled=self._prefix_learning_trace_debug,
             )
@@ -7869,7 +7658,7 @@ class GPUModelRunner(
             return
 
         current_epoch = self._prefix_learning_owner_cache_epoch
-        remaining_jobs: list[_PrefixLearningPendingCopyJob] = []
+        remaining_jobs: list[PrefixLearningPendingCopyJob] = []
         for job in self._prefix_learning_pending_copy_jobs:
             if job.ready_event is not None and not job.ready_event.query():
                 remaining_jobs.append(job)
@@ -7877,7 +7666,7 @@ class GPUModelRunner(
             if current_epoch is None or job.epoch != current_epoch:
                 continue
             learner.enqueue_step(
-                _PrefixLearningAsyncStepJob(
+                PrefixLearningAsyncStepJob(
                     step_seq=job.step_seq,
                     epoch=job.epoch,
                     req_ids=job.req_ids,
@@ -7905,7 +7694,7 @@ class GPUModelRunner(
         if current_epoch is None:
             return
 
-        remaining_jobs: list[_PrefixLearningPendingCopyJob] = []
+        remaining_jobs: list[PrefixLearningPendingCopyJob] = []
         max_enqueued_step_seq = 0
         for job in self._prefix_learning_pending_copy_jobs:
             if job.epoch != current_epoch or job.step_seq > required_step_seq:
@@ -7914,7 +7703,7 @@ class GPUModelRunner(
             if job.ready_event is not None:
                 job.ready_event.synchronize()
             learner.enqueue_step(
-                _PrefixLearningAsyncStepJob(
+                PrefixLearningAsyncStepJob(
                     step_seq=job.step_seq,
                     epoch=job.epoch,
                     req_ids=job.req_ids,
@@ -8212,7 +8001,7 @@ class GPUModelRunner(
             self._prefix_learning_async_step_seq += 1
             step_seq = self._prefix_learning_async_step_seq
             self._prefix_learning_pending_copy_jobs.append(
-                _PrefixLearningPendingCopyJob(
+                PrefixLearningPendingCopyJob(
                     step_seq=step_seq,
                     epoch=epoch,
                     req_ids=list(self._prefix_learning_step_req_ids),

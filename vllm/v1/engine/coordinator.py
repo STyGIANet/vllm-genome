@@ -10,23 +10,17 @@ import msgspec.msgpack
 import zmq
 
 from vllm.config import ParallelConfig
-# ///////////// Expert-based load balancing
-from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved, BlockStored, KVEventBatch
+from vllm.genome.engine.coordinator_routing import (
+    GenomeDPCoordinatorRoutingMixin,
+)
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_tcp_uri, make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
 from vllm.v1.engine import (
     CoordinatorRouteRequest,
-    CoordinatorRouteResponse,
     EngineCoreOutputs,
     EngineCoreRequestType,
 )
-from vllm.v1.prefix_router import (
-    ExactBlockPrefixIndex,
-    ExpertAffinityIndex,
-    make_expert_affinity_index,
-)
-# ///////////// Expert-based load balancing
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
@@ -196,7 +190,7 @@ class EngineState:
         self.request_counts = [0, 0]  # [waiting, running]
 
 
-class DPCoordinatorProc:
+class DPCoordinatorProc(GenomeDPCoordinatorRoutingMixin):
     # ///////////// Expert-based load balancing
     def __init__(
         self,
@@ -220,357 +214,18 @@ class DPCoordinatorProc:
 
         self.stats_update_interval_ms = min_stats_update_interval_ms
         self.enable_wave_coordination = enable_wave_coordination
-        self.expert_affinity_enabled = enable_prefix_affinity_routing
-        self.kv_block_prefix_enabled = (
-            enable_kv_block_prefix_routing and kv_block_prefix_block_size > 0
+        self._init_genome_routing_state(
+            engine_count=engine_count,
+            enable_prefix_affinity_routing=enable_prefix_affinity_routing,
+            enable_kv_block_prefix_routing=enable_kv_block_prefix_routing,
+            enable_load_score_routing=enable_load_score_routing,
+            expert_affinity_routing_weight=expert_affinity_routing_weight,
+            kv_block_prefix_routing_weight=kv_block_prefix_routing_weight,
+            load_score_routing_weight=load_score_routing_weight,
+            prefix_learning_algorithm=prefix_learning_algorithm,
+            load_balancer_debug=load_balancer_debug,
+            kv_block_prefix_block_size=kv_block_prefix_block_size,
         )
-        self.load_score_enabled = enable_load_score_routing
-        self.expert_affinity_weight = (
-            expert_affinity_routing_weight if self.expert_affinity_enabled else 0.0
-        )
-        self.kv_block_prefix_weight = (
-            kv_block_prefix_routing_weight if self.kv_block_prefix_enabled else 0.0
-        )
-        self.load_score_weight = (
-            load_score_routing_weight if self.load_score_enabled else 0.0
-        )
-        self.prefix_learning_algorithm = prefix_learning_algorithm
-        self.load_balancer_debug = load_balancer_debug
-        self.kv_block_prefix_block_size = kv_block_prefix_block_size
-        self.kv_block_prefix_decoder = MsgpackDecoder(KVEventBatch)
-        self.expert_affinity_epoch = 0
-        self.prefix_router_placement_epoch: int | None = None
-        self.expert_affinity_indices: dict[int, ExpertAffinityIndex] = {
-            rank: self._make_expert_affinity_index() for rank in range(engine_count)
-        }
-        self.kv_block_prefix_indices = {
-            rank: ExactBlockPrefixIndex() for rank in range(engine_count)
-        }
-
-    def _make_expert_affinity_index(self) -> ExpertAffinityIndex:
-        return make_expert_affinity_index(self.prefix_learning_algorithm)
-
-    def _apply_runtime_routing_weights(
-        self,
-        expert_affinity_routing_weight: float,
-        kv_block_prefix_routing_weight: float,
-        load_score_routing_weight: float,
-    ) -> None:
-        self.expert_affinity_weight = (
-            float(expert_affinity_routing_weight)
-            if self.expert_affinity_enabled
-            else 0.0
-        )
-        self.kv_block_prefix_weight = (
-            float(kv_block_prefix_routing_weight)
-            if self.kv_block_prefix_enabled
-            else 0.0
-        )
-        self.load_score_weight = (
-            float(load_score_routing_weight)
-            if self.load_score_enabled
-            else 0.0
-        )
-
-    def _clear_prefix_router_state(self, epoch: int) -> None:
-        for index in self.expert_affinity_indices.values():
-            index.clear()
-        self.expert_affinity_epoch = epoch
-
-    def _apply_prefix_router_update(
-        self,
-        target_rank: int,
-        epoch: int,
-        prompt_token_ids: list[int],
-    ) -> None:
-        if not self.expert_affinity_enabled or not prompt_token_ids:
-            return
-        if epoch > self.expert_affinity_epoch:
-            self._clear_prefix_router_state(epoch)
-        elif epoch < self.expert_affinity_epoch:
-            return
-
-        index = self.expert_affinity_indices.get(target_rank)
-        if index is None:
-            index = self.expert_affinity_indices[target_rank] = (
-                self._make_expert_affinity_index()
-            )
-        index.insert(prompt_token_ids)
-
-    def _apply_prefix_router_placement_update(self, epoch: int) -> bool:
-        if not self.expert_affinity_enabled:
-            return False
-        if self.prefix_router_placement_epoch == epoch:
-            return False
-        self.prefix_router_placement_epoch = epoch
-        if epoch > self.expert_affinity_epoch:
-            self._clear_prefix_router_state(epoch)
-        return True
-
-    def _apply_kv_prefix_event_batch(
-        self,
-        target_rank: int,
-        batch: KVEventBatch,
-    ) -> None:
-        if not self.kv_block_prefix_enabled:
-            return
-
-        index = self.kv_block_prefix_indices.get(target_rank)
-        if index is None:
-            index = ExactBlockPrefixIndex()
-            self.kv_block_prefix_indices[target_rank] = index
-
-        for event in batch.events:
-            if isinstance(event, BlockStored):
-                index.store_blocks(
-                    block_hashes=event.block_hashes,
-                    token_ids=event.token_ids,
-                    block_size=int(event.block_size),
-                    parent_block_hash=event.parent_block_hash,
-                    extra_keys=event.extra_keys,
-                )
-            elif isinstance(event, BlockRemoved):
-                index.remove_blocks(event.block_hashes)
-            elif isinstance(event, AllBlocksCleared):
-                index.clear()
-
-    def _get_expert_affinity_scores(
-        self,
-        prompt_token_ids: list[int] | None,
-    ) -> dict[int, float]:
-        if not self.expert_affinity_enabled or not prompt_token_ids:
-            return {}
-
-        scores: dict[int, float] = {}
-        for rank, index in self.expert_affinity_indices.items():
-            score = index.score(prompt_token_ids)
-            if score > 0.0:
-                scores[rank] = score
-        return self._normalize_score_map(scores)
-
-    def _get_kv_block_prefix_scores(
-        self,
-        query: CoordinatorRouteRequest,
-    ) -> dict[int, float]:
-        if not self.kv_block_prefix_enabled or query.kv_total_blocks <= 0:
-            return {}
-
-        zero_block = (
-            (0,) * self.kv_block_prefix_block_size if query.kv_use_zero_tokens else None
-        )
-        scores: dict[int, float] = {}
-        for rank, index in self.kv_block_prefix_indices.items():
-            matched_blocks = index.longest_prefix_blocks_from_parts(
-                token_ids=query.prompt_token_ids,
-                total_blocks=query.kv_total_blocks,
-                block_size=self.kv_block_prefix_block_size,
-                extra_keys=query.kv_extra_keys,
-                zero_block=zero_block,
-            )
-            if matched_blocks > 0:
-                scores[rank] = matched_blocks / query.kv_total_blocks
-        return self._normalize_score_map(scores)
-
-    def _get_load_scores(self) -> dict[int, float]:
-        if not self.load_score_enabled or not self.engines:
-            return {}
-
-        raw_scores = [
-            (state.request_counts[0] * 4) + state.request_counts[1]
-            for state in self.engines
-        ]
-        min_raw = min(raw_scores)
-        max_raw = max(raw_scores)
-        if max_raw == min_raw:
-            return self._normalize_score_map(
-                {idx: 1.0 for idx in range(len(raw_scores))}
-            )
-
-        span = float(max_raw - min_raw)
-        return self._normalize_score_map({
-            idx: (max_raw - raw_score) / span
-            for idx, raw_score in enumerate(raw_scores)
-        })
-
-    @staticmethod
-    def _normalize_score_map(scores: dict[int, float]) -> dict[int, float]:
-        if not scores:
-            return {}
-
-        total = sum(score for score in scores.values() if score > 0.0)
-        if total <= 0.0:
-            return {}
-
-        return {
-            idx: score / total
-            for idx, score in scores.items()
-            if score > 0.0
-        }
-
-    def _get_routing_score_precedence(
-        self,
-        expert_scores: dict[int, float],
-        kv_scores: dict[int, float],
-        load_scores: dict[int, float],
-    ) -> list[tuple[str, float, dict[int, float]]]:
-        precedence: list[tuple[str, float, dict[int, float]]] = []
-        if self.expert_affinity_weight > 0.0:
-            precedence.append(
-                ("expert_affinity", self.expert_affinity_weight, expert_scores)
-            )
-        if self.kv_block_prefix_weight > 0.0:
-            precedence.append(
-                ("kv_block_prefix", self.kv_block_prefix_weight, kv_scores)
-            )
-        if self.load_score_weight > 0.0:
-            precedence.append(("load_score", self.load_score_weight, load_scores))
-
-        tie_break_order = {
-            "expert_affinity": 0,
-            "kv_block_prefix": 1,
-            "load_score": 2,
-        }
-        precedence.sort(key=lambda item: (-item[1], tie_break_order[item[0]]))
-        return precedence
-
-    def _select_candidates_by_routing_precedence(
-        self,
-        expert_scores: dict[int, float],
-        kv_scores: dict[int, float],
-        load_scores: dict[int, float],
-    ) -> tuple[list[int] | None, list[str]]:
-        precedence = self._get_routing_score_precedence(
-            expert_scores,
-            kv_scores,
-            load_scores,
-        )
-        if not precedence:
-            return None, []
-
-        candidate_indices = list(range(len(self.engines)))
-        selection_trace: list[str] = []
-        for name, _, scores in precedence:
-            candidate_scores = {
-                idx: scores.get(idx, 0.0) for idx in candidate_indices
-            }
-            best_score = max(candidate_scores.values(), default=0.0)
-            candidate_indices = [
-                idx for idx, score in candidate_scores.items()
-                if score == best_score
-            ]
-            selection_trace.append(f"{name}:{best_score:.4f}->{candidate_indices}")
-            if len(candidate_indices) <= 1:
-                break
-
-        return candidate_indices, selection_trace
-
-    # ///////////// Expert-based load balancing
-    @staticmethod
-    def _format_score_map(scores: dict[int, float]) -> str:
-        if not scores:
-            return "{}"
-        items = ", ".join(
-            f"{idx}:{score:.4f}" for idx, score in sorted(scores.items())
-        )
-        return "{" + items + "}"
-    # ///////////// Expert-based load balancing
-
-    def _choose_engine_by_load(
-        self,
-        client_index: int,
-        client_count: int,
-        candidate_indices: list[int] | None = None,
-    ) -> int:
-        indices = candidate_indices or list(range(len(self.engines)))
-        if not indices:
-            return 0
-
-        min_score = float("inf")
-        chosen_index = 0
-        eng_start_index = 0
-        if client_count > 0:
-            eng_start_index = (len(self.engines) * client_index) // client_count
-
-        for i in range(len(indices)):
-            idx = indices[(eng_start_index + i) % len(indices)]
-            waiting, running = self.engines[idx].request_counts
-            score = (waiting * 4) + running
-            if score < min_score:
-                min_score = score
-                chosen_index = idx
-
-        self.engines[chosen_index].request_counts[0] += 1
-        return chosen_index
-
-    def _route_request(
-        self,
-        query: CoordinatorRouteRequest,
-    ) -> CoordinatorRouteResponse:
-        expert_scores = (
-            self._get_expert_affinity_scores(query.prompt_token_ids)
-            if self.expert_affinity_weight > 0.0
-            else {}
-        )
-        kv_scores = (
-            self._get_kv_block_prefix_scores(query)
-            if self.kv_block_prefix_weight > 0.0
-            else {}
-        )
-        load_scores = (
-            self._get_load_scores()
-            if self.load_score_weight > 0.0
-            else {}
-        )
-        matched_indices, selection_trace = (
-            self._select_candidates_by_routing_precedence(
-                expert_scores,
-                kv_scores,
-                load_scores,
-            )
-        )
-
-        if matched_indices is not None:
-            chosen_index = self._choose_engine_by_load(
-                query.client_index,
-                query.client_count,
-                matched_indices,
-            )
-            if self.load_balancer_debug:
-                logger.warning(
-                    "LB route request_id=%s expert_scores=%s kv_scores=%s "
-                    "load_scores=%s precedence=%s chosen_engine=%d",
-                    query.request_id,
-                    self._format_score_map(expert_scores),
-                    self._format_score_map(kv_scores),
-                    self._format_score_map(load_scores),
-                    selection_trace,
-                    chosen_index,
-                )
-            return CoordinatorRouteResponse(
-                call_id=query.call_id,
-                engine_index=chosen_index,
-                score=1.0 if len(matched_indices) == 1 else 0.0,
-            )
-
-        chosen_index = self._choose_engine_by_load(
-            query.client_index,
-            query.client_count,
-        )
-        if self.load_balancer_debug:
-            logger.warning(
-                "LB route request_id=%s expert_scores=%s kv_scores=%s "
-                "load_scores=%s final_scores={} chosen_engine=%d fallback=load_only",
-                query.request_id,
-                self._format_score_map(expert_scores),
-                self._format_score_map(kv_scores),
-                self._format_score_map(load_scores),
-                chosen_index,
-            )
-        return CoordinatorRouteResponse(
-            call_id=query.call_id,
-            engine_index=chosen_index,
-        )
-    # ///////////// Expert-based load balancing
 
     @staticmethod
     def run_coordinator(
