@@ -14,7 +14,6 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.inputs import EngineInput, PromptType
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
-from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
@@ -44,7 +43,6 @@ class EngineClient(ABC):
     vllm_config: VllmConfig
     model_config: ModelConfig
     renderer: BaseRenderer
-    io_processor: IOProcessor | None
     input_processor: InputProcessor
 
     @property
@@ -80,6 +78,7 @@ class EngineClient(ABC):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
@@ -231,6 +230,14 @@ class EngineClient(ABC):
         """Initialize weight transfer for RL training."""
         raise NotImplementedError
 
+    async def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+        """Start a new weight update."""
+        raise NotImplementedError
+
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """Batched weight update for RL training."""
+        raise NotImplementedError
+
+    async def finish_weight_update(self) -> None:
+        """Finish the current weight update."""
         raise NotImplementedError

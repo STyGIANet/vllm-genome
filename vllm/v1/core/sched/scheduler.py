@@ -49,7 +49,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -68,6 +68,7 @@ class Scheduler(SchedulerInterface):
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
         block_size: int,
+        hash_block_size: int | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
@@ -110,7 +111,6 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
         )
-        # ///////////// Expert-based load balancing
         self.emit_internal_kv_prefix_routing_events = (
             vllm_config.model_config.enable_kv_block_prefix_routing
             and self.parallel_config.data_parallel_size > 1
@@ -122,9 +122,9 @@ class Scheduler(SchedulerInterface):
             and not self.is_encoder_decoder
         )
         self.enable_kv_cache_events = (
-            self.enable_kv_cache_events or self.emit_internal_kv_prefix_routing_events
+            self.enable_kv_cache_events
+            or self.emit_internal_kv_prefix_routing_events
         )
-        # ///////////// Expert-based load balancing
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -234,18 +234,28 @@ class Scheduler(SchedulerInterface):
                 self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
+        if hash_block_size is None:
+            hash_block_size = block_size
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
-            hash_block_size=self.block_size,
+            hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
         )
+        # Bind GPU block pool to the KV connector. This must happen after
+        # kv_cache_manager is constructed so block_pool is available.
+        if self.connector is not None and hasattr(
+            self.connector, "bind_gpu_block_pool"
+        ):
+            self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
+
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         self.scheduler_reserve_full_isl = (
@@ -262,29 +272,20 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         if self.vllm_config.model_config.enable_return_routed_experts:
-            assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
-                "enable_return_routed_experts does not support context parallelism "
-                "(dcp_world_size > 1 or pcp_world_size > 1)"
-            )
-
-            assert len(kv_cache_config.kv_cache_groups) > 0, (
-                "enable_return_routed_experts requires at least one kv cache group"
-            )
-            # Find the attention group for routed experts indexing.
             self.routed_experts_attn_gid = 0
-            for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-                if isinstance(group.kv_cache_spec, AttentionSpec):
+            self.max_num_kv_tokens = 0
+            for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
+                if hasattr(group.kv_cache_spec, "block_size"):
                     self.routed_experts_attn_gid = gid
                     break
+
             min_block_size = min(
-                [
-                    group.kv_cache_spec.block_size
-                    for group in kv_cache_config.kv_cache_groups
-                ]
+                group.kv_cache_spec.block_size
+                for group in self.kv_cache_config.kv_cache_groups
             )
-            num_groups = len(kv_cache_config.kv_cache_groups)
+            num_groups = len(self.kv_cache_config.kv_cache_groups)
             self.max_num_kv_tokens = (
-                kv_cache_config.num_blocks // num_groups
+                self.kv_cache_config.num_blocks // num_groups
             ) * min_block_size
             dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
             pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
@@ -300,6 +301,8 @@ class Scheduler(SchedulerInterface):
                 ),
                 dtype=np.int32,
             )
+        else:
+            self.routed_experts_buffer = None
         self.prefix_learning_pairs_by_request: dict[str, list[list[int]]] = {}
         self.prefix_learning_owner_by_request: dict[str, dict[str, int]] = {}
         self.async_prefix_learning_owner_by_request: dict[str, dict[str, int]] = {}
@@ -641,7 +644,6 @@ class Scheduler(SchedulerInterface):
                             step_skipped_waiting.prepend_request(request)
                             continue
 
-                        request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
 
                         connector_prefix_cache_queries = (
@@ -654,6 +656,15 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
                     assert num_computed_tokens <= request.num_tokens
+
+                    # Track first scheduled prefill, not post-preemption repeat prefills
+                    if request.prefill_stats is not None:
+                        assert num_computed_tokens <= request.num_prompt_tokens
+                        request.prefill_stats.set(
+                            num_prompt_tokens=request.num_prompt_tokens,
+                            num_local_cached_tokens=num_new_local_computed_tokens,
+                            num_external_cached_tokens=num_external_computed_tokens,
+                        )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
@@ -741,20 +752,6 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
-                if (
-                    self.scheduler_reserve_full_isl
-                    and not self.kv_cache_manager.can_fit_full_sequence(
-                        request,
-                        num_new_computed_tokens=num_new_local_computed_tokens,
-                        new_computed_blocks=new_computed_blocks,
-                        num_external_computed_tokens=num_external_computed_tokens,
-                        num_encoder_tokens=num_encoder_tokens,
-                    )
-                ):
-                    if request.has_encoder_inputs:
-                        self.encoder_cache_manager.free(request)
-                    break
-
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -764,6 +761,7 @@ class Scheduler(SchedulerInterface):
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
+                    full_sequence_must_fit=self.scheduler_reserve_full_isl,
                 )
 
                 if new_blocks is None:
@@ -838,9 +836,6 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                # Count the number of prefix cached tokens.
-                if request.num_cached_tokens < 0:
-                    request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
@@ -1007,14 +1002,6 @@ class Scheduler(SchedulerInterface):
             scheduler_output.has_structured_output_requests |= (
                 request.use_structured_output and not request.is_prefill_chunk
             )
-
-            # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
-            # may be updated again in _update_from_output for speculative
-            # decoding. However, it is safe to call the method here because
-            # encoder inputs are always part of the prompt, not the output,
-            # and thus are unaffected by speculative decoding.
-            if request.has_encoder_inputs:
-                self._free_encoder_inputs(request)
 
         # Clear the finished request IDs.
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
@@ -1409,6 +1396,10 @@ class Scheduler(SchedulerInterface):
                     request_id=req_id,
                 )
 
+            # Free encoder inputs only after the step has actually executed.
+            if request.has_encoder_inputs:
+                self._free_encoder_inputs(request)
+
             stopped = False
             new_logprobs = None
             new_token_ids = generated_token_ids
@@ -1430,6 +1421,30 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
+            if new_token_ids and self.structured_output_manager.should_advance(request):
+                struct_output_request = request.structured_output_request
+                assert struct_output_request is not None
+                assert struct_output_request.grammar is not None
+                if not struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                    req_id, new_token_ids
+                ):
+                    logger.error(
+                        "Unexpected: grammar rejected tokens %s for request %s. "
+                        "Terminating request.",
+                        new_token_ids,
+                        req_id,
+                    )
+                    request.status = RequestStatus.FINISHED_ERROR
+                    request.resumable = False
+                    stopped = True
+
+            # Get routing data from ModelRunnerOutput (via worker D2H pipeline)
+            routed_experts = None
+            if (
+                model_runner_output.routed_experts_dict is not None
+                and req_id in model_runner_output.routed_experts_dict
+            ):
+                routed_experts = model_runner_output.routed_experts_dict[req_id]
             routed_experts = None
             prefix_learning_pairs = None
             prefix_learning_owner = None
@@ -1438,7 +1453,6 @@ class Scheduler(SchedulerInterface):
                 routed_experts = self._get_routed_experts(request)
                 prefix_learning_pairs = self._take_prefix_learning_pairs(request)
                 prefix_learning_owner = self._take_prefix_learning_owner(request)
-
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
@@ -1458,22 +1472,10 @@ class Scheduler(SchedulerInterface):
             # Extract sample logprobs if needed.
             if (
                 request.sampling_params is not None
-                and request.sampling_params.logprobs is not None
+                and request.sampling_params.num_logprobs is not None
                 and logprobs
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
-
-            if new_token_ids and self.structured_output_manager.should_advance(request):
-                struct_output_request = request.structured_output_request
-                assert struct_output_request is not None
-                assert struct_output_request.grammar is not None
-                ok = struct_output_request.grammar.accept_tokens(req_id, new_token_ids)
-                if not ok:
-                    logger.warning(
-                        "Unexpected: grammar rejected tokens %s for request %s.",
-                        new_token_ids,
-                        req_id,
-                    )
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
@@ -1497,10 +1499,9 @@ class Scheduler(SchedulerInterface):
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
+                        prefill_stats=request.take_prefill_stats(),
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
-                        num_cached_tokens=request.num_cached_tokens,
-                        num_external_computed_tokens=request.num_external_computed_tokens,
                         routed_experts=routed_experts,
                         prefix_learning_pairs=prefix_learning_pairs,
                         prefix_learning_owner=prefix_learning_owner,
@@ -1529,7 +1530,6 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
-                        num_cached_tokens=request.num_cached_tokens,
                     )
                 )
 
@@ -1537,8 +1537,6 @@ class Scheduler(SchedulerInterface):
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
 
-        # ///////////// Expert-based load balancing
-        # collect local GPU KV cache events from KV cache manager
         local_events = self.kv_cache_manager.take_events()
         events = list(local_events) if local_events else []
 
@@ -1552,7 +1550,6 @@ class Scheduler(SchedulerInterface):
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
-        # ///////////// Expert-based load balancing
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -1637,7 +1634,6 @@ class Scheduler(SchedulerInterface):
             if eco is None:
                 eco = engine_core_outputs[-1] = EngineCoreOutputs()
             eco.prefix_router_placement_update = prefix_router_placement_update
-        # ///////////// Expert-based load balancing
 
         return engine_core_outputs
 
@@ -1684,115 +1680,6 @@ class Scheduler(SchedulerInterface):
 
         self._enqueue_waiting_request(request)
         return False
-
-    def _apply_routed_experts_step(self, model_runner_output: ModelRunnerOutput) -> None:
-        if not self.vllm_config.model_config.enable_return_routed_experts:
-            return
-
-        step = model_runner_output.routed_experts_step
-        indices = model_runner_output.routed_experts_step_indices
-        if step is None or indices is None:
-            return
-        if len(step) == 0 or len(indices) == 0:
-            return
-
-        assert self.routed_experts_buffer is not None
-        self.routed_experts_buffer[indices] = step
-
-    def _apply_prefix_learning_pairs(
-        self, model_runner_output: ModelRunnerOutput
-    ) -> None:
-        trace_enabled = self.vllm_config.model_config.load_balancer_debug
-        start_ns = time.perf_counter_ns() if trace_enabled else 0
-        pairs_by_req = model_runner_output.prefix_learning_pairs_by_req
-        if not pairs_by_req:
-            return
-        for req_id, pairs in pairs_by_req.items():
-            self.prefix_learning_pairs_by_request[req_id] = pairs
-        if trace_enabled:
-            logger.warning(
-                "PrefixTrace scheduler apply_pairs ts_ns=%d reqs=%d total_pairs=%d duration_ms=%.3f",
-                start_ns,
-                len(pairs_by_req),
-                sum(len(pairs) for pairs in pairs_by_req.values()),
-                (time.perf_counter_ns() - start_ns) / 1e6,
-            )
-
-    def _apply_prefix_learning_owners(
-        self, model_runner_output: ModelRunnerOutput
-    ) -> None:
-        owners_by_req = model_runner_output.prefix_learning_owner_by_req
-        if not owners_by_req:
-            return
-        for req_id, owner in owners_by_req.items():
-            self.prefix_learning_owner_by_request[req_id] = owner
-
-    def _apply_async_prefix_learning_owners(
-        self, model_runner_output: ModelRunnerOutput
-    ) -> None:
-        owners_by_req = model_runner_output.async_prefix_learning_owner_by_req
-        if not owners_by_req:
-            return
-        for req_id, owner in owners_by_req.items():
-            self.async_prefix_learning_owner_by_request[req_id] = owner
-
-    def _take_prefix_learning_pairs(
-        self, request: Request
-    ) -> list[list[int]] | None:
-        trace_enabled = self.vllm_config.model_config.load_balancer_debug
-        start_ns = time.perf_counter_ns() if trace_enabled else 0
-        pairs = self.prefix_learning_pairs_by_request.pop(request.request_id, None)
-        if trace_enabled:
-            logger.warning(
-                "PrefixTrace scheduler take_pairs ts_ns=%d request_id=%s pairs=%d duration_ms=%.3f",
-                start_ns,
-                request.request_id,
-                0 if pairs is None else len(pairs),
-                (time.perf_counter_ns() - start_ns) / 1e6,
-            )
-        if pairs is not None:
-            self.prefix_learning_client_index_by_request.pop(
-                request.request_id, None
-            )
-        return pairs
-
-    def _take_prefix_learning_owner(
-        self, request: Request
-    ) -> dict[str, int] | None:
-        owner = self.prefix_learning_owner_by_request.pop(request.request_id, None)
-        if owner is not None:
-            self.prefix_learning_client_index_by_request.pop(
-                request.request_id, None
-            )
-        return owner
-
-    def _get_routed_experts(self, request: Request) -> np.ndarray | None:
-        if not self.vllm_config.model_config.enable_return_routed_experts:
-            return None
-
-        kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
-        block_ids = kv_blocks.get_block_ids()[self.routed_experts_attn_gid]
-        # Routed-expert capture is prompt-only. Decode-token expert traces are
-        # intentionally skipped to keep the feature off the steady-state hot path.
-        num_tokens = request.num_prompt_tokens
-
-        # compute slot mapping using attention group's block_size
-        block_ids_array = np.array(block_ids, dtype=np.int32)
-        num_blocks = len(block_ids)
-        attn_group = self.kv_cache_config.kv_cache_groups[self.routed_experts_attn_gid]
-        block_size = attn_group.kv_cache_spec.block_size
-
-        # generate block offsets
-        block_offsets = np.arange(0, block_size)
-
-        # compute slot mapping: slot = block_id * block_size + offset
-        slot_mapping = (
-            block_offsets.reshape((1, block_size))
-            + block_ids_array.reshape((num_blocks, 1)) * block_size
-        ).flatten()[:num_tokens]
-
-        assert self.routed_experts_buffer is not None
-        return self.routed_experts_buffer[slot_mapping].copy()
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
@@ -1998,6 +1885,8 @@ class Scheduler(SchedulerInterface):
         request_id = request.request_id
         self.prefix_learning_pairs_by_request.pop(request_id, None)
         self.prefix_learning_owner_by_request.pop(request_id, None)
+        self.async_prefix_learning_owner_by_request.pop(request_id, None)
+        self.prefix_learning_client_index_by_request.pop(request_id, None)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
@@ -2007,6 +1896,84 @@ class Scheduler(SchedulerInterface):
             self._free_blocks(request)
 
         return kv_xfer_params
+
+    def _apply_routed_experts_step(self, model_runner_output: ModelRunnerOutput) -> None:
+        if not self.vllm_config.model_config.enable_return_routed_experts:
+            return
+
+        step = model_runner_output.routed_experts_step
+        indices = model_runner_output.routed_experts_step_indices
+        if step is None or indices is None:
+            return
+        if len(step) == 0 or len(indices) == 0:
+            return
+
+        assert self.routed_experts_buffer is not None
+        self.routed_experts_buffer[indices] = step
+
+    def _apply_prefix_learning_pairs(
+        self, model_runner_output: ModelRunnerOutput
+    ) -> None:
+        pairs_by_req = model_runner_output.prefix_learning_pairs_by_req
+        if not pairs_by_req:
+            return
+        for req_id, pairs in pairs_by_req.items():
+            self.prefix_learning_pairs_by_request[req_id] = pairs
+
+    def _apply_prefix_learning_owners(
+        self, model_runner_output: ModelRunnerOutput
+    ) -> None:
+        owners_by_req = model_runner_output.prefix_learning_owner_by_req
+        if not owners_by_req:
+            return
+        for req_id, owner in owners_by_req.items():
+            self.prefix_learning_owner_by_request[req_id] = owner
+
+    def _apply_async_prefix_learning_owners(
+        self, model_runner_output: ModelRunnerOutput
+    ) -> None:
+        owners_by_req = model_runner_output.async_prefix_learning_owner_by_req
+        if not owners_by_req:
+            return
+        for req_id, owner in owners_by_req.items():
+            self.async_prefix_learning_owner_by_request[req_id] = owner
+
+    def _take_prefix_learning_pairs(
+        self, request: Request
+    ) -> list[list[int]] | None:
+        pairs = self.prefix_learning_pairs_by_request.pop(request.request_id, None)
+        if pairs is not None:
+            self.prefix_learning_client_index_by_request.pop(request.request_id, None)
+        return pairs
+
+    def _take_prefix_learning_owner(
+        self, request: Request
+    ) -> dict[str, int] | None:
+        owner = self.prefix_learning_owner_by_request.pop(request.request_id, None)
+        if owner is not None:
+            self.prefix_learning_client_index_by_request.pop(request.request_id, None)
+        return owner
+
+    def _get_routed_experts(self, request: Request) -> np.ndarray | None:
+        if not self.vllm_config.model_config.enable_return_routed_experts:
+            return None
+
+        kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
+        block_ids = kv_blocks.get_block_ids()[self.routed_experts_attn_gid]
+        num_tokens = request.num_prompt_tokens
+
+        block_ids_array = np.array(block_ids, dtype=np.int32)
+        num_blocks = len(block_ids)
+        attn_group = self.kv_cache_config.kv_cache_groups[self.routed_experts_attn_gid]
+        block_size = attn_group.kv_cache_spec.block_size
+        block_offsets = np.arange(0, block_size)
+        slot_mapping = (
+            block_offsets.reshape((1, block_size))
+            + block_ids_array.reshape((num_blocks, 1)) * block_size
+        ).flatten()[:num_tokens]
+
+        assert self.routed_experts_buffer is not None
+        return self.routed_experts_buffer[slot_mapping].copy()
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
@@ -2129,9 +2096,9 @@ class Scheduler(SchedulerInterface):
         )
         return SchedulerStats(
             num_running_reqs=len(self.running),
-            num_waiting_reqs=len(self.waiting) + len(self.skipped_waiting),
+            num_waiting_reqs=len(self.waiting),
+            num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
-            encoder_cache_usage=self._get_encoder_cache_usage(),
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
@@ -2140,14 +2107,6 @@ class Scheduler(SchedulerInterface):
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
         )
-
-    def _get_encoder_cache_usage(self) -> float:
-        """Get encoder cache usage as a fraction (0.0 to 1.0)."""
-        ecm = self.encoder_cache_manager
-        if ecm.cache_size == 0:
-            return 0.0
-        used_slots = ecm.cache_size - ecm.num_free_slots
-        return used_slots / ecm.cache_size
 
     def make_spec_decoding_stats(
         self,
@@ -2197,7 +2156,7 @@ class Scheduler(SchedulerInterface):
         # the connector.
         self.kv_cache_manager.remove_skipped_blocks(
             request_id=request.request_id,
-            total_computed_tokens=request.num_tokens,
+            total_computed_tokens=request.num_computed_tokens,
         )
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
@@ -2243,10 +2202,6 @@ class Scheduler(SchedulerInterface):
             # in order to be able to sample the next token
             if request.num_computed_tokens == request.num_tokens:
                 request.num_computed_tokens = request.num_tokens - 1
-
-            # Count the number of prefix cached tokens.
-            if request.num_cached_tokens < 0:
-                request.num_cached_tokens = request.num_computed_tokens
 
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
@@ -2394,7 +2349,7 @@ class Scheduler(SchedulerInterface):
                     req_num_computed_tokens - request.num_computed_tokens
                 )
                 total_affected_tokens += num_affected_tokens
-                request.num_external_computed_tokens -= num_affected_tokens
+
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])

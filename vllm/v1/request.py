@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
@@ -16,38 +14,19 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.v1.engine import (
+    EngineCoreEvent,
+    EngineCoreEventType,
+    EngineCoreRequest,
+    FinishReason,
+)
+from vllm.v1.metrics.stats import PrefillStats
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
-    from vllm.v1.engine import (
-        EngineCoreEvent,
-        EngineCoreEventType,
-        EngineCoreRequest,
-        FinishReason,
-    )
-
-
-_FINISHED_REASON_MAP = None
-
-
-def _get_finished_reason_map():
-    global _FINISHED_REASON_MAP
-    if _FINISHED_REASON_MAP is None:
-        from vllm.v1.engine import FinishReason
-
-        _FINISHED_REASON_MAP = {
-            RequestStatus.FINISHED_STOPPED: FinishReason.STOP,
-            RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
-            RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
-            RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
-            RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
-            RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
-            RequestStatus.FINISHED_REPETITION: FinishReason.REPETITION,
-        }
-    return _FINISHED_REASON_MAP
 
 
 @dataclass
@@ -87,6 +66,7 @@ class Request:
         client_index: int = 0,
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
+        prompt_is_token_ids: list[bool] | None = None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
         lora_request: "LoRARequest | None" = None,
         cache_salt: str | None = None,
@@ -95,6 +75,7 @@ class Request:
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -107,6 +88,9 @@ class Request:
         )
         if self.structured_output_request is not None:
             self.structured_output_request.reasoning_ended = reasoning_ended
+            self.structured_output_request.reasoning_parser_kwargs = (
+                reasoning_parser_kwargs
+            )
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
@@ -135,6 +119,10 @@ class Request:
 
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
+        # Per-position mask used in mixed-mode (chat completion with
+        # prompt_embeds). `None` except when both `prompt_token_ids` and
+        # `prompt_embeds` are set and their positions are interleaved.
+        self.prompt_is_token_ids = prompt_is_token_ids
         # Cache per-block prompt-embed hashes to avoid rehashing the same
         # tensor slices when generating extra keys.
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
@@ -167,9 +155,6 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
-        # State
-        # The number of tokens with prefix cache hits.
-        self.num_cached_tokens = -1
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
@@ -181,8 +166,7 @@ class Request:
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
-        # The number of tokens that have been computed remotely.
-        self.num_external_computed_tokens = 0
+        self.prefill_stats: PrefillStats | None = PrefillStats()
 
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
@@ -210,6 +194,7 @@ class Request:
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
             prompt_embeds=request.prompt_embeds,
+            prompt_is_token_ids=request.prompt_is_token_ids,
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
@@ -221,6 +206,7 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
+            reasoning_parser_kwargs=request.reasoning_parser_kwargs,
         )
 
     def append_output_token_ids(
@@ -306,8 +292,6 @@ class Request:
         event_type: EngineCoreEventType,
         timestamp: float | None = None,
     ) -> None:
-        from vllm.v1.engine import EngineCoreEvent
-
         self.events.append(EngineCoreEvent.new_event(event_type, timestamp))
 
     def take_events(self) -> list[EngineCoreEvent] | None:
@@ -315,6 +299,13 @@ class Request:
             return None
         events, self.events = self.events, []
         return events
+
+    def take_prefill_stats(self) -> PrefillStats | None:
+        if self.prefill_stats is None:
+            return None
+        prefill_stats = self.prefill_stats
+        self.prefill_stats = None
+        return prefill_stats
 
     def __lt__(self, other: "Request") -> bool:
         """
@@ -357,4 +348,19 @@ class RequestStatus(enum.IntEnum):
 
     @staticmethod
     def get_finished_reason(status: "RequestStatus") -> FinishReason | None:
-        return _get_finished_reason_map().get(status)
+        return _FINISHED_REASON_MAP.get(status)
+
+
+# Mapping of finished statuses to their finish reasons.
+# NOTE: The ignored requests are the requests whose prompt lengths
+# are longer than the model's length cap. Therefore, the stop
+# reason should also be "length" as in OpenAI API.
+_FINISHED_REASON_MAP = {
+    RequestStatus.FINISHED_STOPPED: FinishReason.STOP,
+    RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
+    RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
+    RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
+    RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
+    RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
+    RequestStatus.FINISHED_REPETITION: FinishReason.REPETITION,
+}

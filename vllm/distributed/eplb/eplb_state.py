@@ -30,13 +30,13 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.distributed.parallel_state import (
     get_ep_group,
+    get_eplb_group,
     get_node_count,
     in_the_same_node_as,
 )
@@ -46,9 +46,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
+from .eplb_communicator import EplbCommunicator, create_eplb_communicator
+from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
-    RecvMetadata,
+    AsyncEplbLayerResult,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -86,17 +88,12 @@ class EplbStats:
     coactivation_edges: torch.Tensor | None = None
     """
     Compact upper-triangular co-activation edge counts over unique
-    (layer, expert) nodes passed to the custom callback graph. When
-    `graph_ema_alpha < 1`, these values are EMA-smoothed across
-    rearrangement intervals.
-    Shape: [num_nodes * (num_nodes - 1) // 2]
+    (layer, expert) nodes passed to the custom callback graph.
     """
     node_activation_counts: torch.Tensor | None = None
     """
     Per-node activation counts over unique (layer, expert) nodes passed to the
-    custom callback graph. When `graph_ema_alpha < 1`, these values are
-    EMA-smoothed across rearrangement intervals.
-    Shape: [num_nodes]
+    custom callback graph.
     """
 
 
@@ -185,88 +182,56 @@ class EplbModelState:
     coactivation_edge_pass: torch.Tensor
     """
     Co-activation edge counts accumulated since the previous rearrangement.
-    Shape: [num_nodes * (num_nodes - 1) // 2]
     """
     node_activation_count_pass: torch.Tensor
     """
     Per-node activation counts accumulated since the previous rearrangement.
-    Shape: [num_nodes]
     """
     coactivation_edge_ema: torch.Tensor | None
     """
     EMA-smoothed co-activation edge counts used by the custom callback graph.
-    Stored on CPU as float32 and updated once per rearrangement interval.
-    Shape: [num_nodes * (num_nodes - 1) // 2]
     """
     node_activation_count_ema: torch.Tensor | None
     """
     EMA-smoothed node activation counts used by the custom callback graph.
-    Stored on CPU as float32 and updated once per rearrangement interval.
-    Shape: [num_nodes]
     """
     model: MixtureOfExperts
     expert_buffer: list[torch.Tensor]
     """
     The buffer to store the expert weights during transfer.
     """
-    buffer_lock: threading.Lock
-    """
-    The lock to protect the expert buffer.
-    """
-    buffer_consumed_event: torch.cuda.Event | None
-    """
-    CUDA event recorded after the main thread finishes consuming the buffer.
-    The async worker waits on this before writing to the buffer again.
-    """
-    window_ready_event: torch.cuda.Event | None
-    """
-    CUDA event recorded after all-reduce and clone on the main thread.
-    The async worker waits on this before accessing global_expert_load_window.
-    """
-    ep_buffer_ready: int
-    """
-    The flag indicates whether the expert buffer is ready for transfer.
-    0 or 1.
-    """
-    layer_to_transfer: int
-    """
-    The layer index to transfer in async mode.
-    """
     rebalanced: bool
     """
-    The flag indicates whether the experts rebalance have been computed.
-    """
-    pending_global_ready_check: bool
-    """
-    Whether the async EPLB needs to poll peers for buffer readiness.
+    This flag is only used when running Async EPLB. It is set to True by the main thread
+    after the new expert maps have been computed. This indicates that the async worker
+    should start transferring weights. move_to_workspace sets this flag to False when
+    all weights have been transferred and the new map has been successfully committed.
+
+    rebalanced relies on the GIL to synchronize access between the main thread and
+    the async worker.
     """
     eplb_stats: EplbStats | None
     """
     EPLB stats for the model.
     """
-    is_unchanged: np.ndarray
-    """
-    intermediate variable between `move_to_buffer` and `move_to_workspace`.
-    The size is same as the num of physical experts in the current layer.
-    """
-    is_received_locally: np.ndarray
-    """
-    intermediate variable between `move_to_buffer` and `move_to_workspace`.
-    The size is same as the num of physical experts in the current layer.
-    """
-    recv_metadata: RecvMetadata
-    """
-    intermediate variable between `move_to_buffer` and `move_to_workspace`.
-    """
     cuda_device_index: int | None
     """
     CUDA device index for the async EPLB worker thread.
     """
+    communicator: EplbCommunicator
+    """
+    The communicator for expert weight transfers.
+    """
+    pending_result: AsyncEplbLayerResult | None = None
+    """
+    Set by the async worker after all writes to expert_buffer are done. Consumed
+    and reset to None by the main thread in move_to_workspace() after the contents of
+    expert_buffer have been transferred out. At most one result is pending at a time.
+
+    pending_result relies on the GIL to synchronize access between the main thread and
+    the async worker.
+    """
     new_physical_to_logical_map: torch.Tensor | None = None
-    """
-    intermediate variable between `move_to_buffer` and `move_to_workspace`.
-    the size is same as physical_to_logical_map
-    """
 
 
 class EplbState:
@@ -309,11 +274,18 @@ class EplbState:
         Interval for expert rearrangement steps.
         This is a constant and is taken from the config.
         """
+        self.should_record_tensor: torch.Tensor | None = None
+        """
+        Shared scalar bool tensor for all layers.  Every
+        :class:`EplbLayerState` holds a reference to the **same** object so
+        a single ``.fill_()`` updates all layers at once.  Allocated on the
+        first call to :meth:`_init_should_record_tensor`.
+        """
         self.is_async: bool = False
         """
         The flag indicates whether the EPLB is running in async mode.
         """
-        self.rearrange_event = threading.Event()
+        self.rearrange_event: CpuGpuEvent = CpuGpuEvent()
         """
         Event to signal when a new rearrangement is needed for the async thread.
         """
@@ -337,53 +309,6 @@ class EplbState:
             self.cuda_device_index = self.device.index
             if self.cuda_device_index is None and torch.cuda.is_available():
                 self.cuda_device_index = torch.accelerator.current_device_index()
-
-    def _prepare_callback_graph_metadata(
-        self,
-        model_state: EplbModelState,
-        coactivation_edges: torch.Tensor | None,
-        node_activation_counts: torch.Tensor | None,
-        *,
-        is_profile: bool,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """Prepare the graph payload passed to custom placement callbacks."""
-        if coactivation_edges is None or node_activation_counts is None:
-            return coactivation_edges, node_activation_counts
-
-        alpha = self.parallel_config.eplb_config.graph_ema_alpha
-        if is_profile or alpha >= 1.0:
-            return (
-                coactivation_edges.to(torch.int64).cpu(),
-                node_activation_counts.to(torch.int64).cpu(),
-            )
-
-        edge_values = coactivation_edges.to(torch.float32).cpu()
-        node_values = node_activation_counts.to(torch.float32).cpu()
-
-        if (
-            model_state.coactivation_edge_ema is None
-            or model_state.coactivation_edge_ema.shape != edge_values.shape
-        ):
-            model_state.coactivation_edge_ema = edge_values.clone()
-        else:
-            model_state.coactivation_edge_ema.mul_(1.0 - alpha).add_(
-                edge_values, alpha=alpha
-            )
-
-        if (
-            model_state.node_activation_count_ema is None
-            or model_state.node_activation_count_ema.shape != node_values.shape
-        ):
-            model_state.node_activation_count_ema = node_values.clone()
-        else:
-            model_state.node_activation_count_ema.mul_(1.0 - alpha).add_(
-                node_values, alpha=alpha
-            )
-
-        return (
-            torch.round(model_state.coactivation_edge_ema).to(torch.int64),
-            torch.round(model_state.node_activation_count_ema).to(torch.int64),
-        )
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -440,6 +365,52 @@ class EplbState:
                         new_model.num_expert_groups,
                     )
                 )
+
+    def _prepare_callback_graph_metadata(
+        self,
+        model_state: EplbModelState,
+        coactivation_edges: torch.Tensor | None,
+        node_activation_counts: torch.Tensor | None,
+        *,
+        is_profile: bool,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if coactivation_edges is None or node_activation_counts is None:
+            return coactivation_edges, node_activation_counts
+
+        alpha = self.parallel_config.eplb_config.graph_ema_alpha
+        if is_profile or alpha >= 1.0:
+            return (
+                coactivation_edges.to(torch.int64).cpu(),
+                node_activation_counts.to(torch.int64).cpu(),
+            )
+
+        edge_values = coactivation_edges.to(torch.float32).cpu()
+        node_values = node_activation_counts.to(torch.float32).cpu()
+
+        if (
+            model_state.coactivation_edge_ema is None
+            or model_state.coactivation_edge_ema.shape != edge_values.shape
+        ):
+            model_state.coactivation_edge_ema = edge_values.clone()
+        else:
+            model_state.coactivation_edge_ema.mul_(1.0 - alpha).add_(
+                edge_values, alpha=alpha
+            )
+
+        if (
+            model_state.node_activation_count_ema is None
+            or model_state.node_activation_count_ema.shape != node_values.shape
+        ):
+            model_state.node_activation_count_ema = node_values.clone()
+        else:
+            model_state.node_activation_count_ema.mul_(1.0 - alpha).add_(
+                node_values, alpha=alpha
+            )
+
+        return (
+            torch.round(model_state.coactivation_edge_ema).to(torch.int64),
+            torch.round(model_state.node_activation_count_ema).to(torch.int64),
+        )
 
     def add_model(
         self,
@@ -557,8 +528,14 @@ class EplbState:
             logical_to_physical_map,
             logical_replica_count,
         )
-
+        self._init_should_record_tensor(model)
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
+
+        communicator = create_eplb_communicator(
+            group_coordinator=get_eplb_group(),
+            backend=self.parallel_config.eplb_config.communicator,
+            expert_weights=model.expert_weights[0],
+        )
 
         model_state = EplbModelState(
             physical_to_logical_map=physical_to_logical_map,
@@ -573,24 +550,10 @@ class EplbState:
             node_activation_count_ema=None,
             model=model,
             expert_buffer=expert_buffer,
-            buffer_lock=threading.Lock(),
-            buffer_consumed_event=None,
-            window_ready_event=None,
-            ep_buffer_ready=0,
-            layer_to_transfer=0,
             rebalanced=False,
-            pending_global_ready_check=False,
             eplb_stats=None,
-            is_unchanged=np.array([]),
-            is_received_locally=np.array([]),
-            recv_metadata=RecvMetadata(
-                recv_primary_mask=np.array([]),
-                recv_count=0,
-                recv_expert_ids=np.array([]),
-                recv_dst_rows=np.array([]),
-            ),
             cuda_device_index=self.cuda_device_index,
-            new_physical_to_logical_map=None,
+            communicator=communicator,
         )
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
@@ -683,15 +646,18 @@ class EplbState:
 
         # Update the expert load sliding window
         if not is_dummy:
+            should_record = self._should_record_current_step(log_stats=log_stats)
             for eplb_model_state in self.model_states.values():
-                eplb_model_state.expert_load_window[
-                    self.expert_load_window_step
-                ].copy_(eplb_model_state.expert_load_pass)
-                eplb_model_state.expert_load_pass.zero_()
+                if should_record:
+                    eplb_model_state.expert_load_window[
+                        self.expert_load_window_step
+                    ].copy_(eplb_model_state.expert_load_pass)
+                    eplb_model_state.expert_load_pass.zero_()
 
-            self.expert_load_window_step += 1
-            if self.expert_load_window_step >= self.expert_load_window_size:
-                self.expert_load_window_step = 0
+            if should_record:
+                self.expert_load_window_step += 1
+                if self.expert_load_window_step >= self.expert_load_window_size:
+                    self.expert_load_window_step = 0
 
         # Step the expert rearrangement step
         # Note that even if this is a dummy step, we still increment the
@@ -700,23 +666,17 @@ class EplbState:
         self.expert_rearrangement_step += 1
 
         if self.is_async:
+            # Run _move_to_workspace if all ranks have finished transferring the
+            # new weights to the intermediate buffer
             for eplb_model_state in self.model_states.values():
-                all_ranks_buffer_ready = False
-                if eplb_model_state.pending_global_ready_check:
-                    # Async EPLB commits must stay in lockstep across ranks.
-                    # Custom placement callbacks change how the new mapping is
-                    # produced, but they do not change the buffer handoff
-                    # protocol. Advancing on only local readiness can let ranks
-                    # apply different layers at different times and wedge the
-                    # EP/DP wave.
-                    all_ranks_buffer_ready = self._all_ranks_buffer_ready(
-                        eplb_model_state
-                    )
-                if eplb_model_state.ep_buffer_ready and all_ranks_buffer_ready:
-                    self.move_to_workspace(
+                # rebalanced must remain consistent amongst all ranks otherwise the
+                # all_reduce in _all_ranks_result_ready will hang
+                if eplb_model_state.rebalanced and self._all_ranks_result_ready(
+                    eplb_model_state
+                ):
+                    _move_to_workspace(
                         model_state=eplb_model_state,
-                        ep_group=ep_group,
-                        is_profile=is_profile,
+                        ep_rank=ep_group.rank(),
                     )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
@@ -724,10 +684,65 @@ class EplbState:
                 eplb_model_state.rebalanced
                 for eplb_model_state in self.model_states.values()
             ):
-                # Still performing asynchronous rearrangement
+                # Still performing asynchronous rearrangement; update
+                # should_record (step > step_interval, so always True) and
+                # bail out before the step counter is reset.
+                self._update_layer_should_record(log_stats=log_stats)
                 return
             self.expert_rearrangement_step = 0
             self.rearrange()
+
+        self._update_layer_should_record(log_stats=log_stats)
+
+    def _should_record_current_step(self, log_stats: bool = False) -> bool:
+        """Return whether expert-load recording should be enabled this step.
+
+        Recording is enabled when we are close to either:
+        1) The next rearrangement step, so the sliding window is ready.
+        2) The next balancedness logging step, when log_stats is enabled.
+        """
+        steps_remaining = (
+            self.expert_rearrangement_step_interval - self.expert_rearrangement_step
+        )
+        should_record_for_rearrange = steps_remaining <= self.expert_load_window_size
+
+        if not log_stats:
+            return should_record_for_rearrange
+
+        log_interval = self.parallel_config.eplb_config.log_balancedness_interval
+        steps_until_next_log = (
+            log_interval - (self.expert_rearrangement_step % log_interval)
+        ) % log_interval
+        should_record_for_log = steps_until_next_log <= self.expert_load_window_size
+        return should_record_for_rearrange or should_record_for_log
+
+    def _update_layer_should_record(self, log_stats: bool = False) -> None:
+        """Update the shared ``should_record_tensor`` for all layers."""
+        if self.should_record_tensor is not None:
+            self.should_record_tensor.fill_(
+                self._should_record_current_step(log_stats=log_stats)
+            )
+
+    def _init_should_record_tensor(self, model: "MixtureOfExperts") -> None:  # type: ignore[name-defined]
+        """Allocate (once) and propagate the shared ``should_record_tensor``.
+
+        Must be called after :meth:`model.set_eplb_state` so that each
+        layer's ``eplb_state`` is already populated with the tensor views.
+        """
+        layer_states = [
+            layer.eplb_state
+            for layer in model.moe_layers
+            if hasattr(layer, "eplb_state")
+            and isinstance(layer.eplb_state, EplbLayerState)
+        ]
+
+        if self.should_record_tensor is None and layer_states:
+            self.should_record_tensor = torch.ones(
+                (), dtype=torch.bool, device=self.device
+            )
+
+        for ls in layer_states:
+            ls.should_record_tensor = self.should_record_tensor
 
     def rearrange(
         self,
@@ -763,13 +778,7 @@ class EplbState:
             )
 
         # Map the physical expert load to global logical experts
-        callback_graph_required = bool(
-            hasattr(self.policy, "requires_callback_graph")
-            and self.policy.requires_callback_graph()
-        )
         global_expert_load_windows = []
-        coactivation_edge_passes = []
-        node_activation_count_passes = []
         for eplb_model_state in self.model_states.values():
             expert_load_window = eplb_model_state.expert_load_window[
                 :, :, : self.num_valid_physical_experts
@@ -794,27 +803,28 @@ class EplbState:
 
             global_expert_load_window = logical_expert_load_window.sum(dim=0)
             global_expert_load_windows.append(global_expert_load_window)
-            if callback_graph_required:
-                coactivation_edge_passes.append(
-                    eplb_model_state.coactivation_edge_pass.clone()
-                )
-                node_activation_count_passes.append(
-                    eplb_model_state.node_activation_count_pass.clone()
-                )
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
+        callback_graph_required = bool(
+            hasattr(self.policy, "requires_callback_graph")
+            and self.policy.requires_callback_graph()
+        )
         if callback_graph_required:
             global_coactivation_edge_passes = self._allreduce_vector_list(
-                coactivation_edge_passes
+                [
+                    eplb_model_state.coactivation_edge_pass.clone()
+                    for eplb_model_state in self.model_states.values()
+                ]
             )
             global_node_activation_count_passes = self._allreduce_vector_list(
-                node_activation_count_passes
+                [
+                    eplb_model_state.node_activation_count_pass.clone()
+                    for eplb_model_state in self.model_states.values()
+                ]
             )
         else:
             global_coactivation_edge_passes = [None] * len(self.model_states)
-            global_node_activation_count_passes = [None] * len(
-                self.model_states
-            )
+            global_node_activation_count_passes = [None] * len(self.model_states)
 
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
@@ -846,12 +856,10 @@ class EplbState:
                 f"{num_gpus=}, {num_nodes=}"
             )
 
-        # For async custom callback policies, freeze the dynamic config snapshot
-        # before any map computation so the main thread and worker thread see
-        # the same rebalance input for this cycle.
-        if self.is_async and (not is_profile):
-            if hasattr(self.policy, 'snapshot_for_rebalance'):
-                self.policy.snapshot_for_rebalance()
+        if self.is_async and (not is_profile) and hasattr(
+            self.policy, "snapshot_for_rebalance"
+        ):
+            self.policy.snapshot_for_rebalance()
 
         # Get new expert mappings
         for (
@@ -877,32 +885,19 @@ class EplbState:
                     global_node_activation_counts,
                     is_profile=is_profile,
                 )
-
             if not self.is_async or is_profile:
-                # Get new expert mappings for the model.
-                # For profile runs, save and restore the policy step counter so
-                # the profile call doesn't consume a step from the JSON config.
-                _saved_policy_step = None
-                if is_profile and hasattr(self.policy, '_step'):
-                    _saved_policy_step = self.policy._step
-
                 if (
                     callback_coactivation_edges is not None
                     and hasattr(self.policy, "set_graph_metadata")
                 ):
-                    graph_metadata = {
+                    self.policy.set_graph_metadata({
                         "coactivation_edges": callback_coactivation_edges,
-                        "node_activation_counts": (
-                            callback_node_activation_counts
-                            if callback_node_activation_counts is not None
-                            else None
-                        ),
+                        "node_activation_counts": callback_node_activation_counts,
                         "num_layers": eplb_model_state.model.num_moe_layers,
                         "num_experts": eplb_model_state.model.num_logical_experts,
                         "num_gpus": num_gpus,
-                    }
-                    self.policy.set_graph_metadata(graph_metadata)
-
+                    })
+                # Get new expert mappings for the model
                 new_physical_to_logical_map = self.policy.rebalance_experts(
                     global_expert_load_window.cpu(),
                     num_replicas,
@@ -912,28 +907,18 @@ class EplbState:
                     eplb_model_state.physical_to_logical_map.cpu(),
                 )
 
-                if _saved_policy_step is not None:
-                    self.policy._step = _saved_policy_step
-
                 # Update expert weights
                 rearrange_expert_weights_inplace(
                     eplb_model_state.physical_to_logical_map,
                     new_physical_to_logical_map,
                     eplb_model_state.model.expert_weights,
                     ep_group,
+                    eplb_model_state.communicator,
                     is_profile,
                     rank_mapping,
                 )
 
                 if not is_profile:
-                    # Explicitly synchronize the CUDA device so that all pending
-                    # NCCL P2P expert-weight transfers (queued by
-                    # rearrange_expert_weights_inplace) complete before we update
-                    # the routing maps.  Without this, the first blocking copy()
-                    # inside _commit_eplb_maps / _pad_out_tensor would implicitly
-                    # synchronize, causing an unexpected ~300 s stall on PCIe-only
-                    # hardware (e.g. L4 GPUs connected only via PCIe).
-                    torch.cuda.synchronize()
                     _commit_eplb_maps(
                         eplb_model_state,
                         new_physical_to_logical_map=new_physical_to_logical_map,
@@ -953,26 +938,17 @@ class EplbState:
             else:
                 precomputed_async_map = None
                 if callback_graph_required:
-                    # Custom callback graph paths can invoke Python/METIS work
-                    # that is safe on the synchronized main thread but fragile
-                    # in the async transfer thread. Precompute the new mapping
-                    # here and let the async worker handle only weight transfer.
                     if (
                         callback_coactivation_edges is not None
                         and hasattr(self.policy, "set_graph_metadata")
                     ):
-                        graph_metadata = {
+                        self.policy.set_graph_metadata({
                             "coactivation_edges": callback_coactivation_edges,
-                            "node_activation_counts": (
-                                callback_node_activation_counts
-                                if callback_node_activation_counts is not None
-                                else None
-                            ),
+                            "node_activation_counts": callback_node_activation_counts,
                             "num_layers": eplb_model_state.model.num_moe_layers,
                             "num_experts": eplb_model_state.model.num_logical_experts,
                             "num_gpus": num_gpus,
-                        }
-                        self.policy.set_graph_metadata(graph_metadata)
+                        })
                     precomputed_async_map = self.policy.rebalance_experts(
                         global_expert_load_window.cpu(),
                         num_replicas,
@@ -981,7 +957,6 @@ class EplbState:
                         num_gpus,
                         eplb_model_state.physical_to_logical_map.cpu(),
                     )
-
                 eplb_model_state.eplb_stats = EplbStats(
                     # We copy the tensor to snapshot the global_expert_load_window
                     # on the main thread so that async worker can access it safely
@@ -1002,25 +977,14 @@ class EplbState:
                         else None
                     ),
                 )
-                if precomputed_async_map is None:
-                    # Record event after clone to signal async worker
-                    # that load stats data is ready.
-                    sync_event = torch.cuda.Event()
-                    sync_event.record()
-                    eplb_model_state.window_ready_event = sync_event
-                else:
-                    eplb_model_state.window_ready_event = None
                 eplb_model_state.new_physical_to_logical_map = precomputed_async_map
-
                 eplb_model_state.rebalanced = True
-                eplb_model_state.layer_to_transfer = 0
-                eplb_model_state.pending_global_ready_check = True
             if not is_profile:
                 eplb_model_state.coactivation_edge_pass.zero_()
                 eplb_model_state.node_activation_count_pass.zero_()
-        # Signal async thread to start transferring layers.
+        # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
-            self.rearrange_event.set()
+            self.rearrange_event.record()
         return None
 
     def start_async_loop(
@@ -1036,116 +1000,26 @@ class EplbState:
                 is_profile=is_profile,
             )
 
-    def _all_ranks_buffer_ready(self, model_state: EplbModelState) -> bool:
+    def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
         parallel_state = get_ep_group()
+        has_result = int(model_state.pending_result is not None)
+
         cpu_group = getattr(parallel_state, "cpu_group", None)
         if cpu_group is not None and cpu_group.size() > 1:
-            flag = torch.tensor(
-                (int(model_state.ep_buffer_ready),), dtype=torch.int32, device="cpu"
-            )
+            flag = torch.tensor((has_result,), dtype=torch.int32, device="cpu")
             all_reduce(flag, group=cpu_group)
             return int(flag.item()) == cpu_group.size()
 
         device_group = parallel_state.device_group
         if device_group.size() <= 1:
-            return bool(model_state.ep_buffer_ready)
+            return bool(has_result)
 
         device = getattr(
             parallel_state, "device", model_state.physical_to_logical_map.device
         )
-        flag = torch.tensor(
-            (int(model_state.ep_buffer_ready),), dtype=torch.int32, device=device
-        )
+        flag = torch.tensor((has_result,), dtype=torch.int32, device=device)
         all_reduce(flag, group=device_group)
         return int(flag.item()) == device_group.size()
-
-    def move_to_workspace(
-        self,
-        model_state: EplbModelState,
-        ep_group: ProcessGroup,
-        is_profile: bool = False,
-    ):
-        # We call move_to_workspace only when ep_buffer_ready is 1.
-        # It means we only need to wait for the lock for a short time.
-        max_retries = 6  # 1 minute max
-        retries = 0
-        while not model_state.buffer_lock.acquire(blocking=True, timeout=10.0):
-            retries += 1
-            if retries >= max_retries:
-                raise RuntimeError(
-                    f"Rank {ep_group.rank()}: buffer_lock timeout after "
-                    "{max_retries * 10}s"
-                )
-            logger.warning(
-                "Rank %d: EPLB buffer_lock acquire failed, retrying (%d/%d)",
-                ep_group.rank(),
-                retries,
-                max_retries,
-            )
-        try:
-            assert model_state.new_physical_to_logical_map is not None
-            expert_weights = model_state.model.expert_weights[
-                model_state.layer_to_transfer
-            ]
-            expert_weights_buffer = model_state.expert_buffer
-            new_indices = model_state.new_physical_to_logical_map[
-                model_state.layer_to_transfer
-            ].numpy()
-            move_from_buffer(
-                expert_weights=expert_weights,
-                expert_weights_buffers=expert_weights_buffer,
-                is_unchanged=model_state.is_unchanged,
-                is_received_locally=model_state.is_received_locally,
-                recv_metadata=model_state.recv_metadata,
-                new_indices=new_indices,
-                ep_rank=ep_group.rank(),
-            )
-            # Record event after consuming buffer to signal async thread
-            # that it's safe to overwrite the intermediate buffer
-            consumed_event = torch.cuda.Event()
-            consumed_event.record()
-            model_state.buffer_consumed_event = consumed_event
-
-            transferred_layer = model_state.layer_to_transfer
-            assert model_state.new_physical_to_logical_map is not None
-            _commit_eplb_maps_for_layer(
-                model_state,
-                new_physical_to_logical_map=model_state.new_physical_to_logical_map,
-                layer=transferred_layer,
-            )
-            # After the main thread consumes, advance layer_to_transfer
-            model_state.layer_to_transfer += 1
-            model_state.ep_buffer_ready = 0
-            logger.debug(
-                "model %s successfully move_to_workspace layer %d",
-                model_state.model_name,
-                transferred_layer,
-            )
-            if model_state.layer_to_transfer >= model_state.model.num_moe_layers:
-                self.post_eplb(model_state)
-                model_state.rebalanced = False
-                model_state.layer_to_transfer = 0
-                model_state.pending_global_ready_check = False
-                logger.info(
-                    "finish async transfer for model %s rank %d layer %d",
-                    model_state.model_name,
-                    ep_group.rank(),
-                    model_state.model.num_moe_layers,
-                )
-
-        finally:
-            try:
-                model_state.buffer_lock.release()
-            except Exception as e:
-                logger.error(
-                    "Rank %d: buffer_lock release failed in move_to_workspace: %s",
-                    ep_group.rank(),
-                    str(e),
-                )
-
-    def post_eplb(self, model_state: EplbModelState) -> None:
-        assert model_state.new_physical_to_logical_map is not None
-        model_state.new_physical_to_logical_map = None
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
         """
@@ -1174,18 +1048,9 @@ class EplbState:
             offset += shape[0]
         return all_reduce_list
 
-    def _sync_load_pass(self) -> list[torch.Tensor]:
-        """
-        Sync the expert load pass across all ranks for log stats.
-        Doesn't update the expert load pass in eplb_model_state.
-        """
-        load_pass_list = []
-        for eplb_model_state in self.model_states.values():
-            load_pass_list.append(eplb_model_state.expert_load_pass.clone())
-        return self._allreduce_list(load_pass_list)
-
-    def _allreduce_vector_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
-        """All-reduce a list of 1D tensors with potentially different lengths."""
+    def _allreduce_vector_list(
+        self, tensor_list: list[torch.Tensor]
+    ) -> list[torch.Tensor]:
         if len(tensor_list) == 1:
             all_reduce(tensor_list[0], group=get_ep_group().device_group)
             return tensor_list
@@ -1201,12 +1066,21 @@ class EplbState:
             offset += size
         return all_reduce_list
 
+    def _sync_load_pass(self) -> list[torch.Tensor]:
+        """
+        Sync the expert load pass across all ranks for log stats.
+        Doesn't update the expert load pass in eplb_model_state.
+        """
+        load_pass_list = []
+        for eplb_model_state in self.model_states.values():
+            load_pass_list.append(eplb_model_state.expert_load_pass.clone())
+        return self._allreduce_list(load_pass_list)
+
     def record_coactivation_graph(
         self,
         coactivation_edges: torch.Tensor,
         node_activation_counts: torch.Tensor,
     ) -> None:
-        """Accumulate local co-activation graph stats on the forward path."""
         if not self.model_states:
             return
         model_state = next(iter(self.model_states.values()))
@@ -1217,10 +1091,12 @@ class EplbState:
                 tuple(coactivation_edges.shape),
             )
             return
-        if model_state.node_activation_count_pass.shape != node_activation_counts.shape:
+        if (
+            model_state.node_activation_count_pass.shape
+            != node_activation_counts.shape
+        ):
             logger.warning(
-                "Skipping node-activation accumulation due to shape mismatch: "
-                "%s vs %s",
+                "Skipping node-activation accumulation due to shape mismatch: %s vs %s",
                 tuple(model_state.node_activation_count_pass.shape),
                 tuple(node_activation_counts.shape),
             )
@@ -1283,6 +1159,17 @@ class EplbLayerState:
     expert_load_view: torch.Tensor | None = None
     logical_to_physical_map: torch.Tensor | None = None
     logical_replica_count: torch.Tensor | None = None
+    should_record_tensor: torch.Tensor | None = None
+    """
+    Shared scalar bool tensor controlling whether to accumulate expert load
+    metrics during this forward pass.  All layers reference the **same**
+    tensor object, which is owned and updated by :class:`EplbState`.
+
+    Set to ``False`` for the first ``step_interval - window_size`` steps of
+    each rearrangement period: those steps would be overwritten in the
+    sliding window before the next rearrangement, so recording them wastes
+    GPU work.
+    """
 
 
 def _node_count_with_rank_mapping(
@@ -1421,7 +1308,7 @@ def _commit_eplb_maps_for_layer(
     """
 
     # Commit physical_to_logical_map
-    src = new_physical_to_logical_map[layer]
+    src = new_physical_to_logical_map
     dst = model_state.physical_to_logical_map[layer]
     assert src.shape == dst.shape, (
         "The number of physical experts must stay the same while running Async EPLB. "
@@ -1480,3 +1367,31 @@ def _commit_eplb_maps(
     src = new_replica_count
     dst = model_state.logical_replica_count
     dst.copy_(src, non_blocking=True)
+
+
+def _move_to_workspace(
+    model_state: EplbModelState,
+    ep_rank: int,
+) -> None:
+    result = model_state.pending_result
+    assert result is not None
+    move_from_buffer(
+        expert_weights=model_state.model.expert_weights[result.layer_idx],
+        expert_weights_buffers=model_state.expert_buffer,
+        transfer_metadata=result.transfer_metadata,
+        new_indices=result.new_physical_to_logical_map.numpy(),
+        ep_rank=ep_rank,
+    )
+
+    _commit_eplb_maps_for_layer(
+        model_state,
+        new_physical_to_logical_map=result.new_physical_to_logical_map,
+        layer=result.layer_idx,
+    )
+
+    if result.layer_idx == model_state.model.num_moe_layers - 1:
+        model_state.rebalanced = False
+
+    # Reset pending_result before unblocking the async worker
+    model_state.pending_result = None
+    result.consumed_event.record()

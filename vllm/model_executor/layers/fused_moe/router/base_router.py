@@ -5,76 +5,141 @@ from collections.abc import Callable
 
 import torch
 
-# ###### STyGIANet #######
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.genome.fused_moe.router_capture import (
     maybe_capture_routing,
     record_expert_load,
     record_expert_load_ranges,
 )
-from vllm.forward_context import get_forward_context, is_forward_context_available
-# ###### /STyGIANet #######
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 
 if current_platform.is_cuda_alike():
 
-    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-    def eplb_map_to_physical(
-        topk_ids: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Map the logical expert ids to physical expert ids
-        and record the expert load metrics.
+    @triton.jit
+    def _eplb_map_and_record_i32_kernel(
+        topk_ids_ptr,
+        logical_replica_count_ptr,
+        logical_to_physical_ptr,
+        out_ids_ptr,
+        out_ptr,
+        record_enabled_ptr,
+        num_logical_experts,
+        map_slots,
+        out_size,
+        numel,
+        num_active_experts,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < numel
 
-        This will select a pseudo-random replica for each logical expert.
-        Only used for EPLB.
-
-        Args:
-            topk_ids: The logical expert ids.
-            logical_to_physical_map: The logical to physical map.
-            logical_replica_count: The logical replica count.
-
-        Returns:
-            The physical expert ids.
-        """
+        expert_id = tl.load(topk_ids_ptr + offs, mask=mask, other=0).to(tl.int64)
+        valid_expert = (expert_id >= 0) & (expert_id < num_logical_experts)
+        safe_expert_id = tl.where(valid_expert, expert_id, 0)
 
         # 1. Convert the logical expert ids to physical expert ids
-        # Directly select a random replica for each logical expert
-
-        # In case `indices_type` is not `torch.long` or `torch.int`,
-        # e.g. `torch.uint32` as required by dispatch/combine kernels
-        topk_ids_long = topk_ids.long()
-        # Use (token position) modulo (replica count)
-        # to deterministically choose a replica
-        replica_count = logical_replica_count[topk_ids_long]
-        # Flatten-position based index, reshaped back to `topk_ids` shape
-        pos_indices = torch.arange(
-            topk_ids.numel(), device=topk_ids.device, dtype=torch.long
-        ).reshape_as(topk_ids)
-        # Compute pseudo-random indices by modulo
-        replica_indices = (pos_indices % replica_count).unsqueeze(-1)
-        physical_ids = (
-            logical_to_physical_map[topk_ids_long]
-            .gather(-1, replica_indices)
-            .squeeze(-1)
+        replica_count = tl.load(
+            logical_replica_count_ptr + safe_expert_id,
+            mask=mask & valid_expert,
+            other=1,
         )
+        # Avoid invalid modulo/div by forcing at least 1.
+        replica_count = tl.maximum(replica_count, 1)
+        # floor(2^32 / phi), classic Knuth multiplicative hash multiplier.
+        KNUTH_MULTIPLIER = 2654435769
+        token_idx = (offs // num_active_experts).to(tl.int64)
+        hashed = (token_idx * KNUTH_MULTIPLIER) & 0xFFFFFFFF
+        replica_idx = hashed % replica_count
 
-        topk_ids = physical_ids
-        return topk_ids
-else:
+        # 2. Record expert load metrics.
 
-    def eplb_map_to_physical(
+        # TODO(bowen): When using `FusedMoEModularKernel`, this
+        # can be done in a more unified way, since
+        # `FusedMoEPrepareAndFinalize` will return the expert
+        # token count, in some cases directly from the kernel.
+        # However, now there are many code paths not using
+        # the modular kernel, e.g. calling `fused_experts`,
+        # so we decide to keep the logic here.
+        #
+        # If later refactor moved all the MoE kernel calls
+        # to the modular kernel, we can move this logic there
+        # to achieve better efficiency.
+        map_index = safe_expert_id * map_slots + replica_idx
+        physical_id = tl.load(
+            logical_to_physical_ptr + map_index,
+            mask=mask & valid_expert,
+            other=-1,
+        )
+        tl.store(out_ids_ptr + offs, physical_id, mask=mask)
+
+        record_enabled = tl.load(record_enabled_ptr) != 0
+        valid = mask & record_enabled & (physical_id >= 0) & (physical_id < out_size)
+        safe_physical_id = tl.where(physical_id >= 0, physical_id, 0)
+        tl.atomic_add(out_ptr + safe_physical_id, 1, mask=valid)
+
+    def _eplb_map_and_record_triton(
         topk_ids: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
+        expert_load_view: torch.Tensor,
+        record_enabled: torch.Tensor,
     ) -> torch.Tensor:
-        # CPU fallback: no EPLB so just return as is
+        topk_ids_in = topk_ids.contiguous().to(dtype=torch.int32)
+        numel = topk_ids_in.numel()
+        if numel == 0:
+            return topk_ids
+        num_active_experts = topk_ids_in.shape[-1]
+        out_flat = torch.empty((numel,), device=topk_ids.device, dtype=topk_ids.dtype)
+        grid = lambda meta: (triton.cdiv(numel, meta["BLOCK_SIZE"]),)
+        assert expert_load_view.is_contiguous()
+        _eplb_map_and_record_i32_kernel[grid](
+            topk_ids_in,
+            logical_replica_count.contiguous(),
+            logical_to_physical_map.contiguous(),
+            out_flat,
+            expert_load_view,
+            record_enabled,
+            logical_replica_count.shape[0],
+            logical_to_physical_map.shape[1],
+            expert_load_view.shape[0],
+            numel,
+            num_active_experts,
+            BLOCK_SIZE=256,
+        )
+        return out_flat.reshape(topk_ids.shape)
+
+    def eplb_map_to_physical_and_record(
+        topk_ids: torch.Tensor,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+        record_enabled: torch.Tensor,
+    ) -> torch.Tensor:
+        # Fused triton implementation: mapping + optional recording in one kernel.
+        return _eplb_map_and_record_triton(
+            topk_ids=topk_ids,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
+            expert_load_view=expert_load_view,
+            record_enabled=record_enabled,
+        )
+else:
+
+    def eplb_map_to_physical_and_record(
+        topk_ids: torch.Tensor,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+        record_enabled: torch.Tensor,
+    ) -> torch.Tensor:
         return topk_ids
+
 
 class BaseRouter(FusedMoERouter):
     """
@@ -109,15 +174,11 @@ class BaseRouter(FusedMoERouter):
         self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
         self._layer_id = layer_id
-        # ###### STyGIANet #######
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
-        # ###### /STyGIANet #######
 
-    # ###### STyGIANet #######
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
         self.capture_fn = capture_fn
-    # ###### /STyGIANet #######
 
     def _validate_eplb_state(self) -> None:
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
@@ -132,6 +193,10 @@ class BaseRouter(FusedMoERouter):
                 raise ValueError(
                     "enable_eplb=True requires logical_replica_count != None"
                 )
+            if self.eplb_state.should_record_tensor is None:
+                raise ValueError(
+                    "enable_eplb=True requires should_record_tensor != None"
+                )
 
     def _get_indices_type(self) -> torch.dtype | None:
         """Get the desired indices dtype from the getter function."""
@@ -139,58 +204,64 @@ class BaseRouter(FusedMoERouter):
             self.indices_type_getter() if self.indices_type_getter is not None else None
         )
 
-    def _apply_eplb_mapping(
-        self,
-        topk_ids: torch.Tensor,
-        *,
-        record_load: bool = True,
-    ) -> torch.Tensor:
+    def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
         if self.enable_eplb:
             assert self.eplb_state.expert_load_view is not None
             assert self.eplb_state.logical_to_physical_map is not None
             assert self.eplb_state.logical_replica_count is not None
-            physical_topk_ids = eplb_map_to_physical(
+            assert self.eplb_state.should_record_tensor is not None
+            prefill_record_ranges: list[tuple[int, int]] | None = None
+            skip_expert_load = False
+            if is_forward_context_available():
+                forward_context = get_forward_context()
+                if bool(
+                    forward_context.additional_kwargs.get(
+                        "routing_capture_skip_expert_load", False
+                    )
+                ):
+                    skip_expert_load = True
+                elif bool(
+                    forward_context.additional_kwargs.get(
+                        "routing_capture_prefill_only_for_placement", False
+                    )
+                ):
+                    prefill_record_ranges = list(
+                        forward_context.additional_kwargs.get(
+                            "routing_capture_prefill_ranges", []
+                        )
+                    )
+
+            if skip_expert_load or prefill_record_ranges is not None:
+                record_disabled = torch.zeros_like(
+                    self.eplb_state.should_record_tensor
+                )
+                physical_topk_ids = eplb_map_to_physical_and_record(
+                    topk_ids=topk_ids,
+                    logical_to_physical_map=self.eplb_state.logical_to_physical_map,
+                    logical_replica_count=self.eplb_state.logical_replica_count,
+                    expert_load_view=self.eplb_state.expert_load_view,
+                    record_enabled=record_disabled,
+                )
+                if not skip_expert_load:
+                    if prefill_record_ranges is None:
+                        record_expert_load(
+                            physical_topk_ids, self.eplb_state.expert_load_view
+                        )
+                    else:
+                        record_expert_load_ranges(
+                            physical_topk_ids,
+                            self.eplb_state.expert_load_view,
+                            prefill_record_ranges,
+                        )
+                return physical_topk_ids
+            return eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
                 logical_to_physical_map=self.eplb_state.logical_to_physical_map,
                 logical_replica_count=self.eplb_state.logical_replica_count,
+                expert_load_view=self.eplb_state.expert_load_view,
+                record_enabled=self.eplb_state.should_record_tensor,
             )
-
-            if record_load:
-                # ###### STyGIANet #######
-                prefill_record_ranges: list[tuple[int, int]] | None = None
-                if is_forward_context_available():
-                    forward_context = get_forward_context()
-                    if bool(
-                        forward_context.additional_kwargs.get(
-                            "routing_capture_skip_expert_load", False
-                        )
-                    ):
-                        return physical_topk_ids
-                    capture_prefill_only = bool(
-                        forward_context.additional_kwargs.get(
-                            "routing_capture_prefill_only_for_placement", False
-                        )
-                    )
-                    if capture_prefill_only:
-                            prefill_record_ranges = list(
-                                forward_context.additional_kwargs.get(
-                                    "routing_capture_prefill_ranges", []
-                                )
-                            )
-                # ###### /STyGIANet #######
-
-                if prefill_record_ranges is None:
-                    record_expert_load(
-                        physical_topk_ids, self.eplb_state.expert_load_view
-                    )
-                else:
-                    record_expert_load_ranges(
-                        physical_topk_ids,
-                        self.eplb_state.expert_load_view,
-                        prefill_record_ranges,
-                    )
-            return physical_topk_ids
         return topk_ids
 
     def _convert_indices_dtype(
@@ -203,21 +274,14 @@ class BaseRouter(FusedMoERouter):
         assert topk_ids.dtype == indices_type or indices_type is None
         return topk_ids
 
-    # ###### STyGIANet #######
-    def _maybe_capture_routing(
-        self,
-        topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor | None = None,
-    ) -> None:
-        maybe_capture_routing(self._layer_id, topk_ids, topk_weights)
-    # ###### /STyGIANet #######
-
     @abstractmethod
     def _compute_routing(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute the actual routing logic.
@@ -239,6 +303,8 @@ class BaseRouter(FusedMoERouter):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
@@ -268,17 +334,13 @@ class BaseRouter(FusedMoERouter):
 
         # Step 3: Compute routing (delegated to subclass)
         topk_weights, topk_ids = self._compute_routing(
-            hidden_states, router_logits, indices_type
+            hidden_states, router_logits, indices_type, input_ids=input_ids
         )
-
-        # ###### STyGIANet #######
-        # Capture logical ids before EPLB mapping.
-        self._maybe_capture_routing(topk_ids, topk_weights)
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
-        # ###### /STyGIANet #######
+        maybe_capture_routing(self._layer_id, topk_ids, topk_weights)
 
         # Step 4: Apply EPLB mapping
         topk_ids = self._apply_eplb_mapping(topk_ids)
@@ -287,20 +349,3 @@ class BaseRouter(FusedMoERouter):
         topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
 
         return topk_weights, topk_ids
-
-    # ###### STyGIANet #######
-    def peek_experts(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute expert routing without mutating capture or EPLB load state."""
-        self._validate_eplb_state()
-        indices_type = self._get_indices_type()
-        topk_weights, topk_ids = self._compute_routing(
-            hidden_states, router_logits, indices_type
-        )
-        topk_ids = self._apply_eplb_mapping(topk_ids, record_load=False)
-        topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
-        return topk_weights, topk_ids
-    # ###### /STyGIANet #######
