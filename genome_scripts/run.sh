@@ -10,7 +10,7 @@ export PLACEMENT_PATH="${SCRIPT_DIR}/expert-placement/placement_fns.py"
 export NCCL_IB_DISABLE=1
 # for eplb step interval runtime update
 export VLLM_SERVER_DEV_MODE=1
-export VLLM_SKIP_DEEPEP_WARMUP=1
+# export VLLM_SKIP_DEEPEP_WARMUP=1
 # export NVSHMEM_DIR=/usr/local/nvshmem
 # export LD_LIBRARY_PATH=/usr/local/nvshmem/lib:${LD_LIBRARY_PATH}
 # export DEEP_EP_CPU_TIMEOUT_SECS=${DEEP_EP_CPU_TIMEOUT_SECS:-600}
@@ -19,6 +19,22 @@ export VLLM_SKIP_DEEPEP_WARMUP=1
 # export CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING:-0}
 # export VLLM_PREFIX_LEARNING_DUMMY_OWNER=1
 # export VLLM_FUSED_MOE_SLEEP_BEFORE_DISPATCH_MS=2.5
+
+
+#### NCCL ####
+export NCCL_IB_GID_INDEX=3
+
+export NCCL_IB_DISABLE=1
+export NCCL_SHM_DISABLE=0
+export NCCL_P2P_DISABLE=0
+
+export NCCL_PXN_DISABLE=1
+export NCCL_NET_GDR_LEVEL=SYS
+
+export NCCL_CHECKS_DISABLE=1
+export NCCL_RUNTIME_CONNECT=0
+
+########
 
 export TRACE_DIR=${SCRIPT_DIR}/traces/
 export TRAFFIC_DIR=${SCRIPT_DIR}/traffic/
@@ -39,7 +55,7 @@ vllm serve $MODEL \
 		--kv-block-prefix-routing-weight 0.5 \
 		--load-score-routing-weight 0.5 \
 		--enable-eplb \
-		--eplb-config '{"use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0}' \
+		--eplb-config '{"use_async":true,"step_interval":64,"window_size":1000,"num_redundant_experts":0}' \
 		# --eplb-config '{"policy":"custom","use_async":true,"step_interval":30,"window_size":1000,"num_redundant_experts":0,"graph_ema_alpha":0.5}' \
 		# --placement-callback-path ${PLACEMENT_PATH} \
 		# --placement-callback-func compute_placement \

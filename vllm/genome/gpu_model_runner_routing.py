@@ -410,6 +410,12 @@ class GenomeRoutingPlacementRunnerMixin:
             "physical_to_logical_map": physical_to_logical_map_list,
         }
 
+    def _needs_genome_model_runner_output_fields(self) -> bool:
+        return bool(
+            self.model_config.enable_prefix_affinity_routing
+            or self.model_config.enable_return_routed_experts
+        )
+
     def setup_eplb_from_mapping(
         self,
         expanded_physical_to_logical: torch.Tensor,

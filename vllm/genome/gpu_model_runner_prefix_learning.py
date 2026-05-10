@@ -772,6 +772,26 @@ class GenomePrefixLearningCaptureRunnerMixin:
         use_snapshot_prefix_learning = (
             self._uses_placement_snapshot_for_prefix_learning()
         )
+        enable_prefix_learning = bool(
+            self.model_config.enable_prefix_affinity_routing
+        )
+
+        if capturer is None and not enable_prefix_learning:
+            for module in self.compilation_config.static_forward_context.values():
+                if isinstance(module, FusedMoE) and isinstance(
+                    module.router, BaseRouter
+                ):
+                    module.router.set_capture_fn(None)
+
+            self._prefix_learning_num_layers = 0
+            self._prefix_learning_num_experts = 0
+            self._prefix_learning_seen_pairs_buffer = None
+            self._prefix_learning_owner_counts_buffer = None
+            self._prefix_learning_req_slot_by_id = {}
+            self._prefix_learning_req_id_by_slot = []
+            self._prefix_learning_free_slots = []
+            return
+
         self._prefix_learning_num_layers = 0
         self._prefix_learning_num_experts = 0
         for module in self.compilation_config.static_forward_context.values():

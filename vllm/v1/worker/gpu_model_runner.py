@@ -4466,10 +4466,22 @@ class GPUModelRunner(
                     num_tokens_no_spec=self.input_batch.num_tokens_no_spec,
                     max_model_len=self.max_model_len,
                 )
-            genome_output_fields = self._build_genome_model_runner_output_fields(
-                self._current_prefill_capture_ranges,
-                self._current_prefill_capture_req_ids,
-            )
+            if self._needs_genome_model_runner_output_fields():
+                genome_output_fields = self._build_genome_model_runner_output_fields(
+                    self._current_prefill_capture_ranges,
+                    self._current_prefill_capture_req_ids,
+                )
+            else:
+                self._current_prefill_capture_ranges = []
+                self._current_prefill_capture_req_ids = []
+                genome_output_fields = {
+                    "routed_experts_step": None,
+                    "routed_experts_step_indices": None,
+                    "prefix_learning_pairs_by_req": None,
+                    "prefix_learning_owner_by_req": None,
+                    "async_prefix_learning_owner_by_req": None,
+                    "prefix_router_placement_update": None,
+                }
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -7096,8 +7108,11 @@ class GPUModelRunner(
         return 0
 
     def init_routed_experts_capturer(self):
+        enable_capture = self._needs_prefill_capture_metadata()
         logger.info(
-            "Initializing routed experts capturer, enable_return_routed_experts: %s",
+            "Initializing routed experts capturer, enable_capture=%s "
+            "enable_return_routed_experts=%s",
+            enable_capture,
             self.model_config.enable_return_routed_experts,
         )
         from vllm.distributed import get_tp_group
@@ -7109,7 +7124,7 @@ class GPUModelRunner(
 
         tp_group = get_tp_group()
         init_routed_experts_capturer_with_shared_cache(
-            enable=self.model_config.enable_return_routed_experts,
+            enable=enable_capture,
             model_config=self.model_config,
             num_fused_shared_experts=num_fused_shared_experts,
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
@@ -7120,14 +7135,17 @@ class GPUModelRunner(
         )
         self._bind_routed_experts_capturer()
         self._bind_router_capture_hooks(None)
-        self.routed_experts_initialized = True
+        self.routed_experts_initialized = enable_capture
 
-        # Pinned CPU buffer for async positions D2H (avoids sync .cpu() call)
-        self._positions_cpu = torch.empty(
-            self.scheduler_config.max_num_batched_tokens,
-            dtype=torch.long,
-            pin_memory=True,
-        )
+        if enable_capture:
+            # Pinned CPU buffer for async positions D2H (avoids sync .cpu() call)
+            self._positions_cpu = torch.empty(
+                self.scheduler_config.max_num_batched_tokens,
+                dtype=torch.long,
+                pin_memory=True,
+            )
+        else:
+            self._positions_cpu = None
 
     def _bind_routed_experts_capturer(self) -> None:
         from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (

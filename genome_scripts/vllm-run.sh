@@ -35,3 +35,4 @@ mpirun -np 8 -H \
 
 
 # vllm serve deepseek-ai/deepseek-moe-16b-chat --trust-remote-code --max-model-len 4096 --max-num-seqs 64 --data-parallel-size 2 --enable-expert-parallel --enable-elastic-ep --enable-dbo --dbo-decode-token-threshold 16 --dbo-prefill-token-threshold 256 --all2all-backend nixl_ep --enable-eplb
+# vllm serve deepseek-ai/deepseek-moe-16b-chat --trust-remote-code --max-num-seqs 1025 --max_num_batched_tokens 8192 --data-parallel-size 8 --enable-expert-parallel --all2all-backend nccl_alltoall --enable-eplb
