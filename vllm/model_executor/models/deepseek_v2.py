@@ -83,6 +83,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     extract_layer_index,
     sequence_parallel_chunk,
 )
@@ -1254,6 +1255,16 @@ class DeepseekV2Model(nn.Module):
 
         self.aux_hidden_state_layers = tuple[int, ...]()
 
+        # Needed by load_weights
+        qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
+        qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
+        self.use_mha = config.model_type == "deepseek" or all(
+            dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim)
+        )
+        self.num_redundant_experts = (
+            vllm_config.parallel_config.eplb_config.num_redundant_experts
+        )
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -1314,7 +1325,6 @@ class DeepseekV2Model(nn.Module):
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
-
 
 class DeepseekV2MixtureOfExperts(MixtureOfExperts):
     moe_mlp_layers: list[DeepseekV2MoE]
@@ -1479,7 +1489,6 @@ class DeepseekV2ForCausalLM(
             num_experts=self.config.n_routed_experts,
             num_redundant_experts=0,
         )
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         rocm_aiter_moe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
@@ -1698,8 +1707,6 @@ class DeepseekV2ForCausalLM(
                 loaded_params.add(name)
 
         return loaded_params
-
-
 class DeepseekForCausalLM(DeepseekV2ForCausalLM):
     pass
 
@@ -1723,6 +1730,8 @@ def get_spec_layer_idx_from_weight_name(
     ):
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx + i}."):
+            if weight_name.startswith(
+                f"model.layers.{layer_idx + i}."
+            ) or weight_name.startswith(f"layers.{layer_idx + i}."):
                 return layer_idx + i
     return None
