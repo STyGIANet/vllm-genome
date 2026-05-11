@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# Author: Vamsi Addanki @STyGIANet
+# Nothing fancy, just plain torch distributed alltoall
+# In view of being agnostic to Pcie,nvlink,rdma... NCCL takes care of it.
+
 from dataclasses import dataclass
 
 import torch
@@ -9,9 +13,6 @@ import torch.distributed as dist
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_ep_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.prepare_finalize.dispatch_sleep import (
-    maybe_sleep_before_dispatch,
-)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
@@ -30,20 +31,13 @@ class _NcclAllToAllHandle:
 
 def _quantize_and_setup_dispatch(
     a1: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
-    defer_input_quant: bool = False,
+    quant_config: FusedMoEQuantConfig | None,
+    defer_input_quant: bool,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if defer_input_quant:
+    if defer_input_quant or quant_config is None:
         return a1, None
 
-    input_sf = (
-        quant_config.a1_gscale
-        if quant_config.use_nvfp4_w4a4
-        else quant_config.a1_scale
-    )
-
-    # Delay nvfp4 scale swizzling until after all2all so the scale tensor keeps
-    # its row-aligned shape during dispatch.
+    input_sf = quant_config.a1_scale
     a1q, a1q_scale = moe_kernel_quantize_input(
         a1,
         input_sf,
@@ -57,10 +51,10 @@ def _quantize_and_setup_dispatch(
 
 def _prepare_scales_for_moe(
     a1q_scale: torch.Tensor | None,
-    quant_config: FusedMoEQuantConfig,
+    quant_config: FusedMoEQuantConfig | None,
 ) -> torch.Tensor | None:
-    if a1q_scale is None:
-        return None
+    if a1q_scale is None or quant_config is None:
+        return a1q_scale
 
     if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
         if a1q_scale.element_size() == 1:
@@ -117,30 +111,22 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         world_size = self.num_dispatchers_
         base = num_experts // world_size
         remainder = num_experts % world_size
-
         if base == 0:
             return physical_ids.long()
-
         if remainder == 0:
             return torch.div(physical_ids.long(), base, rounding_mode="floor")
-
         split = (base + 1) * remainder
         physical_ids_long = physical_ids.long()
         return torch.where(
             physical_ids_long < split,
             torch.div(physical_ids_long, base + 1, rounding_mode="floor"),
             remainder
-            + torch.div(
-                physical_ids_long - split,
-                base,
-                rounding_mode="floor",
-            ),
+            + torch.div(physical_ids_long - split, base, rounding_mode="floor"),
         )
 
     def _validate_static_configuration(self, num_experts: int) -> None:
         if self._validated_num_experts == num_experts:
             return
-
         if self.global_to_physical is not None:
             max_physical = int(self.global_to_physical.max().item())
             if max_physical >= num_experts:
@@ -149,38 +135,28 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     "the [0, num_experts) range. Redundant EPLB experts are not "
                     "supported by this backend yet."
                 )
-
         self._validated_num_experts = num_experts
 
     def _local_num_experts(
-        self,
-        expert_map: torch.Tensor | None,
-        num_experts: int,
+        self, expert_map: torch.Tensor | None, num_experts: int
     ) -> int:
         if expert_map is None:
             return num_experts
-
         key = (expert_map.data_ptr(), expert_map.numel())
         if key != self._cached_expert_map_key:
             self._cached_expert_map_key = key
             self._cached_local_num_experts = int(
-                torch.count_nonzero(expert_map >= 0).item())
+                torch.count_nonzero(expert_map >= 0).item()
+            )
         assert self._cached_local_num_experts is not None
         return self._cached_local_num_experts
 
-    def _all_to_all_counts(
-        self,
-        send_counts_tensor: torch.Tensor,
-    ) -> torch.Tensor:
+    def _all_to_all_counts(self, send_counts_tensor: torch.Tensor) -> torch.Tensor:
         ep_group = get_ep_group()
         group = ep_group.device_group
         assert group is not None
         recv_counts_tensor = torch.empty_like(send_counts_tensor)
-        dist.all_to_all_single(
-            recv_counts_tensor,
-            send_counts_tensor,
-            group=group,
-        )
+        dist.all_to_all_single(recv_counts_tensor, send_counts_tensor, group=group)
         return recv_counts_tensor
 
     def _all_to_all_tensor(
@@ -216,9 +192,15 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_experts: int,
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
-        quant_config: FusedMoEQuantConfig,
-        defer_input_quant: bool = False,
-    ) -> mk.PrepareResultType:
+        quant_config: FusedMoEQuantConfig | None,
+        defer_input_quant: bool,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        mk.ExpertTokensMetadata,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         self._validate_static_configuration(num_experts)
 
         if apply_router_weight_on_input:
@@ -240,7 +222,8 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         if topk == 1:
             dest_ranks = self._physical_expert_to_rank(
-                route_topk_ids.view(-1), num_experts)
+                route_topk_ids.view(-1), num_experts
+            )
             order = torch.argsort(dest_ranks)
             send_hidden_states = a1q.index_select(0, order)
             send_topk_ids = flat_topk_ids.index_select(0, order)
@@ -256,17 +239,17 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             flat_token_indices = token_indices.view(-1, 1).expand_as(topk_ids)
             flat_token_indices = flat_token_indices.reshape(-1)
             dest_ranks = self._physical_expert_to_rank(
-                flat_route_topk_ids, num_experts)
+                flat_route_topk_ids, num_experts
+            )
             order = torch.argsort(dest_ranks)
-            flat_hidden_states = a1q.index_select(0, flat_token_indices)
-            send_hidden_states = flat_hidden_states.index_select(0, order)
+            ordered_token_indices = flat_token_indices.index_select(0, order)
+            send_hidden_states = a1q.index_select(0, ordered_token_indices)
             send_topk_ids = flat_topk_ids.index_select(0, order)
-            sent_token_indices = flat_token_indices.index_select(0, order)
+            sent_token_indices = ordered_token_indices
             sent_topk_weights = flat_topk_weights.index_select(0, order)
             send_a1q_scale = None
             if a1q_scale is not None and a1q_scale.ndim != 0:
-                send_a1q_scale = a1q_scale.index_select(0, flat_token_indices)
-                send_a1q_scale = send_a1q_scale.index_select(0, order)
+                send_a1q_scale = a1q_scale.index_select(0, ordered_token_indices)
 
         send_counts_tensor = torch.bincount(
             dest_ranks, minlength=self.num_dispatchers_
@@ -274,8 +257,6 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         recv_counts_tensor = self._all_to_all_counts(send_counts_tensor)
         send_counts = send_counts_tensor.cpu().tolist()
         recv_counts = recv_counts_tensor.cpu().tolist()
-
-        maybe_sleep_before_dispatch()
 
         recv_hidden_states, hidden_work = self._all_to_all_tensor(
             send_hidden_states, send_counts, recv_counts, async_op=True
@@ -330,7 +311,7 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_tokens_meta,
             recv_topk_ids,
             (
-                torch.empty_like(recv_topk_ids, dtype=topk_weights.dtype)
+                torch.ones_like(recv_topk_ids, dtype=topk_weights.dtype)
                 if apply_router_weight_on_input
                 else torch.ones_like(recv_topk_ids, dtype=topk_weights.dtype)
             ),
@@ -343,7 +324,7 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+        weight_and_reduce_impl: TopKWeightAndReduceDelegate,
     ) -> None:
         assert self.handle is not None
 

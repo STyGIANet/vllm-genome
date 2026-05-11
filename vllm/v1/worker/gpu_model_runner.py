@@ -436,6 +436,17 @@ class GPUModelRunner(
         self._init_genome_prefix_learning_state()
         self.slot_mapping = None
 
+        if (
+            parallel_config.all2all_backend == "nccl_alltoall"
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            logger.warning_once(
+                "Disabling cudagraphs for all2all_backend=nccl_alltoall. "
+                "This backend uses dynamic host-side split metadata and is "
+                "not CUDA-graph safe."
+            )
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             cache_config.cache_dtype, self.model_config
         )

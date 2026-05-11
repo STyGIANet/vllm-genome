@@ -161,8 +161,8 @@ class NcclAllToAllManager(All2AllManagerBase):
         extra_tensors: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError(
-            "nccl_alltoall does not support monolithic router-logits dispatch. "
-            "Use a modular MoE kernel path."
+            "nccl_alltoall does not support monolithic router-logits "
+            "dispatch. Use a modular MoE kernel path."
         )
 
     def dispatch(
@@ -174,16 +174,16 @@ class NcclAllToAllManager(All2AllManagerBase):
         extra_tensors: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         raise NotImplementedError(
-            "nccl_alltoall token routing is implemented in the modular MoE "
-            "prepare/finalize path."
+            "nccl_alltoall token routing is implemented in the modular "
+            "MoE prepare/finalize path."
         )
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
         raise NotImplementedError(
-            "nccl_alltoall token combine is implemented in the modular MoE "
-            "prepare/finalize path."
+            "nccl_alltoall token combine is implemented in the modular "
+            "MoE prepare/finalize path."
         )
 
     def destroy(self):
