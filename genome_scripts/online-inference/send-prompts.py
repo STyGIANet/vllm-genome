@@ -24,7 +24,9 @@ from prompt_datasets import (
 # Change which prompt datasets to test in prompt_datasets.py at the end of the file
 
 HOST = os.getenv("VLLM_HOST", "http://127.0.0.1:8000")
-MODEL = os.getenv("VLLM_MODEL", "deepseek-ai/deepseek-moe-16b-chat")
+#MODEL = os.getenv("VLLM_MODEL", "deepseek-ai/deepseek-moe-16b-chat")
+#MODEL = os.getenv("VLLM_MODEL", "mistralai/Mixtral-8x7B-Instruct-v0.1")
+MODEL = os.getenv("VLLM_MODEL", "mistralai/Mixtral-8x22B-v0.1")
 
 POISSON_RATE_MODE = os.getenv("POISSON_RATE_MODE", "tok_per_sec")
 POISSON_REQUESTS_PER_SEC = float(os.getenv("POISSON_REQUESTS_PER_SEC", "1.0"))
@@ -34,12 +36,12 @@ POISSON_INPUT_TOKENS_PER_SEC = (
     if _poisson_input_tokens_per_sec.lower() == "none"
     else float(_poisson_input_tokens_per_sec)
 )
-CLIENT_CONN_LIMIT = int(os.getenv("CLIENT_CONN_LIMIT", "256"))
+CLIENT_CONN_LIMIT = int(os.getenv("CLIENT_CONN_LIMIT", "1024"))
 CLIENT_CONCURRENCY = int(os.getenv("CLIENT_CONCURRENCY", "128"))
 REQUEST_MAX_TOKENS = int(os.getenv("REQUEST_MAX_TOKENS", "1"))
 WARMUP_EPOCHS = int(os.getenv("WARMUP_EPOCHS", "0"))
 MEASURED_EPOCHS = int(os.getenv("MEASURED_EPOCHS", "1"))
-PRE_RUN_WARMUP_PROMPTS = int(os.getenv("PRE_RUN_WARMUP_PROMPTS", "8"))
+PRE_RUN_WARMUP_PROMPTS = int(os.getenv("PRE_RUN_WARMUP_PROMPTS", "100"))
 PRE_RUN_WARMUP_INPUT_TOKENS_PER_SEC = float(
     os.getenv("PRE_RUN_WARMUP_INPUT_TOKENS_PER_SEC", "2000")
 )
