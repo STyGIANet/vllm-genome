@@ -650,24 +650,6 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
-        if self.model_config.is_moe and self.parallel_config.data_parallel_size > 1:
-            num_single_prefill_warmups = 8
-            logger.info(
-                "Warming up single-request MoE DP prefill path for %d tokens "
-                "(%d iterations)",
-                self.model_runner.max_num_tokens,
-                num_single_prefill_warmups,
-            )
-            for _ in range(num_single_prefill_warmups):
-                self.model_runner._dummy_run(
-                    self.model_runner.max_num_tokens,
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                    force_attention=True,
-                    single_prefill_request=True,
-                    skip_eplb=True,
-                    remove_lora=False,
-                )
-
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
