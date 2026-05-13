@@ -16,10 +16,9 @@ class CustomRoutingRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
         custom_routing_function: Callable,
+        eplb_state: EplbLayerState | None = None,
         renormalize: bool = True,
-        enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
         layer_id: int | None = None,
     ):
@@ -27,7 +26,6 @@ class CustomRoutingRouter(BaseRouter):
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
             layer_id=layer_id,
         )

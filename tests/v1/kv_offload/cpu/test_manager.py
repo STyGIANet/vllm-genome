@@ -17,12 +17,13 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
-from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
 
 
-def make_req_context(kv_transfer_params: dict | None = None) -> ReqContext:
+def make_req_context(
+    req_id: str = "", kv_transfer_params: dict | None = None
+) -> ReqContext:
     """Create a ReqContext as production code would, from a request's params."""
-    return ReqContext(kv_transfer_params=kv_transfer_params)
+    return ReqContext(req_id=req_id, kv_transfer_params=kv_transfer_params)
 
 
 _EMPTY_REQ_CTX = make_req_context()
@@ -565,14 +566,14 @@ class TestARCPolicy:
 
 def test_filter_reused_manager():
     """
-    Tests FilterReusedOffloadingManager with a CPUOffloadingManager.
+    Tests CPUOffloadingManager reuse filtering (store_threshold=2).
     """
-    lru_manager = CPUOffloadingManager(
-        num_blocks=4, cache_policy="lru", enable_events=True
-    )
-
-    manager = FilterReusedOffloadingManager(
-        backing=lru_manager, store_threshold=2, max_tracker_size=3
+    manager = CPUOffloadingManager(
+        num_blocks=4,
+        cache_policy="lru",
+        enable_events=True,
+        store_threshold=2,
+        max_tracker_size=3,
     )
 
     # Lookup [1, 2] -> 1st time, added to tracker but not eligible for store yet

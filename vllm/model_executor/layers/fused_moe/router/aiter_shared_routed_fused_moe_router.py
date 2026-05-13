@@ -33,11 +33,10 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
         num_fused_shared_experts: int,
+        eplb_state: EplbLayerState | None = None,
         scoring_func: str = "softmax",
         renormalize: bool = True,
-        enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
         layer_id: int | None = None,
     ):
@@ -45,7 +44,6 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
             layer_id=layer_id,
         )

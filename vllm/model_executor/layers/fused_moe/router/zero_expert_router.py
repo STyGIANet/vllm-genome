@@ -32,14 +32,13 @@ class ZeroExpertRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
         e_score_correction_bias: torch.Tensor,
         num_logical_experts: int,
         zero_expert_type: str,
         scoring_func: str = "softmax",
         renormalize: bool = False,
         routed_scaling_factor: float = 1.0,
-        enable_eplb: bool = False,
+        eplb_state: EplbLayerState | None = None,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
         layer_id: int | None = None,
     ):
@@ -47,7 +46,6 @@ class ZeroExpertRouter(BaseRouter):
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
             layer_id=layer_id,
         )

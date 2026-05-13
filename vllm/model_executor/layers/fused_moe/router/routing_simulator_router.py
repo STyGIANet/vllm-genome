@@ -313,8 +313,7 @@ class RoutingSimulatorRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
-        enable_eplb: bool = False,
+        eplb_state: EplbLayerState | None = None,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
         layer_id: int | None = None,
     ):
@@ -322,7 +321,6 @@ class RoutingSimulatorRouter(BaseRouter):
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
             layer_id=layer_id,
         )
