@@ -1,0 +1,42 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR=$SCRIPT_DIR/..
+
+cd $REPO_DIR
+
+if [[ ! -d .venv/ ]];then
+	uv venv .venv
+fi
+
+source .venv/bin/activate
+uv pip install pip # later DeepEP will require pip
+#uv pip install -r requirements/build.txt
+#echo "build.txt done"
+uv pip install -r requirements/common.txt
+echo "common.txt done"
+
+uv pip install -r requirements/cuda.txt
+echo "cuda.txt done"
+
+uv pip install -r requirements/cuda-torch.txt
+echo "cuda-torch.txt done"
+
+uv pip install -r requirements/lint.txt
+echo "lint.txt done"
+
+uv pip install -r requirements/kv_connectors.txt
+echo "kv_connectors.txt done"
+
+VLLM_USE_PRECOMPILED=1 uv pip install -e .
+
+uv pip uninstall nvidia-nvshmem-cu12 nvidia-nvshmem-cu13
+uv pip install nvidia-nvshmem-cu13==3.6.5
+uv pip install packaging
+uv pip install pymetis
+uv pip install datasets hf_transfer
+uv pip install --upgrade transformers
+
+#cd ./DeepEP-SM8x
+#rm deep_ep_cpp.cpython-312-x86_64-linux-gnu.so
+#./install-deepep.sh

@@ -1,0 +1,684 @@
+from __future__ import annotations
+
+from typing import Any, Callable
+
+DatasetFormatter = Callable[[dict[str, Any]], dict[str, Any] | None]
+DatasetSpec = tuple[str, str | None, DatasetFormatter, str]
+
+MIXED_HOTPOT_BOOLQ_NAME = "synthetic/mixed_hotpot_boolq"
+BBH_ALL_NAME = "synthetic/bbh_all"
+SPEED_BENCH_NAME = "nvidia/SPEED-Bench"
+MIXED_DATASET_SHUFFLE_SEED = 17
+MIXED_DATASET_STRIDE = 10
+SPEED_BENCH_MASKED_SENTINEL = (
+    "FULL BENCHMARK DATA SHOULD BE FETCHED FROM THE SOURCE USING SPECDEC_BENCH"
+)
+
+
+def format_hotpotqa(ex):
+    try:
+        sentences = ex.get("context", {}).get("sentences", [])
+        flat = []
+
+        for para in sentences:
+            flat.extend(para)
+
+        context = " ".join(flat[:50])
+        question = ex.get("question", "")
+
+        return {
+            "question": f"{context}\n\nQuestion: {question}",
+            "choices": ["Yes", "No"],
+            "answer": 0,
+        }
+    except Exception:
+        return None
+
+
+def format_pubmedqa(ex):
+    try:
+        contexts = ex.get("context", {}).get("contexts", [])
+        context = " ".join(contexts[:5])
+
+        question = ex.get("question", "")
+
+        choices = ["yes", "no", "maybe"]
+        answer_map = {"yes": 0, "no": 1, "maybe": 2}
+
+        answer = answer_map.get(ex.get("final_decision", ""), 0)
+
+        return {
+            "question": f"{context}\n\nQuestion: {question}",
+            "choices": choices,
+            "answer": answer,
+        }
+    except Exception:
+        return None
+
+
+def format_arc(ex):
+    return {
+        "question": ex["question"],
+        "choices": ex["choices"]["text"],
+        "answer": ord(ex["answerKey"]) - ord("A"),
+    }
+
+
+def format_openbookqa(ex):
+    return {
+        "question": ex["question_stem"],
+        "choices": ex["choices"]["text"],
+        "answer": ord(ex["answerKey"]) - ord("A"),
+    }
+
+
+def format_csqa(ex):
+    return {
+        "question": ex["question"],
+        "choices": ex["choices"]["text"],
+        "answer": ord(ex["answerKey"]) - ord("A"),
+    }
+
+
+def format_boolq(ex):
+    return {
+        "question": ex["question"],
+        "choices": ["True", "False"],
+        "answer": 0 if ex["answer"] else 1,
+    }
+
+
+def format_piqa(ex):
+    return {
+        "question": ex["goal"],
+        "choices": [ex["sol1"], ex["sol2"]],
+        "answer": ex["label"],
+    }
+
+
+def format_mmlu(ex):
+    answer = ex["answer"]
+    if isinstance(answer, str):
+        answer = ord(answer.strip().upper()) - ord("A")
+
+    return {
+        "question": ex["question"],
+        "choices": list(ex["choices"]),
+        "answer": int(answer),
+    }
+
+
+def format_passthrough(ex):
+    return ex
+
+
+def format_humaneval(ex):
+    return {
+        "question": (
+            "Complete the following Python function.\n\n"
+            f"{ex['prompt']}"
+        ),
+    }
+
+
+def format_mbpp(ex):
+    prompt = ex.get("prompt") or ex.get("text") or ""
+    return {
+        "question": (
+            "Write Python code for the following task.\n\n"
+            f"{prompt}"
+        ),
+    }
+
+
+def format_gsm8k(ex):
+    return {
+        "question": ex["question"],
+    }
+
+
+def format_bbh(ex):
+    return {
+        "question": ex["input"],
+    }
+
+
+def format_speed_bench(ex):
+    turns = ex.get("turns") or []
+    cleaned_turns = [
+        turn.strip()
+        for turn in turns
+        if isinstance(turn, str)
+        and turn.strip()
+        and SPEED_BENCH_MASKED_SENTINEL not in turn
+    ]
+    if not cleaned_turns:
+        return None
+
+    if len(cleaned_turns) == 1:
+        question = cleaned_turns[0]
+    else:
+        question = "\n\n".join(
+            f"Turn {idx + 1}:\n{turn}"
+            for idx, turn in enumerate(cleaned_turns)
+        )
+
+    return {
+        "question": question,
+    }
+
+
+MMLU_SUBJECTS: list[str] = [
+    "abstract_algebra",
+    "anatomy",
+    "astronomy",
+    "business_ethics",
+    "clinical_knowledge",
+    "college_biology",
+    "college_chemistry",
+    "college_computer_science",
+    "college_mathematics",
+    "college_medicine",
+    "college_physics",
+    "computer_security",
+    "conceptual_physics",
+    "econometrics",
+    "electrical_engineering",
+    "elementary_mathematics",
+    "formal_logic",
+    "global_facts",
+    "high_school_biology",
+    "high_school_chemistry",
+    "high_school_computer_science",
+    "high_school_european_history",
+    "high_school_geography",
+    "high_school_government_and_politics",
+    "high_school_macroeconomics",
+    "high_school_mathematics",
+    "high_school_microeconomics",
+    "high_school_physics",
+    "high_school_psychology",
+    "high_school_statistics",
+    "high_school_us_history",
+    "high_school_world_history",
+    "human_aging",
+    "human_sexuality",
+    "international_law",
+    "jurisprudence",
+    "logical_fallacies",
+    "machine_learning",
+    "management",
+    "marketing",
+    "medical_genetics",
+    "miscellaneous",
+    "moral_disputes",
+    "moral_scenarios",
+    "nutrition",
+    "philosophy",
+    "prehistory",
+    "professional_accounting",
+    "professional_law",
+    "professional_medicine",
+    "professional_psychology",
+    "public_relations",
+    "security_studies",
+    "sociology",
+    "us_foreign_policy",
+    "virology",
+    "world_religions",
+]
+
+
+ALL_DATASETS: dict[str, DatasetSpec] = {
+    "mmlu_all": (
+        "cais/mmlu",
+        "all",
+        format_mmlu,
+        "test",
+    ),
+    "hotpot_qa_fullwiki": (
+        "hotpotqa/hotpot_qa",
+        "fullwiki",
+        format_hotpotqa,
+        "validation",
+    ),
+    "pubmed_qa_pqa_labeled": (
+        "qiaojin/PubMedQA",
+        "pqa_labeled",
+        format_pubmedqa,
+        "train",
+    ),
+    "arc_challenge": (
+        "allenai/ai2_arc",
+        "ARC-Challenge",
+        format_arc,
+        "validation",
+    ),
+    "arc_easy": (
+        "allenai/ai2_arc",
+        "ARC-Easy",
+        format_arc,
+        "validation",
+    ),
+    "openbookqa_main": (
+        "allenai/openbookqa",
+        "main",
+        format_openbookqa,
+        "validation",
+    ),
+    "commonsense_qa": (
+        "tau/commonsense_qa",
+        None,
+        format_csqa,
+        "validation",
+    ),
+    "boolq": (
+        "google/boolq",
+        None,
+        format_boolq,
+        "validation",
+    ),
+    "mixed_hotpot_boolq": (
+        MIXED_HOTPOT_BOOLQ_NAME,
+        None,
+        format_passthrough,
+        "validation",
+    ),
+    "bbh_all": (
+        BBH_ALL_NAME,
+        None,
+        format_passthrough,
+        "test",
+    ),
+    "piqa": (
+        "gimmaru/piqa",
+        None,
+        format_piqa,
+        "validation",
+    ),
+    "humaneval": (
+        "openai/openai_humaneval",
+        None,
+        format_humaneval,
+        "test",
+    ),
+    "mbpp_sanitized": (
+        "mbpp",
+        "sanitized",
+        format_mbpp,
+        "test",
+    ),
+    "gsm8k_main": (
+        "openai/gsm8k",
+        "main",
+        format_gsm8k,
+        "test",
+    ),
+    "speed_bench_qualitative": (
+        SPEED_BENCH_NAME,
+        "qualitative",
+        format_speed_bench,
+        "test",
+    ),
+    "speed_bench_throughput_1k": (
+        SPEED_BENCH_NAME,
+        "throughput_1k",
+        format_speed_bench,
+        "test",
+    ),
+    "speed_bench_throughput_2k": (
+        SPEED_BENCH_NAME,
+        "throughput_2k",
+        format_speed_bench,
+        "test",
+    ),
+    "speed_bench_throughput_8k": (
+        SPEED_BENCH_NAME,
+        "throughput_8k",
+        format_speed_bench,
+        "test",
+    ),
+    "speed_bench_throughput_16k": (
+        SPEED_BENCH_NAME,
+        "throughput_16k",
+        format_speed_bench,
+        "test",
+    ),
+    "speed_bench_throughput_32k": (
+        SPEED_BENCH_NAME,
+        "throughput_32k",
+        format_speed_bench,
+        "test",
+    ),
+}
+
+ALL_DATASETS.update(
+    {
+        f"mmlu_{subject}": (
+            "cais/mmlu",
+            subject,
+            format_mmlu,
+            "test",
+        )
+        for subject in MMLU_SUBJECTS
+    }
+)
+
+
+SEND_PROMPTS_DATASETS: list[DatasetSpec] = [
+    #ALL_DATASETS["speed_bench_qualitative"],
+    #ALL_DATASETS["speed_bench_throughput_1k"],
+    #ALL_DATASETS["speed_bench_throughput_2k"],
+    #ALL_DATASETS["speed_bench_throughput_8k"],
+    #ALL_DATASETS["speed_bench_throughput_16k"],
+    #ALL_DATASETS["speed_bench_throughput_32k"],
+    #ALL_DATASETS["gsm8k_main"],
+    #ALL_DATASETS["bbh_all"],
+    ALL_DATASETS["humaneval"],
+    ALL_DATASETS["hotpot_qa_fullwiki"],
+    #ALL_DATASETS["mmlu_all"],
+    # ALL_DATASETS["mixed_hotpot_boolq"],
+    # ALL_DATASETS["mmlu_abstract_algebra"],
+    # ALL_DATASETS["mmlu_astronomy"],
+    # ALL_DATASETS["mmlu_business_ethics"],
+    # ALL_DATASETS["mmlu_clinical_knowledge"],
+    # ALL_DATASETS["mmlu_college_biology"],
+    # ALL_DATASETS["mmlu_college_chemistry"],
+    # ALL_DATASETS["mmlu_conceptual_physics"],
+    # ALL_DATASETS["mmlu_elementary_mathematics"],
+    # ALL_DATASETS["mmlu_formal_logic"],
+    # ALL_DATASETS["mmlu_global_facts"],
+    # ALL_DATASETS["mmlu_high_school_biology"],
+    # ALL_DATASETS["mmlu_high_school_chemistry"],
+    # ALL_DATASETS["mmlu_high_school_computer_science"],
+    # ALL_DATASETS["mmlu_high_school_european_history"],
+    # ALL_DATASETS["mmlu_high_school_macroeconomics"],
+    # ALL_DATASETS["mmlu_high_school_microeconomics"],
+    # ALL_DATASETS["mmlu_high_school_psychology"],
+    # ALL_DATASETS["mmlu_high_school_us_history"],
+    # ALL_DATASETS["mmlu_high_school_world_history"],
+    # ALL_DATASETS["mmlu_human_aging"],
+    # ALL_DATASETS["mmlu_human_sexuality"],
+    # ALL_DATASETS["mmlu_international_law"],
+    # ALL_DATASETS["mmlu_jurisprudence"],
+    # ALL_DATASETS["mmlu_machine_learning"],
+    # ALL_DATASETS["mmlu_management"],
+    # ALL_DATASETS["mmlu_medical_genetics"],
+    # ALL_DATASETS["mmlu_moral_disputes"],
+    # ALL_DATASETS["mmlu_nutrition"],
+    # ALL_DATASETS["mmlu_prehistory"],
+    # ALL_DATASETS["mmlu_professional_medicine"],
+    # ALL_DATASETS["mmlu_professional_psychology"],
+    # ALL_DATASETS["mmlu_sociology"],
+    # ALL_DATASETS["mmlu_us_foreign_policy"],
+    # ALL_DATASETS["mmlu_world_religions"],
+    # ALL_DATASETS["openbookqa_main"],
+    # ALL_DATASETS["commonsense_qa"],
+    # ALL_DATASETS["boolq"],
+]
+
+    # ALL_DATASETS["piqa"],
+    # ALL_DATASETS["pubmed_qa_pqa_labeled"],
+    # ALL_DATASETS["arc_challenge"],
+    # ALL_DATASETS["arc_easy"],
+    # ALL_DATASETS["mmlu_anatomy"],
+    # ALL_DATASETS["mmlu_college_computer_science"],
+    # ALL_DATASETS["mmlu_college_mathematics"],
+    # ALL_DATASETS["mmlu_college_medicine"],
+    # ALL_DATASETS["mmlu_college_physics"],
+    # ALL_DATASETS["mmlu_computer_security"],
+    # ALL_DATASETS["mmlu_econometrics"],
+    # ALL_DATASETS["mmlu_electrical_engineering"],
+    # ALL_DATASETS["mmlu_high_school_geography"],
+    # ALL_DATASETS["mmlu_high_school_government_and_politics"],
+    # ALL_DATASETS["mmlu_high_school_mathematics"],
+    # ALL_DATASETS["mmlu_high_school_physics"],
+    # ALL_DATASETS["mmlu_high_school_statistics"],
+    # ALL_DATASETS["mmlu_logical_fallacies"],
+    # ALL_DATASETS["mmlu_marketing"],
+    # ALL_DATASETS["mmlu_miscellaneous"],
+    # ALL_DATASETS["mmlu_moral_scenarios"],
+    # ALL_DATASETS["mmlu_philosophy"],
+    # ALL_DATASETS["mmlu_professional_accounting"],
+    # ALL_DATASETS["mmlu_professional_law"],
+    # ALL_DATASETS["mmlu_public_relations"],
+    # ALL_DATASETS["mmlu_security_studies"],
+    # ALL_DATASETS["mmlu_virology"],
+
+
+WEIGHTS_EXPERIMENT_DATASETS: list[DatasetSpec] = [
+    ALL_DATASETS["mmlu_abstract_algebra"],
+    ALL_DATASETS["hotpot_qa_fullwiki"],
+    ALL_DATASETS["pubmed_qa_pqa_labeled"],
+    ALL_DATASETS["arc_challenge"],
+    ALL_DATASETS["arc_easy"],
+    ALL_DATASETS["openbookqa_main"],
+    ALL_DATASETS["commonsense_qa"],
+    ALL_DATASETS["boolq"],
+    ALL_DATASETS["piqa"],
+]
+
+
+
+
+
+SYSTEM_PROMPTS = [
+
+"""You are a precise and technically rigorous assistant.
+
+Your primary objective is to deliver correct, logically sound, and well-structured answers.
+
+Guidelines:
+- Prioritize correctness over fluency.
+- Make assumptions explicit when necessary.
+- Distinguish clearly between intuition and formal reasoning.
+- Avoid vague or ambiguous statements.
+- Do not introduce unnecessary verbosity.
+
+When explaining technical content:
+- Use precise terminology.
+- Provide minimal but sufficient reasoning.
+- Highlight invariants, constraints, or edge cases when relevant.
+
+Formatting:
+- Use clean structure (paragraphs, bullets).
+- Keep explanations compact and direct.
+
+Always answer in English.
+""",
+
+"""You are an analytical assistant focused on clarity and correctness.
+
+Your role is to break down problems into structured reasoning steps and present results clearly.
+
+Instructions:
+- Decompose complex ideas into logical components.
+- Avoid hand-wavy explanations.
+- If a claim depends on assumptions, state them explicitly.
+- Prefer exactness over conversational tone.
+
+When dealing with algorithms or systems:
+- Explain the mechanism, not just the outcome.
+- Identify what drives correctness and performance.
+- Avoid redundancy.
+
+Style:
+- Concise but complete.
+- No filler language.
+- No unnecessary elaboration.
+
+Always respond in English.
+""",
+
+"""You are a disciplined and detail-oriented assistant.
+
+Your goal is to provide accurate, structured, and minimal explanations that preserve essential detail.
+
+Rules:
+- Do not over-explain simple ideas.
+- Do not under-explain subtle ones.
+- Maintain a balance between brevity and completeness.
+- Avoid speculative or uncertain claims unless explicitly marked.
+
+For technical explanations:
+- Clearly separate facts, reasoning, and conclusions.
+- Use consistent terminology.
+- Ensure internal logical consistency.
+
+Output style:
+- Clean, structured, and direct.
+- Prefer clarity over stylistic flair.
+
+Always answer in English.
+""",
+
+"""You are a high-precision assistant designed for technical reasoning.
+
+Objective:
+- Deliver answers that are correct, unambiguous, and logically coherent.
+
+Behavior:
+- Avoid unnecessary narrative or storytelling.
+- Focus on the core of the question.
+- Eliminate redundant phrasing.
+
+For problem-solving:
+- Identify key constraints first.
+- Build the explanation from first principles when needed.
+- Avoid skipping critical reasoning steps.
+
+Tone:
+- Neutral, direct, and controlled.
+- No embellishments.
+
+Always respond in English.
+""",
+
+"""You are a structured reasoning assistant.
+
+Your purpose is to produce answers that are logically organized and easy to follow.
+
+Expectations:
+- Organize responses into clear segments.
+- Maintain a strong logical flow.
+- Avoid digressions or irrelevant details.
+
+Technical responses should:
+- Identify the core idea.
+- Explain how components interact.
+- Emphasize correctness over intuition when needed.
+
+Constraints:
+- Do not repeat information unnecessarily.
+- Do not introduce ambiguity.
+
+Always answer in English.
+""",
+
+"""You are a clarity-first assistant with a focus on correctness.
+
+Your goal is to communicate ideas in a way that is both precise and easy to understand.
+
+Guidelines:
+- Start from the essential idea.
+- Refine toward precision.
+- Avoid both over-simplification and unnecessary complexity.
+
+When explaining:
+- Make implicit assumptions explicit.
+- Avoid vague qualifiers.
+- Ensure each statement is meaningful.
+
+Style:
+- Clean and minimal.
+- Structured where helpful.
+- No conversational filler.
+
+Always respond in English.
+""",
+
+"""You are a minimal and exact assistant.
+
+Your task is to provide answers that are concise, accurate, and free of ambiguity.
+
+Rules:
+- Every sentence must carry information.
+- Remove all non-essential words.
+- Avoid repetition.
+
+For technical content:
+- State only what is necessary for correctness.
+- Ensure definitions and reasoning are precise.
+- Do not rely on intuition alone.
+
+Tone:
+- Direct and controlled.
+- No stylistic embellishments.
+
+Always answer in English.
+""",
+
+"""You are a logically strict assistant.
+
+Your objective is to ensure every response is internally consistent and technically sound.
+
+Requirements:
+- Validate reasoning before presenting conclusions.
+- Avoid implicit leaps in logic.
+- Clearly connect cause and effect.
+
+When handling technical topics:
+- Focus on correctness guarantees.
+- Identify where assumptions matter.
+- Keep reasoning tight and explicit.
+
+Presentation:
+- Structured and compact.
+- No unnecessary commentary.
+
+Always respond in English.
+""",
+
+"""You are an efficiency-focused assistant.
+
+Your role is to maximize informational density while preserving clarity.
+
+Principles:
+- Deliver the most insight with the fewest words.
+- Avoid redundancy at all costs.
+- Keep explanations sharp and to the point.
+
+For explanations:
+- Focus on what changes understanding.
+- Skip obvious or trivial restatements.
+- Maintain precision.
+
+Output:
+- Compact and structured.
+- High signal, low noise.
+
+Always answer in English.
+""",
+
+"""You are a formal and precise assistant.
+
+Your goal is to produce responses that are clear, correct, and methodically structured.
+
+Instructions:
+- Maintain a formal tone.
+- Avoid conversational phrasing.
+- Ensure each statement is justified or self-evident.
+
+For technical reasoning:
+- Clearly define variables or concepts when needed.
+- Maintain consistency in notation and terminology.
+- Avoid ambiguity in phrasing.
+
+Formatting:
+- Use structure to improve readability.
+- Keep responses concise.
+
+Always respond in English.
+"""
+
+]
