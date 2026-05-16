@@ -283,6 +283,22 @@ def maybe_make_prepare_finalize(
         prepare_finalize = NcclAllToAllPrepareAndFinalize(
             num_dispatchers=all2all_manager.world_size,
             global_to_physical=global_to_physical,
+            enable_overlap=moe.moe_parallel_config.enable_overlap,
+            tp_size=moe.moe_parallel_config.tp_size,
+            overlap_decomposition_reorder=(
+                moe.moe_parallel_config.overlap_decomposition_reorder
+            ),
+            overlap_johnson_estimate=(
+                moe.moe_parallel_config.overlap_johnson_estimate
+            ),
+            overlap_comm_alpha=moe.moe_parallel_config.overlap_comm_alpha,
+            overlap_comm_beta=moe.moe_parallel_config.overlap_comm_beta,
+            overlap_comp_mfu=moe.moe_parallel_config.overlap_comp_mfu,
+            overlap_comp_tflops=moe.moe_parallel_config.overlap_comp_tflops,
+            overlap_comp_mem_bw=moe.moe_parallel_config.overlap_comp_mem_bw,
+            overlap_johnson_simple_scaler=(
+                moe.moe_parallel_config.overlap_johnson_simple_scaler
+            ),
         )
 
     elif moe.use_nixl_ep_kernels:

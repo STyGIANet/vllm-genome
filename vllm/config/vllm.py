@@ -1367,6 +1367,59 @@ class VllmConfig:
                 self.model_config.disable_cascade_attn = True
                 logger.warning_once("Disabling cascade attention when DBO is enabled.")
 
+        if self.parallel_config.enable_overlap:
+            assert self.parallel_config.all2all_backend == "nccl_alltoall", (
+                "--enable-overlap is only supported with "
+                "--all2all-backend=nccl_alltoall."
+            )
+            assert self.parallel_config.enable_expert_parallel, (
+                "--enable-overlap requires --enable-expert-parallel."
+            )
+            assert not self.parallel_config.use_ubatching, (
+                "--enable-overlap is incompatible with dual batch overlap."
+            )
+            assert self.parallel_config.overlap_decomposition_reorder in (
+                None,
+                "none",
+                "johnson",
+            ), "Unsupported --overlap-decomposition-reorder."
+            if self.parallel_config.overlap_johnson_estimate is not None:
+                assert self.parallel_config.overlap_decomposition_reorder == "johnson", (
+                    "--overlap-johnson-estimate requires "
+                    "--overlap-decomposition-reorder=johnson."
+                )
+                assert self.parallel_config.overlap_johnson_estimate in (
+                    "simple",
+                    "paper",
+                ), "Unsupported --overlap-johnson-estimate."
+                if self.parallel_config.overlap_johnson_estimate == "simple":
+                    scaler = self.parallel_config.overlap_johnson_simple_scaler
+                    assert scaler is not None and scaler >= 0, (
+                        "--overlap-johnson-simple-scaler must be defined and "
+                        "non-negative when --overlap-johnson-estimate=simple."
+                    )
+                if self.parallel_config.overlap_johnson_estimate == "paper":
+                    alpha = self.parallel_config.overlap_comm_alpha
+                    beta = self.parallel_config.overlap_comm_beta
+                    mfu = self.parallel_config.overlap_comp_mfu
+                    tflops = self.parallel_config.overlap_comp_tflops
+                    assert alpha is not None and alpha >= 0, (
+                        "--overlap-comm-alpha must be defined and non-negative "
+                        "when --overlap-johnson-estimate=paper."
+                    )
+                    assert beta is not None and beta >= 0, (
+                        "--overlap-comm-beta must be defined and non-negative "
+                        "when --overlap-johnson-estimate=paper."
+                    )
+                    assert mfu is not None and 0 < mfu <= 1.0, (
+                        "--overlap-comp-mfu must be in (0, 1] when "
+                        "--overlap-johnson-estimate=paper."
+                    )
+                    assert tflops is not None and tflops > 0, (
+                        "--overlap-comp-tflops must be positive when "
+                        "--overlap-johnson-estimate=paper."
+                    )
+
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 

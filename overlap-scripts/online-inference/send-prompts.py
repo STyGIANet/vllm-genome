@@ -25,12 +25,13 @@ from prompt_datasets import (
 
 HOST = os.getenv("VLLM_HOST", "http://127.0.0.1:8000")
 #MODEL = os.getenv("VLLM_MODEL", "deepseek-ai/deepseek-moe-16b-chat")
-#MODEL = os.getenv("VLLM_MODEL", "mistralai/Mixtral-8x7B-Instruct-v0.1")
-MODEL = os.getenv("VLLM_MODEL", "mistralai/Mixtral-8x22B-v0.1")
+#MODEL = os.getenv("VLLM_MODEL", "microsoft/Phi-3.5-MoE-instruct")
+MODEL = os.getenv("VLLM_MODEL", "mistralai/Mixtral-8x7B-Instruct-v0.1")
+#MODEL = os.getenv("VLLM_MODEL", "mistralai/Mixtral-8x22B-v0.1")
 
 POISSON_RATE_MODE = os.getenv("POISSON_RATE_MODE", "tok_per_sec")
 POISSON_REQUESTS_PER_SEC = float(os.getenv("POISSON_REQUESTS_PER_SEC", "1.0"))
-_poisson_input_tokens_per_sec = os.getenv("POISSON_INPUT_TOKENS_PER_SEC", "120000")
+_poisson_input_tokens_per_sec = os.getenv("POISSON_INPUT_TOKENS_PER_SEC", "90000")
 POISSON_INPUT_TOKENS_PER_SEC = (
     None
     if _poisson_input_tokens_per_sec.lower() == "none"
@@ -39,11 +40,18 @@ POISSON_INPUT_TOKENS_PER_SEC = (
 CLIENT_CONN_LIMIT = int(os.getenv("CLIENT_CONN_LIMIT", "1024"))
 CLIENT_CONCURRENCY = int(os.getenv("CLIENT_CONCURRENCY", "128"))
 REQUEST_MAX_TOKENS = int(os.getenv("REQUEST_MAX_TOKENS", "1"))
+MODEL_MAX_CONTEXT_TOKENS = int(os.getenv("MODEL_MAX_CONTEXT_TOKENS", "32768"))
+MAX_INPUT_TOKENS = int(
+    os.getenv(
+        "MAX_INPUT_TOKENS",
+        str(max(1, MODEL_MAX_CONTEXT_TOKENS - REQUEST_MAX_TOKENS)),
+    )
+)
 WARMUP_EPOCHS = int(os.getenv("WARMUP_EPOCHS", "0"))
 MEASURED_EPOCHS = int(os.getenv("MEASURED_EPOCHS", "1"))
-PRE_RUN_WARMUP_PROMPTS = int(os.getenv("PRE_RUN_WARMUP_PROMPTS", "100"))
+PRE_RUN_WARMUP_PROMPTS = int(os.getenv("PRE_RUN_WARMUP_PROMPTS", "2000"))
 PRE_RUN_WARMUP_INPUT_TOKENS_PER_SEC = float(
-    os.getenv("PRE_RUN_WARMUP_INPUT_TOKENS_PER_SEC", "2000")
+    os.getenv("PRE_RUN_WARMUP_INPUT_TOKENS_PER_SEC", "20000")
 )
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
@@ -263,17 +271,60 @@ def build_user_prompt(ex):
     return f"{ex['question']}\nAnswer concisely."
 
 
+def truncate_messages_to_input_budget(messages, max_input_tokens):
+    input_tokens = count_message_tokens(messages)
+    if input_tokens <= max_input_tokens:
+        return messages, input_tokens, False
+
+    truncated_messages = [dict(msg) for msg in messages]
+    if not truncated_messages:
+        return truncated_messages, input_tokens, False
+
+    target_idx = len(truncated_messages) - 1
+    content = truncated_messages[target_idx].get("content", "")
+    content_token_ids = tokenizer.encode(content, add_special_tokens=False)
+    base_messages = [dict(msg) for msg in truncated_messages]
+    base_messages[target_idx]["content"] = ""
+    base_tokens = count_message_tokens(base_messages)
+    allowed_content_tokens = max(0, max_input_tokens - base_tokens)
+
+    truncated_token_ids = content_token_ids[:allowed_content_tokens]
+    truncated_messages[target_idx]["content"] = tokenizer.decode(
+        truncated_token_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+    truncated_input_tokens = count_message_tokens(truncated_messages)
+
+    while truncated_input_tokens > max_input_tokens and truncated_token_ids:
+        overflow = truncated_input_tokens - max_input_tokens
+        truncated_token_ids = truncated_token_ids[:-max(overflow, 1)]
+        truncated_messages[target_idx]["content"] = tokenizer.decode(
+            truncated_token_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        truncated_input_tokens = count_message_tokens(truncated_messages)
+
+    return truncated_messages, truncated_input_tokens, True
+
+
 def prepare_example(ex):
     user_prompt = build_user_prompt(ex)
     messages = [
         {"role": "system", "content": "Always answer in English."}, # pick_sysprompt_random(SYSTEM_PROMPTS)
         {"role": "user", "content": user_prompt},
     ]
+    messages, input_tokens, was_truncated = truncate_messages_to_input_budget(
+        messages,
+        MAX_INPUT_TOKENS,
+    )
     return {
         **ex,
         "user_prompt": user_prompt,
         "messages": messages,
-        "input_tokens": count_message_tokens(messages),
+        "input_tokens": input_tokens,
+        "truncated_to_fit_context": was_truncated,
     }
 
 
@@ -453,7 +504,7 @@ async def run_pre_run_warmup():
     if PRE_RUN_WARMUP_PROMPTS <= 0:
         return
 
-    name, subset, formatter, split = ALL_DATASETS["humaneval"]
+    name, subset, formatter, split = ALL_DATASETS["mmlu_all"]
     examples, split_size = load_prepared_examples(name, subset, formatter, split)
     if not examples:
         print("Skipping pre-run warmup: no Humaneval prompts available.")
@@ -481,32 +532,7 @@ async def run_pre_run_warmup():
     )
     print("Completed pre-run warmup.")
 
-def set_vllm_config(expert, kv, load, step_interval, expert_dump_dir, traffic_dump_dir):
-    if expert > 0 or kv > 0 or load > 0:
-        resp = requests.post(
-          f"{HOST}/load_balancer/weights",
-          json={
-              "kv_block_prefix_routing_weight": kv,
-              "load_score_routing_weight": load,
-              "eplb_step_interval": step_interval, # this is a copy in the frontend
-              "expert_affinity_routing_weight": expert,
-          },
-          timeout=100,
-        )
-        resp.raise_for_status()
-        print("POST /load_balancer/weights ->", resp.json())
-
-
-    # eplb frequency of expert placement updates
-    # number of engine steps / forward passes
-    resp = requests.post(
-      f"{HOST}/eplb/step_interval",
-      json={"step_interval": step_interval},
-      timeout=100,
-    )
-    resp.raise_for_status()
-    print("POST /eplb/step_interval ->", resp.json())
-
+def set_vllm_config():
     # Clearing out kv so that the next experiment does not reuse previous ones
     resp = requests.post(
       f"{HOST}/reset_prefix_cache",
@@ -518,47 +544,6 @@ def set_vllm_config(expert, kv, load, step_interval, expert_dump_dir, traffic_du
     )
     resp.raise_for_status()
     print("POST /reset_prefix_cache -> 200 OK")
-
-
-    resp = requests.post(
-      f"{HOST}/eplb/placement_routing_dump",
-      json={"dump_dir": expert_dump_dir},
-      timeout=100,
-    )
-    resp.raise_for_status()
-
-    resp = requests.post(
-      f"{HOST}/eplb/moe_dispatch_traffic_dump",
-      json={"dump_dir": traffic_dump_dir},
-      timeout=100,
-    )
-    resp.raise_for_status()
-
-    
-    # Checking if the updates are applied
-    if expert > 0 or kv > 0 or load > 0:
-        resp = requests.get(
-          f"{HOST}/load_balancer/weights",
-          timeout=100,
-        )
-        resp.raise_for_status()
-        print("GET /load_balancer/weights ->", resp.json())
-
-    resp = requests.get(
-      f"{HOST}/eplb/step_interval",
-      timeout=100,
-    )
-    resp.raise_for_status()
-    print("GET /eplb/step_interval ->", resp.json())
-
-    resp = requests.get(f"{HOST}/eplb/placement_routing_dump", timeout=100)
-    resp.raise_for_status()
-    print("GET /eplb/placement_routing_dump ->", resp.json())
-
-
-    resp = requests.get(f"{HOST}/eplb/moe_dispatch_traffic_dump", timeout=100)
-    resp.raise_for_status()
-    print("GET /eplb/moe_dispatch_traffic_dump ->", resp.json())
 
 DATASETS = SEND_PROMPTS_DATASETS
 
@@ -598,31 +583,12 @@ def format_summary_lines(results):
 
 
 async def main():
-    expert_weight = float(sys.argv[1]) if len(sys.argv) > 1 else 0.33
-    kv_weight = float(sys.argv[2]) if len(sys.argv) > 2 else 0.33
-    load_weight = float(sys.argv[3]) if len(sys.argv) > 3 else 0.34
-    step_interval = int(sys.argv[4]) if len(sys.argv) > 4 else 30
-    expert_dump_dir = str(sys.argv[5]) if len(sys.argv) > 5 else "traces/"
-    traffic_dump_dir = str(sys.argv[6]) if len(sys.argv) > 6 else "traffic/"
-    summary_dir = str(sys.argv[7]) if len(sys.argv) > 7 else "summary/"
-
-    print(f"Setting LB weights: expert={expert_weight} kv={kv_weight} load={load_weight}")
+    summary_dir = str(sys.argv[1]) if len(sys.argv) > 1 else "summary/"
     results = []
     await run_pre_run_warmup()
 
     for name, subset, formatter, split in DATASETS:
-        expert_trace = build_dump_dir(expert_dump_dir, name, subset, split)
-        os.makedirs(expert_trace, exist_ok=True)
-        traffic_trace = build_dump_dir(traffic_dump_dir, name, subset, split)
-        os.makedirs(traffic_trace, exist_ok=True)
-        set_vllm_config(
-            expert_weight,
-            kv_weight,
-            load_weight,
-            step_interval,
-            expert_trace,
-            traffic_trace
-        )
+        set_vllm_config()
         stats = await run_dataset(name, subset, formatter, split)
         results.append(stats)
         print(

@@ -246,6 +246,13 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return False
 
+    def supports_overlap_execution(self) -> bool:
+        """
+        Indicates whether the backend can execute staged dispatch / compute /
+        combine overlap internally.
+        """
+        return False
+
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
 class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
@@ -408,6 +415,30 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         is equivalent to:
 
         obj.finalize(output, ...)
+        """
+        raise NotImplementedError
+
+    def apply_overlap(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        activation: MoEActivation,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        local_num_experts: int,
+        quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool,
+        run_fused_experts: Callable[..., torch.Tensor],
+        weight_and_reduce_impl: TopKWeightAndReduce,
+    ) -> torch.Tensor:
+        """
+        Optional staged overlap path for prepare/finalize backends that want to
+        own dispatch / compute / combine pipelining end-to-end.
         """
         raise NotImplementedError
 
@@ -1396,6 +1427,61 @@ class FusedMoEKernelModularImpl:
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
+        if (
+            self.prepare_finalize.supports_overlap_execution()
+            and not self.inplace
+        ):
+            if shared_experts is not None:
+                assert shared_experts_input is not None
+                self._maybe_apply_shared_experts(
+                    shared_experts, shared_experts_input
+                )
+
+            def _run_fused_experts(
+                *,
+                a1q: torch.Tensor,
+                a1q_scale: torch.Tensor | None,
+                unit_topk_weights: torch.Tensor,
+                unit_topk_ids: torch.Tensor,
+                expert_tokens_meta: ExpertTokensMetadata | None,
+                unit_expert_map: torch.Tensor | None = expert_map,
+                unit_global_num_experts: int = global_num_experts,
+            ) -> torch.Tensor:
+                return self._fused_experts(
+                    in_dtype=hidden_states.dtype,
+                    a1q=a1q,
+                    a1q_scale=a1q_scale,
+                    w1=w1,
+                    w2=w2,
+                    topk_weights=unit_topk_weights,
+                    topk_ids=unit_topk_ids,
+                    activation=activation,
+                    global_num_experts=unit_global_num_experts,
+                    local_num_experts=local_num_experts,
+                    expert_map=unit_expert_map,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                    expert_tokens_meta=expert_tokens_meta,
+                    output_alias=None,
+                )
+
+            return self.prepare_finalize.apply_overlap(
+                output=output,
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=activation,
+                w1=w1,
+                w2=w2,
+                local_num_experts=local_num_experts,
+                quant_config=self.fused_experts.quant_config,
+                defer_input_quant=self.fused_experts.expects_unquantized_inputs,
+                run_fused_experts=_run_fused_experts,
+                weight_and_reduce_impl=self.fused_experts.finalize_weight_and_reduce_impl(),
+            )
+
         a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
             hidden_states,
             topk_weights,
@@ -1538,7 +1624,10 @@ class FusedMoEKernel:
     @property
     def can_overlap_shared_experts(self) -> bool:
         if isinstance(self.impl, FusedMoEKernelModularImpl):
-            return self.impl.prepare_finalize.supports_async()
+            return (
+                self.impl.prepare_finalize.supports_async()
+                or self.impl.prepare_finalize.supports_overlap_execution()
+            )
         else:
             return False
 

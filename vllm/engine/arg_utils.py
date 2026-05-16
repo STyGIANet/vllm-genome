@@ -1039,6 +1039,41 @@ class EngineArgs:
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
         )
+        parallel_group.add_argument(
+            "--enable-overlap", **parallel_kwargs["enable_overlap"]
+        )
+        parallel_group.add_argument(
+            "--overlap-decomposition-reorder",
+            **parallel_kwargs["overlap_decomposition_reorder"],
+        )
+        parallel_group.add_argument(
+            "--overlap-johnson-estimate",
+            **parallel_kwargs["overlap_johnson_estimate"],
+        )
+        parallel_group.add_argument(
+            "--overlap-comm-alpha",
+            **parallel_kwargs["overlap_comm_alpha"],
+        )
+        parallel_group.add_argument(
+            "--overlap-comm-beta",
+            **parallel_kwargs["overlap_comm_beta"],
+        )
+        parallel_group.add_argument(
+            "--overlap-comp-mfu",
+            **parallel_kwargs["overlap_comp_mfu"],
+        )
+        parallel_group.add_argument(
+            "--overlap-comp-tflops",
+            **parallel_kwargs["overlap_comp_tflops"],
+        )
+        parallel_group.add_argument(
+            "--overlap-comp-mem-bw",
+            **parallel_kwargs["overlap_comp_mem_bw"],
+        )
+        parallel_group.add_argument(
+            "--overlap-johnson-simple-scaler",
+            **parallel_kwargs["overlap_johnson_simple_scaler"],
+        )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
         parallel_group.add_argument(
             "--ubatch-size",

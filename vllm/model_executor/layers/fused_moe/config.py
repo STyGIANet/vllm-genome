@@ -1018,6 +1018,15 @@ class FusedMoEParallelConfig:
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
     enable_eplb: bool  # whether to enable expert load balancing
+    enable_overlap: bool  # whether to overlap nccl all2all comm + compute
+    overlap_decomposition_reorder: str | None
+    overlap_johnson_estimate: str | None
+    overlap_comm_alpha: float | None
+    overlap_comm_beta: float | None
+    overlap_comp_mfu: float | None
+    overlap_comp_tflops: float | None
+    overlap_comp_mem_bw: float | None
+    overlap_johnson_simple_scaler: float | None
 
     @property
     def is_sequence_parallel(self) -> bool:
@@ -1202,6 +1211,21 @@ class FusedMoEParallelConfig:
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
                 enable_eplb=vllm_parallel_config.enable_eplb,
+                enable_overlap=vllm_parallel_config.enable_overlap,
+                overlap_decomposition_reorder=(
+                    vllm_parallel_config.overlap_decomposition_reorder
+                ),
+                overlap_johnson_estimate=(
+                    vllm_parallel_config.overlap_johnson_estimate
+                ),
+                overlap_comm_alpha=vllm_parallel_config.overlap_comm_alpha,
+                overlap_comm_beta=vllm_parallel_config.overlap_comm_beta,
+                overlap_comp_mfu=vllm_parallel_config.overlap_comp_mfu,
+                overlap_comp_tflops=vllm_parallel_config.overlap_comp_tflops,
+                overlap_comp_mem_bw=vllm_parallel_config.overlap_comp_mem_bw,
+                overlap_johnson_simple_scaler=(
+                    vllm_parallel_config.overlap_johnson_simple_scaler
+                ),
             )
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
@@ -1222,6 +1246,19 @@ class FusedMoEParallelConfig:
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
             enable_eplb=vllm_parallel_config.enable_eplb,
+            enable_overlap=vllm_parallel_config.enable_overlap,
+            overlap_decomposition_reorder=(
+                vllm_parallel_config.overlap_decomposition_reorder
+            ),
+            overlap_johnson_estimate=vllm_parallel_config.overlap_johnson_estimate,
+            overlap_comm_alpha=vllm_parallel_config.overlap_comm_alpha,
+            overlap_comm_beta=vllm_parallel_config.overlap_comm_beta,
+            overlap_comp_mfu=vllm_parallel_config.overlap_comp_mfu,
+            overlap_comp_tflops=vllm_parallel_config.overlap_comp_tflops,
+            overlap_comp_mem_bw=vllm_parallel_config.overlap_comp_mem_bw,
+            overlap_johnson_simple_scaler=(
+                vllm_parallel_config.overlap_johnson_simple_scaler
+            ),
         )
 
     @classmethod
@@ -1240,6 +1277,15 @@ class FusedMoEParallelConfig:
             use_ep=False,
             all2all_backend="allgather_reducescatter",
             enable_eplb=False,
+            enable_overlap=False,
+            overlap_decomposition_reorder=None,
+            overlap_johnson_estimate=None,
+            overlap_comm_alpha=None,
+            overlap_comm_beta=None,
+            overlap_comp_mfu=None,
+            overlap_comp_tflops=None,
+            overlap_comp_mem_bw=None,
+            overlap_johnson_simple_scaler=None,
         )
 
 

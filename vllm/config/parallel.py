@@ -183,6 +183,30 @@ class ParallelConfig:
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
+    enable_overlap: bool = False
+    """Enable staged overlap for the nccl_alltoall MoE backend."""
+    overlap_decomposition_reorder: Literal["johnson", "none"] | None = "johnson"
+    """Reordering policy for nccl_alltoall overlap decomposition units.
+
+    Use "johnson" for Johnson ordering or "none" to preserve extraction order.
+    """
+    overlap_johnson_estimate: Literal["simple", "paper"] | None = None
+    """Optional deliverance-style Johnson cost model override.
+
+    If unset, vLLM uses the existing heuristic unit estimator.
+    """
+    overlap_comm_alpha: float | None = None
+    """Average communication latency estimate in microseconds for overlap."""
+    overlap_comm_beta: float | None = None
+    """Average inverse bandwidth estimate in seconds per byte for overlap."""
+    overlap_comp_mfu: float | None = None
+    """Estimated expert compute MFU for paper-style Johnson estimates."""
+    overlap_comp_tflops: float | None = None
+    """Peak accelerator TFLOPS estimate for paper-style Johnson estimates."""
+    overlap_comp_mem_bw: float | None = None
+    """Reserved for deliverance-style memory-bandwidth compute modeling."""
+    overlap_johnson_simple_scaler: float | None = None
+    """Scaling factor for simple Johnson compute estimates."""
 
     max_parallel_loading_workers: int | None = None
     """Maximum number of parallel loading workers when loading model
